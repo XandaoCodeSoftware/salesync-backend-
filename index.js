@@ -270,128 +270,298 @@ app.get('/callback/shopee', async (req, res) => {
 });
 
 // ══════════════════════════════════════════════
-// OAUTH — MAGALU
-// Você solicitou acesso em developers.magazineluiza.com.br (uma única vez)
+// OAUTH — MAGALU (ATUALIZADO)
 // ══════════════════════════════════════════════
 
+// URL para seller conectar conta Magalu
 app.get('/auth/magalu', (req, res) => {
-  const url='https://id.magalu.com/oauth/auth'
-    +`?response_type=code&client_id=${process.env.MAGALU_CLIENT_ID}`
-    +`&redirect_uri=${encodeURIComponent(process.env.MAGALU_REDIRECT_URI)}`
-    +`&scope=orders:read products:read financial:read fulfillment:read`
-    +`&state=${req.query.user_id||''}`;
+  const state = req.query.user_id || '';
+
+  const url =
+    'https://id.magalu.com/oauth/authorize?' +
+    new URLSearchParams({
+      response_type: 'code',
+      client_id: process.env.MAGALU_CLIENT_ID,
+      redirect_uri: process.env.MAGALU_REDIRECT_URI,
+      scope: 'open:order-order-seller:read',
+      state
+    });
+
   res.redirect(url);
 });
 
+// CALLBACK OAuth
 app.get('/callback/magalu', async (req, res) => {
   const { code, state } = req.query;
-  if (!code) return res.redirect('https://salesync.shop?error=magalu_no_code');
+
+  if (!code) {
+    return res.redirect('https://salesync.shop?error=magalu_no_code');
+  }
+
   try {
-    const creds=Buffer.from(`${process.env.MAGALU_CLIENT_ID}:${process.env.MAGALU_CLIENT_SECRET}`).toString('base64');
-    const { data:tk } = await axios.post('https://id.magalu.com/oauth/token',
-      new URLSearchParams({ grant_type:'authorization_code', code, redirect_uri:process.env.MAGALU_REDIRECT_URI }),
-      { headers:{ Authorization:`Basic ${creds}`, 'Content-Type':'application/x-www-form-urlencoded' } }
+
+    // TROCA CODE POR TOKEN
+    const { data: tk } = await axios.post(
+      'https://id.magalu.com/oauth/token',
+      new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: process.env.MAGALU_CLIENT_ID,
+        client_secret: process.env.MAGALU_CLIENT_SECRET,
+        code,
+        redirect_uri: process.env.MAGALU_REDIRECT_URI
+      }),
+      {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        }
+      }
     );
+
+    console.log('[MAGALU TOKEN]', tk);
+
+    // TENTA PEGAR INFORMAÇÕES DO SELLER
+    let sellerId = 'magalu-store';
+    let shopName = 'Loja Magalu';
+
+    try {
+
+      const { data: seller } = await axios.get(
+        'https://api.magalu.com/seller',
+        {
+          headers: {
+            Authorization: `Bearer ${tk.access_token}`
+          }
+        }
+      );
+
+      sellerId = seller.id || seller.seller_id || 'magalu-store';
+      shopName = seller.name || seller.shop_name || 'Loja Magalu';
+
+    } catch (sellerErr) {
+
+      console.log(
+        '[MAGALU SELLER]',
+        sellerErr.response?.data || sellerErr.message
+      );
+
+    }
+
+    // SALVA/ATUALIZA CONTA
     await db.query(`
-      INSERT INTO marketplace_accounts
-        (user_id,platform,platform_shop_id,shop_name,access_token,refresh_token,token_expires_at,mode,is_active)
-      VALUES ($1,'magalu',$2,'Minha Loja Magalu',$3,$4,$5,'both',true)
-      ON CONFLICT (user_id,platform,platform_shop_id) DO UPDATE SET
-        access_token=EXCLUDED.access_token, refresh_token=EXCLUDED.refresh_token,
-        token_expires_at=EXCLUDED.token_expires_at, is_active=true, updated_at=NOW()`,
-      [state, tk.seller_id||'mg-001', tk.access_token, tk.refresh_token,
-       new Date(Date.now()+(tk.expires_in||3600)*1000)]
-    );
-    console.log('[Magalu] ✅ Conectado');
+      INSERT INTO marketplace_accounts (
+        user_id,
+        platform,
+        platform_shop_id,
+        shop_name,
+        access_token,
+        refresh_token,
+        token_expires_at,
+        mode,
+        is_active
+      )
+      VALUES (
+        $1,
+        'magalu',
+        $2,
+        $3,
+        $4,
+        $5,
+        $6,
+        'both',
+        true
+      )
+      ON CONFLICT (user_id, platform, platform_shop_id)
+      DO UPDATE SET
+        access_token = EXCLUDED.access_token,
+        refresh_token = EXCLUDED.refresh_token,
+        token_expires_at = EXCLUDED.token_expires_at,
+        shop_name = EXCLUDED.shop_name,
+        is_active = true,
+        updated_at = NOW()
+    `, [
+      state,
+      String(sellerId),
+      shopName,
+      tk.access_token,
+      tk.refresh_token,
+      new Date(Date.now() + (tk.expires_in || 7200) * 1000)
+    ]);
+
+    console.log(`[MAGALU] ✅ ${shopName} conectado`);
+
     res.redirect('https://salesync.shop?connected=magalu');
-  } catch(e) {
-    console.error('[Magalu]', e.response?.data||e.message);
+
+  } catch (e) {
+
+    console.error(
+      '[MAGALU CALLBACK]',
+      e.response?.data || e.message
+    );
+
     res.redirect('https://salesync.shop?error=magalu_failed');
   }
 });
 
 // ══════════════════════════════════════════════
-// SINCRONIZAÇÃO
+// REFRESH TOKEN — MAGALU
 // ══════════════════════════════════════════════
 
-app.get('/api/sync/:platform', auth, async (req, res) => {
-  const { platform } = req.params;
+async function refreshMagaluToken(account) {
+
   try {
-    const { rows:accounts } = await db.query(
-      `SELECT * FROM marketplace_accounts
-       WHERE user_id=$1 AND platform=$2 AND is_active=true AND access_token IS NOT NULL`,
-      [req.user.id, platform]
+
+    const { data } = await axios.post(
+      'https://id.magalu.com/oauth/token',
+      new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: account.refresh_token,
+        client_id: process.env.MAGALU_CLIENT_ID,
+        client_secret: process.env.MAGALU_CLIENT_SECRET
+      }),
+      {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        }
+      }
     );
-    if (!accounts.length) return res.json({ success:false, error:`Conta ${platform} não conectada` });
-    const acc = accounts[0];
-    const since = acc.last_sync_at ? new Date(acc.last_sync_at) : new Date(Date.now()-7*86400000);
-    let orders = [];
-    if (platform==='mercadolivre') orders=await fetchML(acc,since);
-    else if (platform==='shopee')  orders=await fetchShopee(acc,since);
-    else if (platform==='magalu')  orders=await fetchMagalu(acc,since);
-    let newCount=0;
-    for (const o of orders) {
-      const r = await db.query(`
-        INSERT INTO orders (user_id,account_id,platform,platform_order_id,fulfillment_type,
-          status,buyer_name,total_amount,platform_fee,shipping_fee,tax_amount,order_date)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-        ON CONFLICT (platform,platform_order_id) DO UPDATE SET status=EXCLUDED.status,updated_at=NOW()
-        RETURNING (xmax=0) AS inserted`,
-        [req.user.id,acc.id,o.platform,o.platform_order_id,o.fulfillment_type,
-         o.status,o.buyer_name,o.total_amount,o.platform_fee,o.shipping_fee,o.tax_amount,o.order_date]
-      );
-      if (r.rows[0]?.inserted) newCount++;
-    }
-    await db.query(`UPDATE marketplace_accounts SET last_sync_at=NOW() WHERE id=$1`,[acc.id]);
-    res.json({ success:true, platform, fetched:orders.length, new:newCount });
-  } catch(e) { res.status(500).json({ error:e.message }); }
-});
 
-async function fetchML(acc, since) {
-  const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
-    params: { seller:acc.platform_shop_id, sort:'date_desc', 'order.date_created.from':since.toISOString() },
-    headers: { Authorization:`Bearer ${acc.access_token}` }
-  });
-  return (data.results||[]).map(o=>({
-    platform:'mercadolivre', platform_order_id:String(o.id),
-    fulfillment_type:o.shipping?.logistic_type==='fulfillment'?'full':'normal',
-    status:o.status, buyer_name:o.buyer?.nickname||'',
-    total_amount:o.total_amount||0, platform_fee:o.payments?.[0]?.marketplace_fee||0,
-    shipping_fee:o.shipping?.cost||0, tax_amount:(o.total_amount||0)*0.06, order_date:o.date_created
-  }));
+    await db.query(`
+      UPDATE marketplace_accounts
+      SET
+        access_token = $1,
+        refresh_token = $2,
+        token_expires_at = $3,
+        updated_at = NOW()
+      WHERE id = $4
+    `, [
+      data.access_token,
+      data.refresh_token,
+      new Date(Date.now() + data.expires_in * 1000),
+      account.id
+    ]);
+
+    console.log('[MAGALU] 🔄 Token renovado');
+
+    return data.access_token;
+
+  } catch (e) {
+
+    console.error(
+      '[MAGALU REFRESH]',
+      e.response?.data || e.message
+    );
+
+    return null;
+  }
 }
 
-async function fetchShopee(acc, since) {
-  const ts=Math.floor(Date.now()/1000), path='/api/v2/order/get_order_list';
-  const sign=shopeeSign(process.env.SHOPEE_PARTNER_ID,path,ts,process.env.SHOPEE_PARTNER_KEY);
-  const { data } = await axios.get(`https://partner.shopeemobile.com${path}`, {
-    params:{ partner_id:process.env.SHOPEE_PARTNER_ID, shop_id:acc.platform_shop_id,
-             access_token:acc.access_token, timestamp:ts, sign,
-             time_range_field:'create_time', time_from:Math.floor(since.getTime()/1000),
-             time_to:ts, page_size:50, order_status:'ALL' }
-  });
-  return ((data.response?.order_list)||[]).map(o=>({
-    platform:'shopee', platform_order_id:o.order_sn, fulfillment_type:'normal',
-    status:(o.order_status||'paid').toLowerCase(), buyer_name:o.buyer_username||'',
-    total_amount:o.total_amount||0, platform_fee:(o.total_amount||0)*0.08,
-    shipping_fee:o.actual_shipping_cost||0, tax_amount:(o.total_amount||0)*0.06,
-    order_date:new Date(o.create_time*1000).toISOString()
-  }));
-}
+// ══════════════════════════════════════════════
+// FETCH PEDIDOS — MAGALU
+// ══════════════════════════════════════════════
 
 async function fetchMagalu(acc, since) {
-  const { data } = await axios.get('https://api.magalu.com/v1/orders', {
-    params:{ created_after:since.toISOString(), limit:50 },
-    headers:{ Authorization:`Bearer ${acc.access_token}` }
-  });
-  return ((data.results)||[]).map(o=>({
-    platform:'magalu', platform_order_id:o.id,
-    fulfillment_type:o.fulfillment_type==='magalu'?'full':'normal',
-    status:o.status, buyer_name:o.customer?.name||'',
-    total_amount:o.total||0, platform_fee:o.commission||0,
-    shipping_fee:o.shipping_cost||0, tax_amount:(o.total||0)*0.06, order_date:o.created_at
+
+  let token = acc.access_token;
+
+  // VERIFICA EXPIRAÇÃO
+  if (
+    acc.token_expires_at &&
+    new Date(acc.token_expires_at) <= new Date()
+  ) {
+
+    console.log('[MAGALU] Token expirado, renovando...');
+
+    token = await refreshMagaluToken(acc);
+
+    if (!token) {
+      throw new Error('Não foi possível renovar token Magalu');
+    }
+  }
+
+  const { data } = await axios.get(
+    'https://api.magalu.com/orders',
+    {
+      params: {
+        created_after: since.toISOString(),
+        limit: 50
+      },
+      headers: {
+        Authorization: `Bearer ${token}`
+      }
+    }
+  );
+
+  console.log(
+    `[MAGALU] ${data.results?.length || 0} pedidos encontrados`
+  );
+
+  return (data.results || []).map(o => ({
+
+    platform: 'magalu',
+
+    platform_order_id: String(o.id),
+
+    fulfillment_type:
+      o.fulfillment_type === 'magalu'
+        ? 'full'
+        : 'normal',
+
+    status: o.status || 'paid',
+
+    buyer_name:
+      o.customer?.name ||
+      o.buyer?.name ||
+      'Cliente',
+
+    total_amount:
+      Number(o.total || 0),
+
+    platform_fee:
+      Number(o.commission || 0),
+
+    shipping_fee:
+      Number(o.shipping_cost || 0),
+
+    tax_amount:
+      Number((o.total || 0) * 0.06),
+
+    order_date:
+      o.created_at || new Date().toISOString()
+
   }));
 }
+
+// ══════════════════════════════════════════════
+// WEBHOOK — MAGALU
+// ══════════════════════════════════════════════
+
+app.post('/webhooks/magalu', async (req, res) => {
+
+  try {
+
+    console.log(
+      '[MAGALU WEBHOOK]',
+      JSON.stringify(req.body, null, 2)
+    );
+
+    // TODO:
+    // atualizar pedido
+    // inserir pedido novo
+    // atualizar status
+    // fila async
+
+    res.sendStatus(200);
+
+  } catch (e) {
+
+    console.error(
+      '[MAGALU WEBHOOK ERROR]',
+      e.message
+    );
+
+    res.sendStatus(500);
+  }
+});
 
 app.get('/health', (_,res) => res.json({ status:'ok', app:'SalesSync' }));
 
