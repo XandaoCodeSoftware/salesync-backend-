@@ -36,7 +36,7 @@ function auth(req, res, next) {
 
 app.post('/api/auth/register', async (req, res) => {
   const { name, email, password, cnpj } = req.body;
-  if (!name || !email || !password)
+  if (!name || !email || !password)'
     return res.status(400).json({ error: 'name, email e password são obrigatórios' });
   try {
     const { rows } = await db.query(
@@ -275,25 +275,22 @@ app.get('/callback/shopee', async (req, res) => {
 
 // URL para seller conectar conta Magalu
 app.get('/auth/magalu', (req, res) => {
-
   const state = req.query.user_id || '';
 
-  const params = new URLSearchParams({
-    response_type: 'code',
-    client_id: process.env.MAGALU_CLIENT_ID,
-    redirect_uri: process.env.MAGALU_REDIRECT_URI,
-    scope: 'openid',
-    state
-  });
-
   const url =
-    'https://id.magalu.com/oauth/authorize?' +
-    params.toString();
+    'https://id.magalu.com/login?' +
+    new URLSearchParams({
+      client_id: process.env.MAGALU_CLIENT_ID,
+      redirect_uri: process.env.MAGALU_REDIRECT_URI,
+      scope: 'open:order-order-seller:read',
+      response_type: 'code',
+      choose_tenants: 'true',
+      state
+    }).toString();
 
   console.log('[MAGALU AUTH URL]', url);
 
   res.redirect(url);
-
 });
 
 // CALLBACK OAuth
