@@ -566,6 +566,24 @@ app.post('/webhooks/magalu', async (req, res) => {
   }
 });
 
+app.post('/api/accounts/:platform/disconnect', auth, async (req,res)=>{
+  try{
+    await db.query(`
+      UPDATE marketplace_accounts
+      SET access_token=NULL,
+          refresh_token=NULL,
+          token_expires_at=NULL,
+          is_active=false,
+          updated_at=NOW()
+      WHERE user_id=$1 AND platform=$2
+    `,[req.user.id, req.params.platform]);
+
+    res.json({success:true});
+  }catch(e){
+    res.status(500).json({error:e.message});
+  }
+});
+
 app.get('/health', (_,res) => res.json({ status:'ok', app:'SalesSync' }));
 
 const PORT = process.env.PORT || 3000;
