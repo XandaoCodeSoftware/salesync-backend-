@@ -36,7 +36,7 @@ function auth(req, res, next) {
 
 app.post('/api/auth/register', async (req, res) => {
   const { name, email, password, cnpj } = req.body;
-  if (!name || !email || !password)'
+  if (!name || !email || !password)
     return res.status(400).json({ error: 'name, email e password são obrigatórios' });
   try {
     const { rows } = await db.query(
