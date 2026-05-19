@@ -10,10 +10,7 @@ const jwt     = require('jsonwebtoken');
 require('dotenv').config();
 
 const app = express();
-app.use(cors({
-  origin: ['https://salesync.shop','https://www.salesync.shop','http://localhost:3000','http://localhost:5173'],
-  credentials: true
-}));
+app.use(cors());  // aceita qualquer origem — restrinja depois em produção
 app.use(express.json());
 
 // ─── BANCO SUPABASE ───────────────────────────
@@ -399,6 +396,6 @@ async function fetchMagalu(acc, since) {
 app.get('/health', (_,res) => res.json({ status:'ok', app:'SalesSync' }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`\n⚡ SalesSync rodando em http://localhost:${PORT}\n`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`⚡ SalesSync rodando na porta ${PORT}`);
 });
