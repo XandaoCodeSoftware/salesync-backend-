@@ -275,19 +275,24 @@ app.get('/callback/shopee', async (req, res) => {
 
 // URL para seller conectar conta Magalu
 app.get('/auth/magalu', (req, res) => {
+
   const state = req.query.user_id || '';
+
+  const params = new URLSearchParams({
+    response_type: 'code',
+    client_id: process.env.MAGALU_CLIENT_ID,
+    redirect_uri: process.env.MAGALU_REDIRECT_URI,
+    state
+  });
 
   const url =
     'https://id.magalu.com/oauth/authorize?' +
-    new URLSearchParams({
-      response_type: 'code',
-      client_id: process.env.MAGALU_CLIENT_ID,
-      redirect_uri: process.env.MAGALU_REDIRECT_URI,
-      scope: 'open:order-order-seller:read',
-      state
-    });
+    params.toString();
+
+  console.log('[MAGALU AUTH URL]', url);
 
   res.redirect(url);
+
 });
 
 // CALLBACK OAuth
