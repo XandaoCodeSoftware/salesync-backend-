@@ -282,6 +282,7 @@ app.get('/auth/magalu', (req, res) => {
     response_type: 'code',
     client_id: process.env.MAGALU_CLIENT_ID,
     redirect_uri: process.env.MAGALU_REDIRECT_URI,
+    scope: 'openid',
     state
   });
 
