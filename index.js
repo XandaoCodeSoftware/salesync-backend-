@@ -199,39 +199,66 @@ async function fetchML(acc, days) {
     params: { seller: acc.platform_shop_id, sort: 'date_desc', 'order.date_created.from': since, limit: 50 },
     headers
   });
-  const orders = [];
-  for (const o of (data.results || [])) {
-    const item = o.order_items?.[0];
-    let title = item?.item?.title || '';
-    let image = null;
-    let sku   = item?.item?.seller_sku || item?.item?.seller_custom_field || '';
+  const results = data.results || [];
+
+  // Coleta IDs unicos para busca em lote (max 20 por request)
+  const itemIds = [...new Set(
+    results.map(o => o.order_items?.[0]?.item?.id).filter(Boolean)
+  )];
+
+  // Busca items em lotes de 20 — muito mais rapido que 1 a 1
+  const itemMap = {};
+  for (let i = 0; i < itemIds.length; i += 20) {
+    const batch = itemIds.slice(i, i + 20);
     try {
-      if (item?.item?.id) {
-        const { data: id } = await axios.get(`https://api.mercadolibre.com/items/${item.item.id}`, { headers });
-        title = id.title  || title;
-        image = id.thumbnail || id.pictures?.[0]?.url || null;
-        sku   = id.seller_custom_field || sku;
-      }
-    } catch {}
-    orders.push({
-      id: String(o.id), platform: 'mercadolivre',
-      platform_order_id: String(o.id),
-      shop_name:         acc.shop_name,
-      fulfillment_type:  o.shipping?.logistic_type === 'fulfillment' ? 'full' : 'normal',
-      status:            o.status,
-      buyer_name:        o.buyer?.nickname || '',
-      total_amount:      o.total_amount || 0,
-      platform_fee:      o.payments?.[0]?.marketplace_fee || 0,
-      shipping_fee:      o.shipping?.cost || 0,
-      tax_amount:        (o.total_amount || 0) * 0.06,
-      quantity:          item?.quantity || 1,
-      order_date:        o.date_created,
-      item_title:        title,
-      item_image:        image,
-      item_sku:          sku,
-    });
+      const { data: items } = await axios.get('https://api.mercadolibre.com/items', {
+        params: { ids: batch.join(',') },
+        headers
+      });
+      (Array.isArray(items) ? items : []).forEach(entry => {
+        if (entry.code === 200 && entry.body) {
+          const b = entry.body;
+          // Pega melhor imagem disponivel
+          const raw = b.pictures?.[0]?.url || b.thumbnail || null;
+          itemMap[b.id] = {
+            title: b.title,
+            image: raw,
+            sku:   b.seller_custom_field ||
+                   b.attributes?.find(a => a.id === 'SELLER_SKU')?.value_name || '',
+          };
+        }
+      });
+    } catch(e) { console.error('[ML items batch]', e.message); }
   }
-  return orders;
+
+  const statusMap = {
+    paid:'paid', payment_required:'pending', pending:'pending',
+    confirmed:'paid', shipped:'shipped', delivered:'delivered',
+    cancelled:'cancelled', invalid:'cancelled',
+  };
+
+  return results.map(o => {
+    const item    = o.order_items?.[0];
+    const details = itemMap[item?.item?.id] || {};
+    return {
+      id:               String(o.id),
+      platform:         'mercadolivre',
+      platform_order_id:String(o.id),
+      shop_name:        acc.shop_name,
+      fulfillment_type: o.shipping?.logistic_type === 'fulfillment' ? 'full' : 'normal',
+      status:           statusMap[o.status] || o.status,
+      buyer_name:       o.buyer?.nickname || '',
+      total_amount:     o.total_amount || 0,
+      platform_fee:     o.payments?.[0]?.marketplace_fee || 0,
+      shipping_fee:     o.shipping?.cost || 0,
+      tax_amount:       (o.total_amount || 0) * 0.06,
+      quantity:         item?.quantity || 1,
+      order_date:       o.date_created,
+      item_title:       details.title || item?.item?.title || '',
+      item_image:       details.image || null,
+      item_sku:         details.sku   || item?.item?.seller_sku || '',
+    };
+  });
 }
 
 // ── FETCH SHOPEE ──
@@ -315,9 +342,15 @@ async function fetchMagalu(acc, days) {
   console.log(`[Magalu] Total: ${allOrders.length} pedidos`);
 
   const statusMap = {
-    new:'pending', approved:'paid', invoiced:'shipped',
-    shipped:'shipped', delivered:'delivered', finished:'delivered',
-    cancelled:'cancelled', canceled:'cancelled',
+    new:        'pending',    // aguardando pagamento
+    approved:   'paid',       // aprovado / pago
+    processing: 'paid',       // em processamento
+    invoiced:   'shipped',    // nota fiscal emitida
+    shipped:    'shipped',    // em rota de entrega
+    delivered:  'delivered',  // entregue
+    finished:   'delivered',  // finalizado
+    cancelled:  'cancelled',  // cancelado
+    canceled:   'cancelled',
   };
 
   return allOrders
