@@ -1,5 +1,5 @@
-// SalesSync v3 — Backend Node.js
-// Pedidos buscados em tempo real da API, sem salvar no banco
+// SalesSync v4 — Backend Node.js
+// Magalu API corrigida com endpoint real: GET /seller/v1/orders
 const express = require('express');
 const { Pool } = require('pg');
 const axios   = require('axios');
@@ -15,9 +15,8 @@ app.use(express.json());
 const db = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 db.connect().then(() => console.log('✅ Supabase conectado!')).catch(e => console.error('❌ Erro DB:', e.message));
 
-// Cache em memória para pedidos (evita chamar API a cada request)
-const CACHE = {}; // { userId_platform: { data, ts } }
-const CACHE_TTL = 15 * 60 * 1000; // 15 min
+const CACHE = {};
+const CACHE_TTL = 15 * 60 * 1000;
 
 function auth(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
@@ -75,13 +74,12 @@ app.post('/api/accounts/:platform/disconnect', auth, async (req, res) => {
       `UPDATE marketplace_accounts SET access_token=NULL,refresh_token=NULL,token_expires_at=NULL,is_active=false,updated_at=NOW() WHERE user_id=$1 AND platform=$2`,
       [req.user.id, req.params.platform]
     );
-    // Limpa cache
     Object.keys(CACHE).forEach(k => { if (k.startsWith(req.user.id)) delete CACHE[k]; });
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── PRODUTOS / SKUs ──
+// ── PRODUTOS ──
 app.get('/api/products', auth, async (req, res) => {
   try {
     const { rows } = await db.query('SELECT * FROM products WHERE user_id=$1 AND is_active=true ORDER BY sku', [req.user.id]);
@@ -106,81 +104,65 @@ app.post('/api/products', auth, async (req, res) => {
 app.put('/api/products/:sku/cost', auth, async (req, res) => {
   const { cost } = req.body;
   try {
-    await db.query(
-      'UPDATE products SET cost=$1,updated_at=NOW() WHERE sku=$2 AND user_id=$3',
-      [cost, req.params.sku, req.user.id]
-    );
-    // Invalida cache do usuário para recalcular lucro
+    await db.query('UPDATE products SET cost=$1,updated_at=NOW() WHERE sku=$2 AND user_id=$3', [cost, req.params.sku, req.user.id]);
     Object.keys(CACHE).forEach(k => { if (k.startsWith(req.user.id)) delete CACHE[k]; });
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── FETCH PEDIDOS ML (com foto, título, SKU) ──
+// ── FETCH ML ──
 async function fetchML(acc, days) {
   const since = new Date(Date.now() - days * 86400000).toISOString();
   const headers = { Authorization: `Bearer ${acc.access_token}` };
-
-  // Busca lista de pedidos
   const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
     params: { seller: acc.platform_shop_id, sort: 'date_desc', 'order.date_created.from': since, limit: 50 },
     headers
   });
-
   const orders = [];
   for (const o of (data.results || [])) {
     const item = o.order_items?.[0];
     let title = item?.item?.title || '';
     let image = null;
-    let sku   = item?.item?.seller_sku || '';
-
-    // Busca detalhes do item para foto
+    let sku   = item?.item?.seller_sku || item?.item?.seller_custom_field || '';
     try {
       if (item?.item?.id) {
-        const { data: itemData } = await axios.get(
-          `https://api.mercadolibre.com/items/${item.item.id}`,
-          { headers }
-        );
-        title = itemData.title  || title;
-        image = itemData.thumbnail || itemData.pictures?.[0]?.url || null;
-        sku   = itemData.seller_custom_field || sku;
+        const { data: id } = await axios.get(`https://api.mercadolibre.com/items/${item.item.id}`, { headers });
+        title = id.title  || title;
+        image = id.thumbnail || id.pictures?.[0]?.url || null;
+        sku   = id.seller_custom_field || sku;
       }
     } catch {}
-
     orders.push({
-      id:               String(o.id),
-      platform:         'mercadolivre',
-      platform_order_id:String(o.id),
-      shop_name:        acc.shop_name,
-      fulfillment_type: o.shipping?.logistic_type === 'fulfillment' ? 'full' : 'normal',
-      status:           o.status,
-      buyer_name:       o.buyer?.nickname || '',
-      buyer_id:         String(o.buyer?.id || ''),
-      total_amount:     o.total_amount || 0,
-      platform_fee:     o.payments?.[0]?.marketplace_fee || 0,
-      shipping_fee:     o.shipping?.cost || 0,
-      tax_amount:       (o.total_amount || 0) * 0.06,
-      quantity:         item?.quantity || 1,
-      order_date:       o.date_created,
-      item_title:       title,
-      item_image:       image,
-      item_sku:         sku,
+      id: String(o.id), platform: 'mercadolivre',
+      platform_order_id: String(o.id),
+      shop_name:         acc.shop_name,
+      fulfillment_type:  o.shipping?.logistic_type === 'fulfillment' ? 'full' : 'normal',
+      status:            o.status,
+      buyer_name:        o.buyer?.nickname || '',
+      total_amount:      o.total_amount || 0,
+      platform_fee:      o.payments?.[0]?.marketplace_fee || 0,
+      shipping_fee:      o.shipping?.cost || 0,
+      tax_amount:        (o.total_amount || 0) * 0.06,
+      quantity:          item?.quantity || 1,
+      order_date:        o.date_created,
+      item_title:        title,
+      item_image:        image,
+      item_sku:          sku,
     });
   }
   return orders;
 }
 
-// ── FETCH PEDIDOS SHOPEE ──
+// ── FETCH SHOPEE ──
 function shopeeSign(pid, path, ts, key) {
   return crypto.createHmac('sha256', key).update(`${pid}${path}${ts}`).digest('hex');
 }
 
 async function fetchShopee(acc, days) {
   const since = Math.floor((Date.now() - days * 86400000) / 1000);
-  const ts    = Math.floor(Date.now() / 1000);
-  const path  = '/api/v2/order/get_order_list';
-  const sign  = shopeeSign(process.env.SHOPEE_PARTNER_ID, path, ts, process.env.SHOPEE_PARTNER_KEY);
-
+  const ts = Math.floor(Date.now() / 1000);
+  const path = '/api/v2/order/get_order_list';
+  const sign = shopeeSign(process.env.SHOPEE_PARTNER_ID, path, ts, process.env.SHOPEE_PARTNER_KEY);
   const { data } = await axios.get(`https://partner.shopeemobile.com${path}`, {
     params: {
       partner_id: process.env.SHOPEE_PARTNER_ID, shop_id: acc.platform_shop_id,
@@ -189,29 +171,26 @@ async function fetchShopee(acc, days) {
       time_to: Math.floor(Date.now() / 1000), page_size: 50, order_status: 'ALL'
     }
   });
-
   return ((data.response?.order_list) || []).map(o => ({
-    id:               o.order_sn,
-    platform:         'shopee',
-    platform_order_id:o.order_sn,
-    shop_name:        acc.shop_name,
-    fulfillment_type: 'normal',
-    status:           (o.order_status || 'paid').toLowerCase(),
-    buyer_name:       o.buyer_username || '',
-    buyer_id:         '',
-    total_amount:     o.total_amount || 0,
-    platform_fee:     (o.total_amount || 0) * 0.08,
-    shipping_fee:     o.actual_shipping_cost || 0,
-    tax_amount:       (o.total_amount || 0) * 0.06,
-    quantity:         1,
-    order_date:       new Date(o.create_time * 1000).toISOString(),
-    item_title:       o.item_list?.[0]?.item_name || 'Produto Shopee',
-    item_image:       null,
-    item_sku:         o.item_list?.[0]?.item_sku || '',
+    id: o.order_sn, platform: 'shopee',
+    platform_order_id: o.order_sn,
+    shop_name:         acc.shop_name,
+    fulfillment_type:  'normal',
+    status:            (o.order_status || 'paid').toLowerCase(),
+    buyer_name:        o.buyer_username || '',
+    total_amount:      o.total_amount || 0,
+    platform_fee:      (o.total_amount || 0) * 0.08,
+    shipping_fee:      o.actual_shipping_cost || 0,
+    tax_amount:        (o.total_amount || 0) * 0.06,
+    quantity:          1,
+    order_date:        new Date(o.create_time * 1000).toISOString(),
+    item_title:        o.item_list?.[0]?.item_name || 'Produto Shopee',
+    item_image:        null,
+    item_sku:          o.item_list?.[0]?.item_sku || '',
   }));
 }
 
-// ── FETCH PEDIDOS MAGALU ──
+// ── FETCH MAGALU (endpoint correto: GET /seller/v1/orders) ──
 async function refreshMagaluToken(account) {
   try {
     const { data } = await axios.post('https://id.magalu.com/oauth/token',
@@ -223,59 +202,103 @@ async function refreshMagaluToken(account) {
       `UPDATE marketplace_accounts SET access_token=$1,refresh_token=$2,token_expires_at=$3,updated_at=NOW() WHERE id=$4`,
       [data.access_token, data.refresh_token, new Date(Date.now()+data.expires_in*1000), account.id]
     );
+    console.log('[Magalu] 🔄 Token renovado');
     return data.access_token;
-  } catch(e) { console.error('[MAGALU REFRESH]', e.message); return null; }
+  } catch(e) { console.error('[Magalu Refresh]', e.message); return null; }
 }
 
 async function fetchMagalu(acc, days) {
   let token = acc.access_token;
   if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date()) {
     token = await refreshMagaluToken(acc);
-    if (!token) throw new Error('Token Magalu expirado');
+    if (!token) throw new Error('Token Magalu expirado e não renovado');
   }
+
   const since = new Date(Date.now() - days * 86400000).toISOString();
-  const { data } = await axios.get('https://api.magalu.com/orders', {
-    params: { created_after: since, limit: 50 },
-    headers: { Authorization: `Bearer ${token}` }
+
+  // Endpoint correto da API Magalu Open API
+  const { data } = await axios.get('https://api.magalu.com/seller/v1/orders', {
+    params: {
+      created_at__gte: since,   // filtro de data
+      _limit: 100,
+      _offset: 0
+    },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    }
   });
-  return ((data.results) || []).map(o => ({
-    id:               String(o.id),
-    platform:         'magalu',
-    platform_order_id:String(o.id),
-    shop_name:        acc.shop_name,
-    fulfillment_type: o.fulfillment_type === 'magalu' ? 'full' : 'normal',
-    status:           o.status || 'paid',
-    buyer_name:       o.customer?.name || '',
-    buyer_id:         '',
-    total_amount:     Number(o.total || 0),
-    platform_fee:     Number(o.commission || 0),
-    shipping_fee:     Number(o.shipping_cost || 0),
-    tax_amount:       Number((o.total || 0) * 0.06),
-    quantity:         1,
-    order_date:       o.created_at || new Date().toISOString(),
-    item_title:       o.items?.[0]?.title || 'Produto Magalu',
-    item_image:       o.items?.[0]?.image || null,
-    item_sku:         o.items?.[0]?.sku   || '',
-  }));
+
+  console.log(`[Magalu] ${data.results?.length || 0} pedidos encontrados`);
+
+  // Estrutura real do response Magalu:
+  // results[].id, results[].code, results[].status, results[].created_at
+  // results[].customer.name
+  // results[].deliveries[].amounts.total, deliveries[].amounts.freight, deliveries[].amounts.tax
+  // results[].deliveries[].items[].product.title, .sku, .image_url, .quantity, .price
+
+  return (data.results || []).map(o => {
+    const delivery = o.deliveries?.[0] || {};
+    const item     = delivery.items?.[0] || {};
+    const amounts  = delivery.amounts   || {};
+
+    // valores em centavos — normalizer = 100
+    const norm       = amounts.normalizer || 100;
+    const total      = (amounts.total     || 0) / norm;
+    const freight    = ((amounts.freight?.total) || 0) / norm;
+    const tax        = ((amounts.tax)      || 0) / norm;
+    const discount   = ((amounts.discount?.total) || 0) / norm;
+    const commission = total * 0.12; // ~12% comissão estimada (Magalu não expõe direto)
+
+    // Status mapping
+    const statusMap = {
+      new:        'pending',
+      approved:   'paid',
+      invoiced:   'shipped',
+      shipped:    'shipped',
+      delivered:  'delivered',
+      cancelled:  'cancelled',
+      canceled:   'cancelled',
+      finished:   'delivered',
+    };
+
+    return {
+      id:               String(o.id || o.code),
+      platform:         'magalu',
+      platform_order_id:String(o.code || o.id),
+      shop_name:        acc.shop_name,
+      fulfillment_type: delivery.fulfillment_type === 'fulfillment' ? 'full' : 'normal',
+      status:           statusMap[o.status] || o.status || 'paid',
+      buyer_name:       o.customer?.name || '',
+      total_amount:     total,
+      platform_fee:     commission,
+      shipping_fee:     freight,
+      tax_amount:       tax,
+      quantity:         item.quantity || 1,
+      order_date:       o.created_at || o.purchased_at || new Date().toISOString(),
+      item_title:       item.product?.title || item.title || item.description || 'Produto Magalu',
+      item_image:       item.product?.image_url || item.image_url || item.thumbnail || null,
+      item_sku:         item.product?.sku || item.sku || item.seller_sku || '',
+    };
+  });
 }
 
-// ── ENRIQUECE PEDIDOS COM CUSTO DO PRODUTO ──
+// ── ENRIQUECE COM CUSTOS ──
 async function enrichWithCosts(orders, userId) {
-  const { rows: products } = await db.query('SELECT sku, cost FROM products WHERE user_id=$1', [userId]);
+  const { rows } = await db.query('SELECT sku, cost FROM products WHERE user_id=$1', [userId]);
   const costMap = {};
-  products.forEach(p => { costMap[p.sku] = parseFloat(p.cost || 0); });
-
+  rows.forEach(p => { costMap[p.sku] = parseFloat(p.cost || 0); });
   return orders.map(o => {
-    const cost        = costMap[o.item_sku] || 0;
-    const total_cost  = cost * (o.quantity || 1);
-    const net_revenue = o.total_amount - o.platform_fee - o.shipping_fee - o.tax_amount;
-    const profit      = o.status === 'cancelled' ? 0 : (net_revenue - total_cost);
-    const margin      = o.total_amount > 0 ? (profit / o.total_amount * 100) : 0;
+    const cost       = costMap[o.item_sku] || 0;
+    const total_cost = cost * (o.quantity || 1);
+    const net_revenue= o.total_amount - o.platform_fee - o.shipping_fee - o.tax_amount;
+    const profit     = o.status === 'cancelled' ? 0 : (net_revenue - total_cost);
+    const margin     = o.total_amount > 0 ? (profit / o.total_amount * 100) : 0;
     return { ...o, total_cost, net_revenue, profit, profit_margin_pct: margin };
   });
 }
 
-// ── API PEDIDOS (tempo real, sem salvar no banco) ──
+// ── API PEDIDOS ──
 app.get('/api/orders', auth, async (req, res) => {
   const { period = '7', platform } = req.query;
   const days = parseInt(period);
@@ -292,94 +315,41 @@ app.get('/api/orders', auth, async (req, res) => {
     for (const acc of filtered) {
       const cacheKey = `${req.user.id}_${acc.platform}_${days}`;
       const cached   = CACHE[cacheKey];
-
       if (cached && (Date.now() - cached.ts) < CACHE_TTL) {
-        allOrders = allOrders.concat(cached.data);
-        continue;
+        allOrders = allOrders.concat(cached.data); continue;
       }
-
       try {
         let orders = [];
         if (acc.platform === 'mercadolivre') orders = await fetchML(acc, days);
         else if (acc.platform === 'shopee')  orders = await fetchShopee(acc, days);
         else if (acc.platform === 'magalu')  orders = await fetchMagalu(acc, days);
-
         CACHE[cacheKey] = { data: orders, ts: Date.now() };
         allOrders = allOrders.concat(orders);
-
-        // Atualiza last_sync
         await db.query(`UPDATE marketplace_accounts SET last_sync_at=NOW() WHERE id=$1`, [acc.id]);
       } catch(e) {
         console.error(`[FETCH ${acc.platform}]`, e.message);
       }
     }
 
-    // Enriquece com custo do produto
     const enriched = await enrichWithCosts(allOrders, req.user.id);
-
-    // Ordena por data
     enriched.sort((a, b) => new Date(b.order_date) - new Date(a.order_date));
-
     res.json({ success: true, data: enriched, total: enriched.length });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── DASHBOARD (calculado dos pedidos em tempo real) ──
-app.get('/api/dashboard', auth, async (req, res) => {
-  const { period = '7', platform } = req.query;
-  try {
-    // Reutiliza a busca de pedidos
-    const ordersRes = await axios.get(`http://localhost:${process.env.PORT||3000}/api/orders?period=${period}${platform?'&platform='+platform:''}`, {
-      headers: { Authorization: req.headers.authorization }
-    });
-    const orders = ordersRes.data.data || [];
-    const paid   = orders.filter(o => o.status !== 'cancelled');
-    const canceled = orders.filter(o => o.status === 'cancelled');
-
-    const sum = (arr, key) => arr.reduce((s, o) => s + parseFloat(o[key]||0), 0);
-
-    const faturamento = sum(paid, 'total_amount');
-    const lucro       = sum(paid, 'profit');
-    const tarifas     = sum(paid, 'platform_fee');
-    const frete       = sum(paid, 'shipping_fee');
-    const impostos    = sum(paid, 'tax_amount');
-    const custos      = sum(paid, 'total_cost');
-    const ticket_medio= paid.length ? faturamento / paid.length : 0;
-    const margem_media= faturamento > 0 ? (lucro / faturamento * 100) : 0;
-
-    res.json({
-      success: true,
-      data: {
-        total_orders: paid.length,
-        cancelados:   canceled.length,
-        faturamento, lucro, tarifas, frete, impostos, custos,
-        ticket_medio, margem_media
-      }
-    });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// ── SYNC MANUAL (invalida cache e força nova busca) ──
+// ── SYNC (invalida cache) ──
 app.get('/api/sync/:platform', auth, async (req, res) => {
-  const { platform } = req.params;
-  // Invalida cache para forçar nova busca
-  Object.keys(CACHE).forEach(k => {
-    if (k.startsWith(`${req.user.id}_${platform}`)) delete CACHE[k];
-  });
-  res.json({ success: true, message: 'Cache invalidado — próxima requisição buscará dados frescos' });
+  Object.keys(CACHE).forEach(k => { if (k.startsWith(`${req.user.id}_${req.params.platform}`)) delete CACHE[k]; });
+  res.json({ success: true });
 });
 
-// ── SYNC AUTOMÁTICO (a cada 15 min, invalida cache de todos usuários) ──
+// Auto-expirar cache a cada 15 min
 setInterval(() => {
   const now = Date.now();
-  let cleared = 0;
-  Object.keys(CACHE).forEach(k => {
-    if ((now - CACHE[k].ts) >= CACHE_TTL) { delete CACHE[k]; cleared++; }
-  });
-  if (cleared) console.log(`[AUTO-SYNC] ${cleared} caches expirados — próximas requisições buscarão dados frescos`);
+  Object.keys(CACHE).forEach(k => { if ((now - CACHE[k].ts) >= CACHE_TTL) delete CACHE[k]; });
 }, CACHE_TTL);
 
-// ── OAUTH — MERCADO LIVRE ──
+// ── OAUTH ML ──
 app.get('/auth/mercadolivre', (req, res) => {
   const state = req.query.user_id || '';
   res.redirect('https://auth.mercadolivre.com.br/authorization'
@@ -408,12 +378,11 @@ app.get('/callback/mercadolivre', async (req, res) => {
       [state, String(tk.user_id), info.nickname, info.email,
        tk.access_token, tk.refresh_token, new Date(Date.now()+tk.expires_in*1000)]
     );
-    console.log(`[ML] ✅ ${info.nickname} conectado`);
     res.redirect('https://salesync.shop?connected=mercadolivre');
   } catch(e) { console.error('[ML]', e.response?.data||e.message); res.redirect('https://salesync.shop?error=ml_failed'); }
 });
 
-// ── OAUTH — SHOPEE ──
+// ── OAUTH SHOPEE ──
 app.get('/auth/shopee', (req, res) => {
   const ts=Math.floor(Date.now()/1000), path='/api/v2/shop/auth_partner';
   const sign=shopeeSign(process.env.SHOPEE_PARTNER_ID, path, ts, process.env.SHOPEE_PARTNER_KEY);
@@ -444,12 +413,16 @@ app.get('/callback/shopee', async (req, res) => {
   } catch(e) { console.error('[Shopee]', e.response?.data||e.message); res.redirect('https://salesync.shop?error=shopee_failed'); }
 });
 
-// ── OAUTH — MAGALU ──
+// ── OAUTH MAGALU ──
 app.get('/auth/magalu', (req, res) => {
   const state = req.query.user_id || '';
   res.redirect('https://id.magalu.com/login?' + new URLSearchParams({
-    client_id: process.env.MAGALU_CLIENT_ID, redirect_uri: process.env.MAGALU_REDIRECT_URI,
-    scope: 'open:order-order-seller:read', response_type: 'code', choose_tenants: 'true', state
+    client_id: process.env.MAGALU_CLIENT_ID,
+    redirect_uri: process.env.MAGALU_REDIRECT_URI,
+    scope: 'open:order-order-seller:read open:order-delivery-seller:read',
+    response_type: 'code',
+    choose_tenants: 'true',
+    state
   }).toString());
 });
 
@@ -462,25 +435,33 @@ app.get('/callback/magalu', async (req, res) => {
         client_secret:process.env.MAGALU_CLIENT_SECRET, code, redirect_uri:process.env.MAGALU_REDIRECT_URI }),
       { headers: { 'Content-Type':'application/x-www-form-urlencoded' } }
     );
+    // Busca nome da loja
     let sellerId='magalu-store', shopName='Loja Magalu';
     try {
-      const { data: seller } = await axios.get('https://api.magalu.com/seller', { headers: { Authorization:`Bearer ${tk.access_token}` } });
-      sellerId = seller.id || 'magalu-store'; shopName = seller.name || 'Loja Magalu';
-    } catch(se) { console.log('[MAGALU SELLER]', se.message); }
+      // Tenta pegar info do seller
+      const { data: sellerInfo } = await axios.get('https://api.magalu.com/seller/v1/me', {
+        headers: { Authorization: `Bearer ${tk.access_token}` }
+      });
+      sellerId = sellerInfo.id || sellerInfo.seller_id || 'magalu-store';
+      shopName = sellerInfo.name || sellerInfo.trade_name || 'Loja Magalu';
+    } catch(se) {
+      console.log('[Magalu seller info]', se.response?.data || se.message);
+    }
     await db.query(`
       INSERT INTO marketplace_accounts (user_id,platform,platform_shop_id,shop_name,access_token,refresh_token,token_expires_at,mode,is_active)
       VALUES ($1,'magalu',$2,$3,$4,$5,$6,'both',true)
       ON CONFLICT (user_id,platform,platform_shop_id) DO UPDATE SET
         access_token=EXCLUDED.access_token,refresh_token=EXCLUDED.refresh_token,
         token_expires_at=EXCLUDED.token_expires_at,shop_name=EXCLUDED.shop_name,is_active=true,updated_at=NOW()`,
-      [state, String(sellerId), shopName, tk.access_token, tk.refresh_token, new Date(Date.now()+(tk.expires_in||7200)*1000)]
+      [state, String(sellerId), shopName, tk.access_token, tk.refresh_token,
+       new Date(Date.now()+(tk.expires_in||7200)*1000)]
     );
     console.log(`[Magalu] ✅ ${shopName} conectado`);
     res.redirect('https://salesync.shop?connected=magalu');
   } catch(e) { console.error('[Magalu]', e.response?.data||e.message); res.redirect('https://salesync.shop?error=magalu_failed'); }
 });
 
-app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:'3.0' }));
+app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:'4.0' }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v3 rodando na porta ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v4 rodando na porta ${PORT}`));
