@@ -201,10 +201,42 @@ ${orders.map(o => {
   } catch(e) { res.send(`<pre style="padding:20px;color:red">${e.message}\n${e.stack}</pre>`); }
 });
 
+
+// ── REFRESH TOKEN ML ──
+async function refreshMLToken(account) {
+  try {
+    const { data } = await axios.post('https://api.mercadolibre.com/oauth/token',
+      new URLSearchParams({
+        grant_type: 'refresh_token',
+        client_id: process.env.ML_CLIENT_ID,
+        client_secret: process.env.ML_CLIENT_SECRET,
+        refresh_token: account.refresh_token
+      }),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+    );
+    await db.query(
+      `UPDATE marketplace_accounts SET access_token=$1, refresh_token=$2, token_expires_at=$3, updated_at=NOW() WHERE id=$4`,
+      [data.access_token, data.refresh_token, new Date(Date.now() + data.expires_in * 1000), account.id]
+    );
+    console.log('[ML] 🔄 Token renovado para', account.shop_name);
+    return data.access_token;
+  } catch(e) {
+    console.error('[ML Refresh]', e.response?.data || e.message);
+    return null;
+  }
+}
+
 // ── FETCH ML ──
 async function fetchML(acc, days) {
+  // Verifica e renova token se necessário
+  let token = acc.access_token;
+  if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 5*60*1000)) {
+    console.log('[ML] Token expirando, renovando...');
+    const newToken = await refreshMLToken(acc);
+    if (newToken) token = newToken;
+  }
   const since = new Date(Date.now() - days * 86400000).toISOString();
-  const headers = { Authorization: `Bearer ${acc.access_token}` };
+  const headers = { Authorization: `Bearer ${token}` };
   const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
     params: { seller: acc.platform_shop_id, sort: 'date_desc', 'order.date_created.from': since, limit: 50 },
     headers
