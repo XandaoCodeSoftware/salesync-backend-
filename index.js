@@ -127,7 +127,7 @@ app.get('/debug/magalu', auth, async (req, res) => {
     let rawData = null, endpoint = '', error = '';
     try {
       const { data } = await axios.get('https://api.magalu.com/seller/v1/orders', {
-        params: { created_at__gte: since, _limit: 50, _sort: "created_at", _order: "desc" },
+        params: { created_at__gte: since, _limit: 50, _sort: "created_at:desc" },
         headers: { Authorization: `Bearer ${acc.access_token}` }
       });
       rawData = data; endpoint = 'https://api.magalu.com/seller/v1/orders';
@@ -297,7 +297,7 @@ async function fetchMagalu(acc, days) {
   // Pagina todos os resultados
   while (true) {
     const { data } = await axios.get('https://api.magalu.com/seller/v1/orders', {
-      params: { created_at__gte: since, _limit: limit, _offset: offset, _sort: "created_at", _order: "desc" },
+      params: { created_at__gte: since, _limit: limit, _offset: offset, _sort: "created_at:desc" },
       headers: { Authorization: `Bearer ${token}` }
     });
 
