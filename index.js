@@ -575,14 +575,20 @@ app.get('/callback/shopee', async (req, res) => {
 // ── OAUTH MAGALU ──
 app.get('/auth/magalu', (req, res) => {
   const state = req.query.user_id || '';
-  res.redirect('https://id.magalu.com/login?' + new URLSearchParams({
+
+  const url = 'https://id.magalu.com/login?' + new URLSearchParams({
     client_id: process.env.MAGALU_CLIENT_ID,
     redirect_uri: process.env.MAGALU_REDIRECT_URI,
-    scope: 'open:order-order-seller:read open:order-delivery-seller:read',
-    response_type: 'code', choose_tenants: 'true', state
-  }).toString());
-});
+    scope: 'open:order-order-seller:read',
+    response_type: 'code',
+    choose_tenants: 'true',
+    state
+  }).toString();
 
+  console.log('[MAGALU AUTH URL]', url);
+
+  res.redirect(url);
+});
 app.get('/callback/magalu', async (req, res) => {
   const { code, state } = req.query;
   if (!code) return res.redirect('https://salesync.shop?error=magalu_no_code');
@@ -722,3 +728,4 @@ app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v4.1 rodando na porta ${PORT}`));
+
