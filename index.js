@@ -114,6 +114,16 @@ app.put('/api/products/:sku/cost', auth, async (req, res) => {
 });
 
 // ── DEBUG MAGALU ──
+
+// Debug por token na query string (para abrir direto no browser)
+app.get('/debug/:platform', async (req, res, next) => {
+  const token = req.query.token;
+  if (!token) return next();
+  try {
+    req.user = require('jsonwebtoken').verify(token, process.env.JWT_SECRET);
+    next();
+  } catch { res.status(401).send('Token inválido'); }
+});
 app.get('/debug/magalu', auth, async (req, res) => {
   const days = parseInt(req.query.days || '30');
   try {
@@ -550,17 +560,18 @@ app.get('/callback/magalu', async (req, res) => {
         client_secret:process.env.MAGALU_CLIENT_SECRET, code, redirect_uri:process.env.MAGALU_REDIRECT_URI }),
       { headers: { 'Content-Type':'application/x-www-form-urlencoded' } }
     );
-    // Shop name via seller da primeira delivery quando disponível
+    // Nome real da loja via primeiro pedido
     let sellerId = 'magalu-store', shopName = 'Loja Magalu';
     try {
-      // Tenta pegar nome da loja buscando um pedido recente
       const { data: sample } = await axios.get('https://api.magalu.com/seller/v1/orders', {
-        params: { _limit: 1 }, headers: { Authorization: `Bearer ${tk.access_token}` }
+        params: { _limit: 1, _sort: 'created_at:desc' },
+        headers: { Authorization: `Bearer ${tk.access_token}` }
       });
-      const sellerFromOrder = sample.results?.[0]?.deliveries?.[0]?.seller;
-      if (sellerFromOrder) {
-        sellerId = sellerFromOrder.id || 'magalu-store';
-        shopName = sellerFromOrder.name || 'Loja Magalu';
+      const seller = sample.results?.[0]?.deliveries?.[0]?.seller;
+      if (seller?.name) {
+        sellerId = seller.id || 'magalu-store';
+        shopName = seller.name; // nome real: ex "levelupshops"
+        console.log('[Magalu] Nome da loja:', shopName);
       }
     } catch(se) { console.log('[Magalu seller name]', se.message); }
 
@@ -576,6 +587,103 @@ app.get('/callback/magalu', async (req, res) => {
     console.log(`[Magalu] ✅ ${shopName} conectado`);
     res.redirect('https://salesync.shop?connected=magalu');
   } catch(e) { console.error('[Magalu]', e.response?.data||e.message); res.redirect('https://salesync.shop?error=magalu_failed'); }
+});
+
+
+// ══ DEBUG MERCADO LIVRE ══
+app.get('/debug/mercadolivre', auth, async (req, res) => {
+  const days = parseInt(req.query.days || '30');
+  try {
+    const { rows } = await db.query(
+      `SELECT * FROM marketplace_accounts WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND access_token IS NOT NULL LIMIT 1`,
+      [req.user.id]
+    );
+    if (!rows.length) return res.send('<h2 style="font-family:sans-serif;padding:20px;color:red">Mercado Livre não conectado</h2>');
+    const acc = rows[0];
+    const since = new Date(Date.now() - days * 86400000).toISOString();
+    let rawData = null, error = '';
+    try {
+      const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
+        params: { seller: acc.platform_shop_id, sort: 'date_desc', 'order.date_created.from': since, limit: 20 },
+        headers: { Authorization: `Bearer ${acc.access_token}` }
+      });
+      rawData = data;
+    } catch(e) { error = e.response?.status + ' ' + JSON.stringify(e.response?.data || e.message); }
+
+    const orders = rawData?.results || [];
+
+    // Busca items em lote
+    const itemIds = [...new Set(orders.map(o => o.order_items?.[0]?.item?.id).filter(Boolean))];
+    const itemMap = {};
+    for (let i = 0; i < itemIds.length; i += 20) {
+      try {
+        const { data: items } = await axios.get('https://api.mercadolibre.com/items', {
+          params: { ids: itemIds.slice(i, i+20).join(',') },
+          headers: { Authorization: `Bearer ${acc.access_token}` }
+        });
+        (Array.isArray(items)?items:[]).forEach(entry => {
+          if (entry.code === 200 && entry.body) {
+            const b = entry.body;
+            itemMap[b.id] = {
+              title: b.title,
+              image: b.pictures?.[0]?.url || b.thumbnail || null,
+              sku: b.seller_custom_field || b.attributes?.find(a=>a.id==='SELLER_SKU')?.value_name || '',
+              logistic_type: b.shipping?.logistic_type || ''
+            };
+          }
+        });
+      } catch(e) { console.error('[ML debug items]', e.message); }
+    }
+
+    const html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"/>
+<title>Debug ML</title>
+<style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:'Segoe UI',sans-serif;background:#0D1117;color:#e6edf3;padding:20px;}
+h1{color:#FFE600;margin-bottom:4px;}.sub{color:#64748B;font-size:13px;margin-bottom:20px;}
+.section{background:#161B26;border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:16px;margin-bottom:16px;}
+.section h2{font-size:13px;color:#94A3B8;text-transform:uppercase;letter-spacing:.6px;margin-bottom:12px;}
+pre{background:#0D1117;border-radius:8px;padding:12px;overflow-x:auto;font-size:11px;color:#38BDF8;border:1px solid rgba(255,255,255,.06);}
+.order-card{background:#1E2535;border-radius:8px;padding:12px;margin-bottom:10px;display:flex;gap:12px;}
+.order-img{width:60px;height:60px;border-radius:6px;object-fit:cover;flex-shrink:0;}
+.badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700;}
+.green{background:rgba(16,185,129,.15);color:#10B981;}.red{background:rgba(244,63,94,.12);color:#F43F5E;}
+.yellow{background:rgba(251,191,36,.12);color:#FBBF24;}.blue{background:rgba(56,189,248,.12);color:#38BDF8;}
+.info-row{display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.04);}
+.l{color:#64748B;}.v{color:#F8FAFC;font-weight:600;}</style></head><body>
+<h1>🟡 Debug Mercado Livre</h1>
+<div class="sub">Últimos ${days} dias · ${new Date().toLocaleString('pt-BR')}</div>
+${error?`<div style="background:rgba(244,63,94,.1);border:1px solid rgba(244,63,94,.3);border-radius:8px;padding:12px;color:#F43F5E;margin-bottom:16px">${error}</div>`:''}
+<div class="section"><h2>Conta</h2>
+<div class="info-row"><span class="l">Shop ID</span><span class="v">${acc.platform_shop_id}</span></div>
+<div class="info-row"><span class="l">Nome (nickname)</span><span class="v">${acc.shop_name}</span></div>
+<div class="info-row"><span class="l">Token expira</span><span class="v">${acc.token_expires_at?new Date(acc.token_expires_at).toLocaleString('pt-BR'):'—'}</span></div>
+</div>
+<div class="section"><h2>${orders.length} pedidos · ${itemIds.length} items buscados</h2>
+${orders.map(o => {
+  const item = o.order_items?.[0];
+  const details = itemMap[item?.item?.id] || {};
+  const isFull = o.shipping?.logistic_type === 'fulfillment' || details.logistic_type === 'fulfillment';
+  const sc = {paid:'green',payment_required:'yellow',confirmed:'green',shipped:'blue',delivered:'green',cancelled:'red'}[o.status]||'yellow';
+  return `<div class="order-card">
+    ${details.image?`<img class="order-img" src="${details.image}" onerror="this.src=''"/>`:'<div style="width:60px;height:60px;border-radius:6px;background:#0D1117;display:flex;align-items:center;justify-content:center;font-size:24px;flex-shrink:0">📦</div>'}
+    <div style="flex:1">
+      <div style="font-weight:600;margin-bottom:4px">${details.title||item?.item?.title||'—'}</div>
+      <div style="font-size:11px;color:#64748B;display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
+        <span>ID: ${o.id}</span>
+        <span>SKU: <strong style="color:#A855F7">${details.sku||item?.item?.seller_sku||'—'}</strong></span>
+        <span class="badge ${sc}">${o.status}</span>
+        <span class="badge ${isFull?'blue':'yellow'}">${isFull?'📦 FULL':'🏪 Normal'}</span>
+        <span>R$ ${o.total_amount?.toFixed(2)||'0'}</span>
+        <span>${new Date(o.date_created).toLocaleDateString('pt-BR')}</span>
+      </div>
+    </div>
+  </div>`;
+}).join('')}
+</div>
+<div class="section"><h2>JSON do primeiro pedido</h2><pre>${JSON.stringify(orders[0],null,2)}</pre></div>
+<div class="section"><h2>Item details (primeiro)</h2><pre>${JSON.stringify(Object.values(itemMap)[0],null,2)}</pre></div>
+</body></html>`;
+    res.send(html);
+  } catch(e) { res.send(`<pre style="padding:20px;color:red">${e.message}</pre>`); }
 });
 
 app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:'4.1' }));
