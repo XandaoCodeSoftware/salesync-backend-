@@ -1,4 +1,5 @@
-// SalesSync v4 — Backend Node.js
+// SalesSync v4.1 — Backend Node.js
+// Magalu corrigido com estrutura real da API
 const express = require('express');
 const { Pool } = require('pg');
 const axios   = require('axios');
@@ -16,6 +17,9 @@ db.connect().then(() => console.log('✅ Supabase conectado!')).catch(e => conso
 
 const CACHE = {};
 const CACHE_TTL = 15 * 60 * 1000;
+
+// CPFs de teste do ambiente Magalu — filtrar fora
+const MAGALU_TEST_DOCUMENTS = ['39743407006', '00000000000', '12345678909'];
 
 function auth(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
@@ -109,11 +113,7 @@ app.put('/api/products/:sku/cost', auth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ══════════════════════════════════════════════════════
-// DEBUG MAGALU — endpoint visual para ver resposta bruta
-// Acesse: GET /debug/magalu?days=7
-// Retorna página HTML bonita com todos os pedidos crus
-// ══════════════════════════════════════════════════════
+// ── DEBUG MAGALU ──
 app.get('/debug/magalu', auth, async (req, res) => {
   const days = parseInt(req.query.days || '30');
   try {
@@ -122,151 +122,73 @@ app.get('/debug/magalu', auth, async (req, res) => {
       [req.user.id]
     );
     if (!rows.length) return res.send('<h2 style="font-family:sans-serif;padding:20px;color:red">Magalu não conectado</h2>');
-
     const acc   = rows[0];
-    let token   = acc.access_token;
     const since = new Date(Date.now() - days * 86400000).toISOString();
-
-    // Tenta o endpoint principal
-    let rawData  = null;
-    let endpoint = '';
-    let error    = null;
-
-    const endpoints = [
-      { url: 'https://api.magalu.com/seller/v1/orders', params: { created_at__gte: since, _limit: 50 } },
-      { url: 'https://api.magalu.com/v1/orders',        params: { created_after: since, limit: 50 } },
-      { url: 'https://api.magalu.com/orders',           params: { created_after: since, limit: 50 } },
-    ];
-
-    for (const ep of endpoints) {
-      try {
-        const { data } = await axios.get(ep.url, {
-          params: ep.params,
-          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
-        });
-        rawData  = data;
-        endpoint = ep.url;
-        break;
-      } catch(e) {
-        error = `${ep.url} → ${e.response?.status} ${JSON.stringify(e.response?.data || e.message)}`;
-        console.log('[DEBUG MAGALU]', error);
-      }
-    }
-
-    // Tenta também /seller/v1/me para ver info da conta
-    let sellerInfo = null;
+    let rawData = null, endpoint = '', error = '';
     try {
-      const { data } = await axios.get('https://api.magalu.com/seller/v1/me', {
-        headers: { Authorization: `Bearer ${token}` }
+      const { data } = await axios.get('https://api.magalu.com/seller/v1/orders', {
+        params: { created_at__gte: since, _limit: 50 },
+        headers: { Authorization: `Bearer ${acc.access_token}` }
       });
-      sellerInfo = data;
-    } catch(e) { sellerInfo = { error: e.response?.data || e.message }; }
-
-    // Monta HTML de debug bonito
-    const orders = rawData?.results || rawData?.data || (Array.isArray(rawData) ? rawData : []);
-
-    const html = `<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Debug Magalu — SalesSync</title>
-<style>
-  *{box-sizing:border-box;margin:0;padding:0;}
-  body{font-family:'Segoe UI',sans-serif;background:#0D1117;color:#e6edf3;padding:20px;}
-  h1{color:#A855F7;margin-bottom:4px;}
-  .sub{color:#64748B;font-size:13px;margin-bottom:20px;}
-  .section{background:#161B26;border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:16px;margin-bottom:16px;}
-  .section h2{font-size:13px;color:#94A3B8;text-transform:uppercase;letter-spacing:.6px;margin-bottom:12px;}
-  .badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700;}
-  .green{background:rgba(16,185,129,.15);color:#10B981;}
-  .red{background:rgba(244,63,94,.12);color:#F43F5E;}
-  .yellow{background:rgba(251,191,36,.12);color:#FBBF24;}
-  pre{background:#0D1117;border-radius:8px;padding:12px;overflow-x:auto;font-size:11px;color:#38BDF8;border:1px solid rgba(255,255,255,.06);}
-  .order-card{background:#1E2535;border-radius:8px;padding:12px;margin-bottom:10px;display:flex;gap:12px;align-items:flex-start;}
-  .order-img{width:60px;height:60px;border-radius:6px;object-fit:cover;background:#0D1117;border:1px solid rgba(255,255,255,.08);}
-  .order-img-ph{width:60px;height:60px;border-radius:6px;background:#0D1117;border:1px solid rgba(255,255,255,.08);display:flex;align-items:center;justify-content:center;font-size:24px;flex-shrink:0;}
-  .order-info{flex:1;}
-  .order-title{font-weight:600;color:#F8FAFC;margin-bottom:4px;}
-  .order-meta{font-size:11px;color:#64748B;display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;}
-  .chip{background:#0D1117;border-radius:4px;padding:2px 6px;font-size:10px;}
-  .error-box{background:rgba(244,63,94,.1);border:1px solid rgba(244,63,94,.3);border-radius:8px;padding:12px;color:#F43F5E;font-size:12px;margin-bottom:12px;}
-  .info-row{display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.04);}
-  .info-row .l{color:#64748B;}
-  .info-row .v{color:#F8FAFC;font-weight:600;}
-</style>
-</head>
-<body>
+      rawData = data; endpoint = 'https://api.magalu.com/seller/v1/orders';
+    } catch(e) { error = e.response?.status + ' ' + JSON.stringify(e.response?.data||e.message); }
+    const orders = rawData?.results || [];
+    const html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"/>
+<title>Debug Magalu</title>
+<style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:'Segoe UI',sans-serif;background:#0D1117;color:#e6edf3;padding:20px;}
+h1{color:#A855F7;margin-bottom:4px;}.sub{color:#64748B;font-size:13px;margin-bottom:20px;}
+.section{background:#161B26;border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:16px;margin-bottom:16px;}
+.section h2{font-size:13px;color:#94A3B8;text-transform:uppercase;letter-spacing:.6px;margin-bottom:12px;}
+pre{background:#0D1117;border-radius:8px;padding:12px;overflow-x:auto;font-size:11px;color:#38BDF8;border:1px solid rgba(255,255,255,.06);}
+.order-card{background:#1E2535;border-radius:8px;padding:12px;margin-bottom:10px;display:flex;gap:12px;}
+.order-img{width:60px;height:60px;border-radius:6px;object-fit:cover;flex-shrink:0;}
+.badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700;}
+.green{background:rgba(16,185,129,.15);color:#10B981;}.red{background:rgba(244,63,94,.12);color:#F43F5E;}
+.yellow{background:rgba(251,191,36,.12);color:#FBBF24;}.gray{background:rgba(100,116,139,.12);color:#64748B;}
+.info-row{display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.04);}
+.l{color:#64748B;}.v{color:#F8FAFC;font-weight:600;}</style></head><body>
 <h1>⚡ Debug Magalu</h1>
-<div class="sub">Endpoint: ${endpoint || 'nenhum respondeu'} · Últimos ${days} dias · ${new Date().toLocaleString('pt-BR')}</div>
-
-<div class="section">
-  <h2>Conta conectada</h2>
-  <div class="info-row"><span class="l">Shop ID</span><span class="v">${acc.platform_shop_id || '—'}</span></div>
-  <div class="info-row"><span class="l">Nome</span><span class="v">${acc.shop_name || '—'}</span></div>
-  <div class="info-row"><span class="l">E-mail</span><span class="v">${acc.seller_email || '—'}</span></div>
-  <div class="info-row"><span class="l">Token expira</span><span class="v">${acc.token_expires_at ? new Date(acc.token_expires_at).toLocaleString('pt-BR') : '—'}</span></div>
-  <div class="info-row"><span class="l">Última sinc.</span><span class="v">${acc.last_sync_at ? new Date(acc.last_sync_at).toLocaleString('pt-BR') : 'Nunca'}</span></div>
+<div class="sub">Endpoint: ${endpoint} · Últimos ${days} dias · ${new Date().toLocaleString('pt-BR')}</div>
+${error ? `<div style="background:rgba(244,63,94,.1);border:1px solid rgba(244,63,94,.3);border-radius:8px;padding:12px;color:#F43F5E;margin-bottom:16px">${error}</div>` : ''}
+<div class="section"><h2>Conta</h2>
+<div class="info-row"><span class="l">Shop ID</span><span class="v">${acc.platform_shop_id}</span></div>
+<div class="info-row"><span class="l">Nome</span><span class="v">${acc.shop_name}</span></div>
+<div class="info-row"><span class="l">Token expira</span><span class="v">${acc.token_expires_at ? new Date(acc.token_expires_at).toLocaleString('pt-BR') : '—'}</span></div>
 </div>
-
-<div class="section">
-  <h2>Info da conta (/seller/v1/me)</h2>
-  <pre>${JSON.stringify(sellerInfo, null, 2)}</pre>
-</div>
-
-${error ? `<div class="error-box">❌ Erros testados:<br>${error}</div>` : ''}
-
-<div class="section">
-  <h2>Resposta bruta da API (${orders.length} pedidos)</h2>
-  ${orders.length === 0 ? `
-    <div class="error-box">Nenhum pedido retornado. Verifique:<br>
-    1. Token válido?<br>
-    2. Há pedidos nos últimos ${days} dias?<br>
-    3. Endpoint correto?
-    </div>
-    <pre>${JSON.stringify(rawData, null, 2)}</pre>
-  ` : orders.slice(0, 20).map(o => {
-    const delivery = o.deliveries?.[0] || {};
-    const item     = delivery.items?.[0] || o.items?.[0] || {};
-    const product  = item.product || item;
-    const img      = product.image_url || product.thumbnail || item.image_url || null;
-    const title    = product.title || product.description || item.title || item.description || o.product_title || '—';
-    const sku      = product.sku || item.sku || item.seller_sku || o.sku || '—';
-    const norm     = o.deliveries?.[0]?.amounts?.normalizer || 100;
-    const total    = ((o.deliveries?.[0]?.amounts?.total || o.total_amount || o.total || 0) / norm).toFixed(2);
-    const status   = o.status || o.deliveries?.[0]?.status || '—';
-
-    return `<div class="order-card">
-      ${img ? `<img class="order-img" src="${img}" alt="" onerror="this.outerHTML='<div class=order-img-ph>📦</div>'"/>` : '<div class="order-img-ph">📦</div>'}
-      <div class="order-info">
-        <div class="order-title">${title}</div>
-        <div class="order-meta">
-          <span class="chip">ID: ${o.id || o.code || '—'}</span>
-          <span class="chip">SKU: ${sku}</span>
-          <span class="chip badge ${status==='cancelled'?'red':status==='delivered'||status==='approved'?'green':'yellow'}">${status}</span>
-          <span class="chip">R$ ${total}</span>
-          <span class="chip">${new Date(o.created_at||o.purchased_at||'').toLocaleDateString('pt-BR')}</span>
-        </div>
+<div class="section"><h2>${orders.length} pedidos retornados</h2>
+${orders.map(o => {
+  const d    = o.deliveries?.[0] || {};
+  const item = d.items?.[0] || {};
+  const info = item.info || {};
+  const img  = info.images?.[0]?.url || null;
+  const norm = o.amounts?.normalizer || 100;
+  const total= (o.amounts?.total || 0) / norm;
+  const comm = (o.amounts?.commission?.total || 0) / norm;
+  const fret = (o.amounts?.freight?.total || 0) / norm;
+  const isTest = MAGALU_TEST_DOCUMENTS.includes(o.customer?.document_number);
+  const sc = {cancelled:'red',canceled:'red',finished:'green',approved:'yellow',shipped:'yellow',delivered:'green'}[o.status]||'gray';
+  return `<div class="order-card" style="${isTest?'border:1px solid #F43F5E;opacity:.6':''}">
+    ${img ? `<img class="order-img" src="${img}" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 1 1%22/>'"/>` : '<div style="width:60px;height:60px;border-radius:6px;background:#0D1117;display:flex;align-items:center;justify-content:center;font-size:24px;flex-shrink:0">📦</div>'}
+    <div style="flex:1">
+      <div style="font-weight:600;margin-bottom:4px">${info.name || info.description || '—'} ${isTest?'<span class="badge red">⚠ TESTE</span>':''}</div>
+      <div style="font-size:11px;color:#64748B;display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
+        <span>ID: ${o.code || o.id}</span>
+        <span>SKU: <strong style="color:#A855F7">${info.sku || '—'}</strong></span>
+        <span class="badge ${sc}">${o.status}</span>
+        <span>R$ ${total.toFixed(2)}</span>
+        <span>Comissão: R$ ${comm.toFixed(2)}</span>
+        <span>Frete: R$ ${fret.toFixed(2)}</span>
+        <span>${new Date(o.created_at).toLocaleDateString('pt-BR')}</span>
+        <span>Cliente: ${o.customer?.name}</span>
       </div>
-    </div>`;
-  }).join('')}
+    </div>
+  </div>`;
+}).join('')}
 </div>
-
-<div class="section">
-  <h2>JSON completo do primeiro pedido</h2>
-  <pre>${orders.length ? JSON.stringify(orders[0], null, 2) : 'Sem pedidos'}</pre>
-</div>
-
-<div class="section">
-  <h2>Todos os campos do response</h2>
-  <pre>${JSON.stringify({ meta: rawData?.meta, count: orders.length, keys_of_first_order: orders[0] ? Object.keys(orders[0]) : [] }, null, 2)}</pre>
-</div>
-</body>
-</html>`;
+<div class="section"><h2>JSON do primeiro pedido</h2><pre>${JSON.stringify(orders[0], null, 2)}</pre></div>
+</body></html>`;
     res.send(html);
-  } catch(e) {
-    res.send(`<h2 style="color:red;font-family:sans-serif;padding:20px">Erro: ${e.message}</h2><pre style="padding:20px">${e.stack}</pre>`);
-  }
+  } catch(e) { res.send(`<pre style="padding:20px;color:red">${e.message}\n${e.stack}</pre>`); }
 });
 
 // ── FETCH ML ──
@@ -343,7 +265,7 @@ async function fetchShopee(acc, days) {
   }));
 }
 
-// ── FETCH MAGALU ──
+// ── FETCH MAGALU — estrutura real confirmada pelo debug ──
 async function refreshMagaluToken(account) {
   try {
     const { data } = await axios.post('https://id.magalu.com/oauth/token',
@@ -355,6 +277,7 @@ async function refreshMagaluToken(account) {
       `UPDATE marketplace_accounts SET access_token=$1,refresh_token=$2,token_expires_at=$3,updated_at=NOW() WHERE id=$4`,
       [data.access_token, data.refresh_token, new Date(Date.now()+data.expires_in*1000), account.id]
     );
+    console.log('[Magalu] 🔄 Token renovado');
     return data.access_token;
   } catch(e) { console.error('[Magalu Refresh]', e.message); return null; }
 }
@@ -367,70 +290,82 @@ async function fetchMagalu(acc, days) {
   }
 
   const since = new Date(Date.now() - days * 86400000).toISOString();
+  const allOrders = [];
+  let offset = 0;
+  const limit = 50;
 
-  // Testa endpoints em sequência até achar o correto
-  const endpoints = [
-    { url: 'https://api.magalu.com/seller/v1/orders', params: { created_at__gte: since, _limit: 100 } },
-    { url: 'https://api.magalu.com/v1/orders',        params: { created_after: since, limit: 100 } },
-    { url: 'https://api.magalu.com/orders',           params: { created_after: since, limit: 100 } },
-  ];
+  // Pagina todos os resultados
+  while (true) {
+    const { data } = await axios.get('https://api.magalu.com/seller/v1/orders', {
+      params: { created_at__gte: since, _limit: limit, _offset: offset },
+      headers: { Authorization: `Bearer ${token}` }
+    });
 
-  let rawData = null;
-  for (const ep of endpoints) {
-    try {
-      const { data } = await axios.get(ep.url, {
-        params: ep.params,
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
-      });
-      rawData = data;
-      console.log(`[Magalu] ✅ Endpoint funcionando: ${ep.url}`);
-      break;
-    } catch(e) {
-      console.log(`[Magalu] ❌ ${ep.url} → ${e.response?.status}`);
-    }
+    const page = data.results || [];
+    allOrders.push(...page);
+
+    console.log(`[Magalu] página offset=${offset}: ${page.length} pedidos`);
+
+    // Para se não tem próxima página
+    if (!data.meta?.links?.next || page.length < limit) break;
+    offset += limit;
+    if (offset > 500) break; // segurança
   }
 
-  if (!rawData) throw new Error('Nenhum endpoint Magalu respondeu');
-
-  const orders = rawData.results || rawData.data || (Array.isArray(rawData) ? rawData : []);
-  console.log(`[Magalu] ${orders.length} pedidos retornados`);
+  console.log(`[Magalu] Total: ${allOrders.length} pedidos`);
 
   const statusMap = {
-    new:'pending', approved:'paid', invoiced:'shipped', shipped:'shipped',
-    delivered:'delivered', cancelled:'cancelled', canceled:'cancelled', finished:'delivered',
+    new:'pending', approved:'paid', invoiced:'shipped',
+    shipped:'shipped', delivered:'delivered', finished:'delivered',
+    cancelled:'cancelled', canceled:'cancelled',
   };
 
-  return orders.map(o => {
-    const delivery = o.deliveries?.[0] || {};
-    const item     = delivery.items?.[0] || o.items?.[0] || {};
-    const product  = item.product || item;
-    const amounts  = delivery.amounts || {};
-    const norm     = amounts.normalizer || 100;
+  return allOrders
+    // Filtra pedidos de teste da Magalu
+    .filter(o => !MAGALU_TEST_DOCUMENTS.includes(o.customer?.document_number))
+    .map(o => {
+      // Estrutura confirmada pelo debug:
+      // o.deliveries[0].items[0].info = { sku, name, images[{url}] }
+      // o.amounts = { total, commission, freight, tax, normalizer }
+      const delivery = o.deliveries?.[0] || {};
+      const item     = delivery.items?.[0] || {};
+      const info     = item.info || {};          // ← campo correto!
+      const norm     = o.amounts?.normalizer || 100;
 
-    const total    = (amounts.total     || o.total_amount || o.total || 0) / norm;
-    const freight  = ((amounts.freight?.total) || o.shipping_cost || 0) / norm;
-    const tax      = ((amounts.tax)     || 0) / norm;
-    const commission = total * 0.12;
+      const total      = (o.amounts?.total                  || 0) / norm;
+      const commission = (o.amounts?.commission?.total      || 0) / norm;
+      const freight    = (o.amounts?.freight?.total         || 0) / norm;
+      const tax        = (o.amounts?.tax?.total             || 0) / norm;
+      const qty        = item.quantity || 1;
 
-    return {
-      id:               String(o.id || o.code),
-      platform:         'magalu',
-      platform_order_id:String(o.code || o.id),
-      shop_name:        acc.shop_name,
-      fulfillment_type: (delivery.fulfillment_type || o.fulfillment_type) === 'fulfillment' ? 'full' : 'normal',
-      status:           statusMap[(o.status||'').toLowerCase()] || (delivery.status ? statusMap[delivery.status.toLowerCase()] : 'paid') || 'paid',
-      buyer_name:       o.customer?.name || '',
-      total_amount:     total,
-      platform_fee:     commission,
-      shipping_fee:     freight,
-      tax_amount:       tax,
-      quantity:         item.quantity || product.quantity || 1,
-      order_date:       o.created_at || o.purchased_at || o.approved_at || new Date().toISOString(),
-      item_title:       product.title || product.description || item.title || item.description || o.product_title || 'Produto Magalu',
-      item_image:       product.image_url || product.thumbnail || item.image_url || item.thumbnail || null,
-      item_sku:         product.sku || item.sku || item.seller_sku || o.sku || '',
-    };
-  });
+      // Imagem: info.images[0].url
+      const image = info.images?.[0]?.url || null;
+
+      // Fulfillment: via shipping.provider.extras.is_fulfillment
+      const isFull = delivery.shipping?.provider?.extras?.is_fulfillment === true;
+
+      const orderStatus = (o.status || '').toLowerCase();
+      const status = statusMap[orderStatus] || 'paid';
+
+      return {
+        id:               String(o.code || o.id),
+        platform:         'magalu',
+        platform_order_id:String(o.code || o.id),
+        shop_name:        delivery.seller?.name || acc.shop_name,
+        fulfillment_type: isFull ? 'full' : 'normal',
+        status,
+        buyer_name:       o.customer?.name || '',
+        total_amount:     total,
+        platform_fee:     commission,
+        shipping_fee:     freight,
+        tax_amount:       tax,
+        quantity:         qty,
+        order_date:       o.created_at || o.purchased_at || new Date().toISOString(),
+        item_title:       info.name || info.description || 'Produto Magalu',
+        item_image:       image,
+        item_sku:         info.sku || '',
+      };
+    });
 }
 
 // ── ENRIQUECE COM CUSTOS ──
@@ -552,7 +487,7 @@ app.get('/callback/shopee', async (req, res) => {
     );
     await db.query(`
       INSERT INTO marketplace_accounts (user_id,platform,platform_shop_id,shop_name,access_token,refresh_token,token_expires_at,mode,is_active)
-      VALUES ($1,'shopee',$2,$3,$4,$5,$6,'normal',true)
+      VALUES ($1,'shopee',$2,$3,$4,$4,$5,$6,'normal',true)
       ON CONFLICT (user_id,platform,platform_shop_id) DO UPDATE SET
         access_token=EXCLUDED.access_token,refresh_token=EXCLUDED.refresh_token,
         token_expires_at=EXCLUDED.token_expires_at,is_active=true,updated_at=NOW()`,
@@ -582,28 +517,35 @@ app.get('/callback/magalu', async (req, res) => {
         client_secret:process.env.MAGALU_CLIENT_SECRET, code, redirect_uri:process.env.MAGALU_REDIRECT_URI }),
       { headers: { 'Content-Type':'application/x-www-form-urlencoded' } }
     );
-    let sellerId='magalu-store', shopName='Loja Magalu';
+    // Shop name via seller da primeira delivery quando disponível
+    let sellerId = 'magalu-store', shopName = 'Loja Magalu';
     try {
-      const { data: si } = await axios.get('https://api.magalu.com/seller/v1/me',
-        { headers: { Authorization:`Bearer ${tk.access_token}` } }
-      );
-      sellerId = si.id || si.seller_id || 'magalu-store';
-      shopName = si.name || si.trade_name || 'Loja Magalu';
-    } catch(se) { console.log('[Magalu /me]', se.response?.data||se.message); }
+      // Tenta pegar nome da loja buscando um pedido recente
+      const { data: sample } = await axios.get('https://api.magalu.com/seller/v1/orders', {
+        params: { _limit: 1 }, headers: { Authorization: `Bearer ${tk.access_token}` }
+      });
+      const sellerFromOrder = sample.results?.[0]?.deliveries?.[0]?.seller;
+      if (sellerFromOrder) {
+        sellerId = sellerFromOrder.id || 'magalu-store';
+        shopName = sellerFromOrder.name || 'Loja Magalu';
+      }
+    } catch(se) { console.log('[Magalu seller name]', se.message); }
+
     await db.query(`
       INSERT INTO marketplace_accounts (user_id,platform,platform_shop_id,shop_name,access_token,refresh_token,token_expires_at,mode,is_active)
       VALUES ($1,'magalu',$2,$3,$4,$5,$6,'both',true)
       ON CONFLICT (user_id,platform,platform_shop_id) DO UPDATE SET
         access_token=EXCLUDED.access_token,refresh_token=EXCLUDED.refresh_token,
         token_expires_at=EXCLUDED.token_expires_at,shop_name=EXCLUDED.shop_name,is_active=true,updated_at=NOW()`,
-      [state, String(sellerId), shopName, tk.access_token, tk.refresh_token, new Date(Date.now()+(tk.expires_in||7200)*1000)]
+      [state, String(sellerId), shopName, tk.access_token, tk.refresh_token,
+       new Date(Date.now()+(tk.expires_in||7200)*1000)]
     );
     console.log(`[Magalu] ✅ ${shopName} conectado`);
     res.redirect('https://salesync.shop?connected=magalu');
   } catch(e) { console.error('[Magalu]', e.response?.data||e.message); res.redirect('https://salesync.shop?error=magalu_failed'); }
 });
 
-app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:'4.0' }));
+app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:'4.1' }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v4 rodando na porta ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v4.1 rodando na porta ${PORT}`));
