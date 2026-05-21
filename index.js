@@ -13,13 +13,52 @@ app.use(cors());
 app.use(express.json());
 
 const db = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
-db.connect().then(() => console.log('✅ Supabase conectado!')).catch(e => console.error('❌ Erro DB:', e.message));
+db.connect()
+  .then(async () => {
+    console.log('✅ Supabase conectado!');
+    await ensureProductSchema();
+  })
+  .catch(e => console.error('❌ Erro DB:', e.message));
 
 const CACHE = {};
 const CACHE_TTL = 15 * 60 * 1000;
 
 // CPFs de teste do ambiente Magalu — filtrar fora
 const MAGALU_TEST_DOCUMENTS = ['39743407006', '00000000000', '12345678909'];
+
+
+async function ensureProductSchema() {
+  try {
+    await db.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS platform TEXT DEFAULT 'geral'`);
+    await db.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS tax_pct NUMERIC(10,4)`);
+    await db.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS fee_pct NUMERIC(10,4)`);
+    await db.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS shipping_fee NUMERIC(12,2)`);
+
+    // Se existia UNIQUE(user_id, sku), ele impede o mesmo SKU em plataformas diferentes.
+    // Remove somente constraints únicas antigas que não possuem a coluna platform.
+    const { rows } = await db.query(`
+      SELECT con.conname
+      FROM pg_constraint con
+      JOIN pg_class rel ON rel.oid = con.conrelid
+      JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+      WHERE rel.relname = 'products'
+        AND con.contype = 'u'
+        AND pg_get_constraintdef(con.oid) ILIKE '%user_id%'
+        AND pg_get_constraintdef(con.oid) ILIKE '%sku%'
+        AND pg_get_constraintdef(con.oid) NOT ILIKE '%platform%'
+    `);
+    for (const r of rows) {
+      await db.query(`ALTER TABLE products DROP CONSTRAINT IF EXISTS ${r.conname}`);
+      console.log('[Products] constraint antiga removida:', r.conname);
+    }
+
+    await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS products_user_platform_sku_uidx ON products(user_id, platform, sku)`);
+    await db.query(`UPDATE products SET platform='geral' WHERE platform IS NULL OR platform=''`);
+    console.log('✅ Products schema OK: custo/imposto/tarifa/frete por plataforma + SKU');
+  } catch (e) {
+    console.error('[Products schema]', e.message);
+  }
+}
 
 function auth(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
@@ -83,69 +122,91 @@ app.post('/api/accounts/:platform/disconnect', auth, async (req, res) => {
 });
 
 // ── PRODUTOS ──
+function normPlatform(v) {
+  return String(v || 'geral').trim().toLowerCase();
+}
+function normSku(v) {
+  return String(v || '').trim();
+}
 
-
-
-
-
-// ── PRODUTOS v2 — custo por plataforma + imposto por SKU ──
-
-// Lista produtos
 app.get('/api/products', auth, async (req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT * FROM products WHERE user_id=$1 AND is_active=true ORDER BY sku, platform NULLS FIRST`,
+      `SELECT id, sku, name, cost, COALESCE(platform,'geral') AS platform, tax_pct, fee_pct, shipping_fee, description, updated_at
+       FROM products
+       WHERE user_id=$1 AND is_active=true
+       ORDER BY platform, sku`,
       [req.user.id]
     );
     res.json({ success: true, data: rows });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Upsert produto (sku + platform como chave composta)
 app.post('/api/products', auth, async (req, res) => {
-  const { sku, name, cost, tax_rate, platform, description } = req.body;
-  if (!sku || !name) return res.status(400).json({ error: 'sku e name obrigatórios' });
-  try {
-    const { rows } = await db.query(`
-      INSERT INTO products (user_id, sku, name, cost, tax_rate, platform, description)
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
-      ON CONFLICT (user_id, sku, COALESCE(platform,''))
-      DO UPDATE SET name=EXCLUDED.name, cost=EXCLUDED.cost,
-        tax_rate=EXCLUDED.tax_rate, platform=EXCLUDED.platform,
-        description=EXCLUDED.description, updated_at=NOW()
-      RETURNING *`,
-      [req.user.id, sku, name, cost||0, tax_rate||null, platform||null, description||null]
-    );
-    res.json({ success: true, data: rows[0] });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
-});
+  const sku = normSku(req.body.sku);
+  const platform = normPlatform(req.body.platform);
+  const { name, description } = req.body;
+  const cost = Number(req.body.cost || 0);
+  const taxPct = req.body.tax_pct === '' || req.body.tax_pct === undefined || req.body.tax_pct === null
+    ? null
+    : Number(req.body.tax_pct || 0);
+  const feePct = req.body.fee_pct === '' || req.body.fee_pct === undefined || req.body.fee_pct === null
+    ? null
+    : Number(req.body.fee_pct || 0);
+  const shippingFee = req.body.shipping_fee === '' || req.body.shipping_fee === undefined || req.body.shipping_fee === null
+    ? null
+    : Number(req.body.shipping_fee || 0);
 
-// Atualiza custo (mantém compatibilidade)
-app.put('/api/products/:sku/cost', auth, async (req, res) => {
-  const { cost, platform } = req.body;
+  if (!sku || !name) return res.status(400).json({ error: 'SKU e nome são obrigatórios' });
+
   try {
-    if (platform) {
-      // Atualiza custo específico da plataforma
-      await db.query(
-        `UPDATE products SET cost=$1, updated_at=NOW()
-         WHERE sku=$2 AND user_id=$3 AND platform=$4`,
-        [cost, req.params.sku, req.user.id, platform]
-      );
-    } else {
-      // Atualiza todos os registros desse SKU (sem plataforma específica)
-      await db.query(
-        `UPDATE products SET cost=$1, updated_at=NOW()
-         WHERE sku=$2 AND user_id=$3 AND platform IS NULL`,
-        [cost, req.params.sku, req.user.id]
-      );
-    }
+    const { rows } = await db.query(
+      `INSERT INTO products (user_id, platform, sku, name, cost, tax_pct, fee_pct, shipping_fee, description)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       ON CONFLICT (user_id, platform, sku) DO UPDATE SET
+         name=EXCLUDED.name,
+         cost=EXCLUDED.cost,
+         tax_pct=EXCLUDED.tax_pct,
+         fee_pct=EXCLUDED.fee_pct,
+         shipping_fee=EXCLUDED.shipping_fee,
+         description=EXCLUDED.description,
+         is_active=true,
+         updated_at=NOW()
+       RETURNING *`,
+      [req.user.id, platform, sku, name, cost, taxPct, feePct, shippingFee, description || null]
+    );
     Object.keys(CACHE).forEach(k => { if (k.startsWith(req.user.id)) delete CACHE[k]; });
-    res.json({ success: true });
+    res.json({ success: true, data: rows[0] });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Compatível com o frontend antigo: PUT /api/products/:sku/cost com platform no body/query
+app.put('/api/products/:sku/cost', auth, async (req, res) => {
+  const sku = normSku(req.params.sku);
+  const platform = normPlatform(req.body.platform || req.query.platform);
+  const cost = Number(req.body.cost || 0);
+  const taxPct = req.body.tax_pct === '' || req.body.tax_pct === undefined || req.body.tax_pct === null ? null : Number(req.body.tax_pct || 0);
+  const feePct = req.body.fee_pct === '' || req.body.fee_pct === undefined || req.body.fee_pct === null ? null : Number(req.body.fee_pct || 0);
+  const shippingFee = req.body.shipping_fee === '' || req.body.shipping_fee === undefined || req.body.shipping_fee === null ? null : Number(req.body.shipping_fee || 0);
+  try {
+    const { rows } = await db.query(
+      `INSERT INTO products (user_id, platform, sku, name, cost, tax_pct, fee_pct, shipping_fee)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (user_id, platform, sku) DO UPDATE SET
+         cost=EXCLUDED.cost,
+         tax_pct=EXCLUDED.tax_pct,
+         fee_pct=EXCLUDED.fee_pct,
+         shipping_fee=EXCLUDED.shipping_fee,
+         is_active=true,
+         updated_at=NOW()
+       RETURNING *`,
+      [req.user.id, platform, sku, sku, cost, taxPct, feePct, shippingFee]
+    );
+
+    Object.keys(CACHE).forEach(k => { if (k.startsWith(req.user.id)) delete CACHE[k]; });
+    res.json({ success: true, data: rows[0] });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 // ── DEBUG MAGALU ──
 
@@ -371,58 +432,25 @@ async function fetchShopee(acc, days) {
 // ── FETCH MAGALU — estrutura real confirmada pelo debug ──
 async function refreshMagaluToken(account) {
   try {
-    if (!account.refresh_token) {
-      console.error('[Magalu Refresh] Sem refresh_token — usuário precisa reconectar');
-      return null;
-    }
     const { data } = await axios.post('https://id.magalu.com/oauth/token',
-      new URLSearchParams({
-        grant_type: 'refresh_token',
-        refresh_token: account.refresh_token,
-        client_id: process.env.MAGALU_CLIENT_ID,
-        client_secret: process.env.MAGALU_CLIENT_SECRET
-      }),
-      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+      new URLSearchParams({ grant_type:'refresh_token', refresh_token:account.refresh_token,
+        client_id:process.env.MAGALU_CLIENT_ID, client_secret:process.env.MAGALU_CLIENT_SECRET }),
+      { headers: { 'Content-Type':'application/x-www-form-urlencoded' } }
     );
-    if (!data.access_token) throw new Error('Resposta sem access_token');
     await db.query(
-      `UPDATE marketplace_accounts SET access_token=$1, refresh_token=$2,
-       token_expires_at=$3, updated_at=NOW() WHERE id=$4`,
-      [data.access_token, data.refresh_token || account.refresh_token,
-       new Date(Date.now() + (data.expires_in || 7200) * 1000), account.id]
+      `UPDATE marketplace_accounts SET access_token=$1,refresh_token=$2,token_expires_at=$3,updated_at=NOW() WHERE id=$4`,
+      [data.access_token, data.refresh_token, new Date(Date.now()+data.expires_in*1000), account.id]
     );
-    console.log('[Magalu] 🔄 Token renovado com sucesso');
+    console.log('[Magalu] 🔄 Token renovado');
     return data.access_token;
-  } catch(e) {
-    console.error('[Magalu Refresh] ERRO:', e.response?.data || e.message);
-    // Se refresh falhou, marca conta como necessitando reconexão
-    await db.query(
-      `UPDATE marketplace_accounts SET token_expires_at=NOW() WHERE id=$1`, [account.id]
-    ).catch(() => {});
-    return null;
-  }
+  } catch(e) { console.error('[Magalu Refresh]', e.message); return null; }
 }
 
 async function fetchMagalu(acc, days) {
-  // Sempre busca conta fresca do banco (cache pode ter token antigo)
-  const { rows: freshRows } = await db.query(
-    'SELECT * FROM marketplace_accounts WHERE id=$1', [acc.id]
-  );
-  if (freshRows.length) acc = freshRows[0];
-
   let token = acc.access_token;
-
-  // Renova se expirou OU se vai expirar nos próximos 10 minutos
-  const expiry = acc.token_expires_at ? new Date(acc.token_expires_at) : null;
-  const tenMinutes = new Date(Date.now() + 10 * 60 * 1000);
-  if (!token || !expiry || expiry <= tenMinutes) {
-    console.log('[Magalu] Token expirando/expirado, renovando...');
-    const newToken = await refreshMagaluToken(acc);
-    if (newToken) {
-      token = newToken;
-    } else if (!token) {
-      throw new Error('Token Magalu expirado e não foi possível renovar. Reconecte a conta.');
-    }
+  if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date()) {
+    token = await refreshMagaluToken(acc);
+    if (!token) throw new Error('Token Magalu expirado');
   }
 
   const since = new Date(Date.now() - days * 86400000).toISOString();
@@ -510,53 +538,65 @@ async function fetchMagalu(acc, days) {
     });
 }
 
-// ── ENRIQUECE COM CUSTOS v2 — por SKU+plataforma ──
+// ── ENRIQUECE COM CUSTOS ──
 async function enrichWithCosts(orders, userId) {
   const { rows } = await db.query(
-    'SELECT sku, cost, tax_rate, platform FROM products WHERE user_id=$1 AND is_active=true',
+    `SELECT sku, COALESCE(platform,'geral') AS platform, cost, tax_pct, fee_pct, shipping_fee
+     FROM products
+     WHERE user_id=$1 AND is_active=true`,
     [userId]
   );
-  // Mapa: sku+platform (específico) e sku (genérico)
-  const costMap = {};   // sku → custo genérico
-  const platMap = {};   // sku|platform → custo específico
-  const taxMap  = {};   // sku → alíquota imposto
 
+  const productMap = {};
   rows.forEach(p => {
-    const cost = parseFloat(p.cost || 0);
-    const tax  = parseFloat(p.tax_rate || 0);
-    if (p.platform) {
-      platMap[`${p.sku}|${p.platform}`] = cost;
-    } else {
-      costMap[p.sku] = cost;
-      if (tax > 0) taxMap[p.sku] = tax;
-    }
+    const sku = normSku(p.sku);
+    const platform = normPlatform(p.platform);
+    productMap[`${platform}:${sku}`] = {
+      cost: parseFloat(p.cost || 0),
+      tax_pct: p.tax_pct === null || p.tax_pct === undefined ? null : parseFloat(p.tax_pct),
+      fee_pct: p.fee_pct === null || p.fee_pct === undefined ? null : parseFloat(p.fee_pct),
+      shipping_fee: p.shipping_fee === null || p.shipping_fee === undefined ? null : parseFloat(p.shipping_fee)
+    };
   });
 
   return orders.map(o => {
-    // Prioridade: custo específico da plataforma > custo genérico > 0
-    const specificKey = `${o.item_sku}|${o.platform}`;
-    const cost = platMap[specificKey] !== undefined
-      ? platMap[specificKey]
-      : (costMap[o.item_sku] || 0);
+    const sku = normSku(o.item_sku);
+    const platform = normPlatform(o.platform);
+    const product = productMap[`${platform}:${sku}`] || productMap[`geral:${sku}`] || { cost: 0, tax_pct: null, fee_pct: null, shipping_fee: null };
 
-    // Imposto: taxa do produto (%) ou taxa padrão (6%)
-    const taxRate    = taxMap[o.item_sku] || 6;
-    const tax_amount = o.total_amount * taxRate / 100;
+    const unit_cost  = parseFloat(product.cost || 0);
+    const tax_pct    = product.tax_pct;
+    const fee_pct    = product.fee_pct;
+    const ship_fixed = product.shipping_fee;
+    const total_cost = unit_cost * (o.quantity || 1);
+    const total_amount = parseFloat(o.total_amount || 0);
+    const platform_fee = fee_pct === null ? parseFloat(o.platform_fee || 0) : (total_amount * fee_pct / 100);
+    const shipping_fee = ship_fixed === null ? parseFloat(o.shipping_fee || 0) : (parseFloat(ship_fixed || 0) * (o.quantity || 1));
+    const tax_amount = tax_pct === null ? parseFloat(o.tax_amount || 0) : (total_amount * tax_pct / 100);
+    const net_revenue= total_amount - platform_fee - shipping_fee - tax_amount;
+    const profit     = o.status === 'cancelled' ? 0 : (net_revenue - total_cost);
+    const margin     = o.total_amount > 0 ? (profit / o.total_amount * 100) : 0;
 
-    const total_cost  = cost * (o.quantity || 1);
-    const net_revenue = o.total_amount - o.platform_fee - o.shipping_fee - tax_amount;
-    const profit      = o.status === 'cancelled' ? 0 : (net_revenue - total_cost);
-    const margin      = o.total_amount > 0 ? (profit / o.total_amount * 100) : 0;
-
-    return { ...o, total_cost, net_revenue, profit, profit_margin_pct: margin,
-             tax_amount, tax_rate: taxRate, unit_cost: cost };
+    return {
+      ...o,
+      unit_cost,
+      tax_pct,
+      fee_pct,
+      platform_fee,
+      shipping_fee,
+      tax_amount,
+      total_cost,
+      net_revenue,
+      profit,
+      profit_margin_pct: margin
+    };
   });
 }
 
 // ── API PEDIDOS ──
 app.get('/api/orders', auth, async (req, res) => {
   const { period = '7', platform } = req.query;
-  const days = parseInt(period);
+  const days = Math.min(Math.max(parseInt(period) || 7, 1), 30);
   try {
     const { rows: accounts } = await db.query(
       `SELECT * FROM marketplace_accounts WHERE user_id=$1 AND is_active=true AND access_token IS NOT NULL`,
@@ -657,7 +697,7 @@ app.get('/callback/shopee', async (req, res) => {
     );
     await db.query(`
       INSERT INTO marketplace_accounts (user_id,platform,platform_shop_id,shop_name,access_token,refresh_token,token_expires_at,mode,is_active)
-      VALUES ($1,'shopee',$2,$3,$4,$5,$6,$7,'normal',true)
+      VALUES ($1,'shopee',$2,$3,$4,$4,$5,$6,'normal',true)
       ON CONFLICT (user_id,platform,platform_shop_id) DO UPDATE SET
         access_token=EXCLUDED.access_token,refresh_token=EXCLUDED.refresh_token,
         token_expires_at=EXCLUDED.token_expires_at,is_active=true,updated_at=NOW()`,
@@ -811,71 +851,6 @@ ${orders.map(o => {
 </body></html>`;
     res.send(html);
   } catch(e) { res.send(`<pre style="padding:20px;color:red">${e.message}</pre>`); }
-});
-
-
-// ── ETIQUETA DE ENVIO ──
-
-// ML — gera etiqueta
-app.get('/api/label/mercadolivre/:order_id', auth, async (req, res) => {
-  try {
-    const { rows } = await db.query(
-      `SELECT * FROM marketplace_accounts WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true LIMIT 1`,
-      [req.user.id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Conta ML não conectada' });
-    const acc = rows[0];
-
-    // Busca shipment_id do pedido
-    const { data: order } = await axios.get(
-      `https://api.mercadolibre.com/orders/${req.params.order_id}`,
-      { headers: { Authorization: `Bearer ${acc.access_token}` } }
-    );
-    const shipmentId = order.shipping?.id;
-    if (!shipmentId) return res.status(404).json({ error: 'Pedido sem envio associado' });
-
-    // Busca etiqueta (PDF)
-    const { data: label } = await axios.get(
-      `https://api.mercadolibre.com/shipments/${shipmentId}/labels`,
-      {
-        params: { response_type: 'pdf', shipment_ids: shipmentId },
-        headers: { Authorization: `Bearer ${acc.access_token}` },
-        responseType: 'arraybuffer'
-      }
-    );
-    res.set('Content-Type', 'application/pdf');
-    res.set('Content-Disposition', `inline; filename="etiqueta-${req.params.order_id}.pdf"`);
-    res.send(Buffer.from(label));
-  } catch(e) {
-    console.error('[ML Label]', e.response?.data || e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Magalu — gera etiqueta
-app.get('/api/label/magalu/:order_code', auth, async (req, res) => {
-  try {
-    const { rows } = await db.query(
-      `SELECT * FROM marketplace_accounts WHERE user_id=$1 AND platform='magalu' AND is_active=true LIMIT 1`,
-      [req.user.id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Conta Magalu não conectada' });
-    const acc = rows[0];
-
-    const { data } = await axios.get(
-      `https://api.magalu.com/seller/v1/orders/${req.params.order_code}/label`,
-      {
-        headers: { Authorization: `Bearer ${acc.access_token}` },
-        responseType: 'arraybuffer'
-      }
-    );
-    res.set('Content-Type', 'application/pdf');
-    res.set('Content-Disposition', `inline; filename="etiqueta-${req.params.order_code}.pdf"`);
-    res.send(Buffer.from(data));
-  } catch(e) {
-    console.error('[Magalu Label]', e.response?.data || e.message);
-    res.status(500).json({ error: e.message });
-  }
 });
 
 app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:'4.1' }));
