@@ -377,6 +377,16 @@ async function fetchML(acc, days) {
   return results.map(o => {
     const item    = o.order_items?.[0];
     const details = itemMap[item?.item?.id] || {};
+
+    // Mercado Livre já retorna a tarifa real do anúncio em order_items[].sale_fee.
+    // Frete normalmente vem dentro de payments[].shipping_cost; shipping.cost pode vir vazio.
+    const platformFee = (o.order_items || []).reduce((sum, it) => {
+      return sum + (parseFloat(it.sale_fee || 0) * parseFloat(it.quantity || 1));
+    }, 0);
+    const shippingFee = (o.payments || []).reduce((sum, p) => {
+      return sum + parseFloat(p.shipping_cost || 0);
+    }, 0);
+
     return {
       id:               String(o.id),
       platform:         'mercadolivre',
@@ -386,9 +396,10 @@ async function fetchML(acc, days) {
       status:           statusMap[o.status] || o.status,
       buyer_name:       o.buyer?.nickname || '',
       total_amount:     o.total_amount || 0,
-      platform_fee:     o.payments?.[0]?.marketplace_fee || 0,
-      shipping_fee:     o.shipping?.cost || 0,
-      tax_amount:       (o.total_amount || 0) * 0.06,
+      paid_amount:      o.paid_amount || o.payments?.[0]?.total_paid_amount || 0,
+      platform_fee:     platformFee,
+      shipping_fee:     shippingFee,
+      tax_amount:       0,
       quantity:         item?.quantity || 1,
       order_date:       o.date_created,
       item_title:       details.title || item?.item?.title || '',
@@ -563,11 +574,13 @@ async function enrichWithCosts(orders, userId) {
     const sku = normSku(o.item_sku);
     const platform = normPlatform(o.platform);
     const product = productMap[`${platform}:${sku}`] || productMap[`geral:${sku}`] || { cost: 0, tax_pct: null, fee_pct: null, shipping_fee: null };
+    const defaults = productMap[`${platform}:__DEFAULT__`] || productMap[`geral:__DEFAULT__`] || { tax_pct: null, fee_pct: null, shipping_fee: null };
 
     const unit_cost  = parseFloat(product.cost || 0);
-    const tax_pct    = product.tax_pct;
-    const fee_pct    = product.fee_pct;
-    const ship_fixed = product.shipping_fee;
+    // Primeiro tenta o SKU. Se estiver vazio, usa o padrão da plataforma.
+    const tax_pct    = product.tax_pct === null || product.tax_pct === undefined ? defaults.tax_pct : product.tax_pct;
+    const fee_pct    = product.fee_pct === null || product.fee_pct === undefined ? defaults.fee_pct : product.fee_pct;
+    const ship_fixed = product.shipping_fee === null || product.shipping_fee === undefined ? defaults.shipping_fee : product.shipping_fee;
     const total_cost = unit_cost * (o.quantity || 1);
     const total_amount = parseFloat(o.total_amount || 0);
     const platform_fee = fee_pct === null ? parseFloat(o.platform_fee || 0) : (total_amount * fee_pct / 100);
