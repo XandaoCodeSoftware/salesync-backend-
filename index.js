@@ -83,35 +83,69 @@ app.post('/api/accounts/:platform/disconnect', auth, async (req, res) => {
 });
 
 // ── PRODUTOS ──
+
+
+
+
+
+// ── PRODUTOS v2 — custo por plataforma + imposto por SKU ──
+
+// Lista produtos
 app.get('/api/products', auth, async (req, res) => {
   try {
-    const { rows } = await db.query('SELECT * FROM products WHERE user_id=$1 AND is_active=true ORDER BY sku', [req.user.id]);
+    const { rows } = await db.query(
+      `SELECT * FROM products WHERE user_id=$1 AND is_active=true ORDER BY sku, platform NULLS FIRST`,
+      [req.user.id]
+    );
     res.json({ success: true, data: rows });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Upsert produto (sku + platform como chave composta)
 app.post('/api/products', auth, async (req, res) => {
-  const { sku, name, cost, description } = req.body;
+  const { sku, name, cost, tax_rate, platform, description } = req.body;
+  if (!sku || !name) return res.status(400).json({ error: 'sku e name obrigatórios' });
   try {
-    const { rows } = await db.query(
-      'INSERT INTO products (user_id,sku,name,cost,description) VALUES ($1,$2,$3,$4,$5) RETURNING *',
-      [req.user.id, sku, name, cost||0, description||null]
+    const { rows } = await db.query(`
+      INSERT INTO products (user_id, sku, name, cost, tax_rate, platform, description)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      ON CONFLICT (user_id, sku, COALESCE(platform,''))
+      DO UPDATE SET name=EXCLUDED.name, cost=EXCLUDED.cost,
+        tax_rate=EXCLUDED.tax_rate, platform=EXCLUDED.platform,
+        description=EXCLUDED.description, updated_at=NOW()
+      RETURNING *`,
+      [req.user.id, sku, name, cost||0, tax_rate||null, platform||null, description||null]
     );
     res.json({ success: true, data: rows[0] });
   } catch(e) {
-    if (e.code === '23505') return res.status(409).json({ error: 'SKU já existe' });
     res.status(500).json({ error: e.message });
   }
 });
 
+// Atualiza custo (mantém compatibilidade)
 app.put('/api/products/:sku/cost', auth, async (req, res) => {
-  const { cost } = req.body;
+  const { cost, platform } = req.body;
   try {
-    await db.query('UPDATE products SET cost=$1,updated_at=NOW() WHERE sku=$2 AND user_id=$3', [cost, req.params.sku, req.user.id]);
+    if (platform) {
+      // Atualiza custo específico da plataforma
+      await db.query(
+        `UPDATE products SET cost=$1, updated_at=NOW()
+         WHERE sku=$2 AND user_id=$3 AND platform=$4`,
+        [cost, req.params.sku, req.user.id, platform]
+      );
+    } else {
+      // Atualiza todos os registros desse SKU (sem plataforma específica)
+      await db.query(
+        `UPDATE products SET cost=$1, updated_at=NOW()
+         WHERE sku=$2 AND user_id=$3 AND platform IS NULL`,
+        [cost, req.params.sku, req.user.id]
+      );
+    }
     Object.keys(CACHE).forEach(k => { if (k.startsWith(req.user.id)) delete CACHE[k]; });
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
+
 
 // ── DEBUG MAGALU ──
 
@@ -337,25 +371,58 @@ async function fetchShopee(acc, days) {
 // ── FETCH MAGALU — estrutura real confirmada pelo debug ──
 async function refreshMagaluToken(account) {
   try {
+    if (!account.refresh_token) {
+      console.error('[Magalu Refresh] Sem refresh_token — usuário precisa reconectar');
+      return null;
+    }
     const { data } = await axios.post('https://id.magalu.com/oauth/token',
-      new URLSearchParams({ grant_type:'refresh_token', refresh_token:account.refresh_token,
-        client_id:process.env.MAGALU_CLIENT_ID, client_secret:process.env.MAGALU_CLIENT_SECRET }),
-      { headers: { 'Content-Type':'application/x-www-form-urlencoded' } }
+      new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: account.refresh_token,
+        client_id: process.env.MAGALU_CLIENT_ID,
+        client_secret: process.env.MAGALU_CLIENT_SECRET
+      }),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
     );
+    if (!data.access_token) throw new Error('Resposta sem access_token');
     await db.query(
-      `UPDATE marketplace_accounts SET access_token=$1,refresh_token=$2,token_expires_at=$3,updated_at=NOW() WHERE id=$4`,
-      [data.access_token, data.refresh_token, new Date(Date.now()+data.expires_in*1000), account.id]
+      `UPDATE marketplace_accounts SET access_token=$1, refresh_token=$2,
+       token_expires_at=$3, updated_at=NOW() WHERE id=$4`,
+      [data.access_token, data.refresh_token || account.refresh_token,
+       new Date(Date.now() + (data.expires_in || 7200) * 1000), account.id]
     );
-    console.log('[Magalu] 🔄 Token renovado');
+    console.log('[Magalu] 🔄 Token renovado com sucesso');
     return data.access_token;
-  } catch(e) { console.error('[Magalu Refresh]', e.message); return null; }
+  } catch(e) {
+    console.error('[Magalu Refresh] ERRO:', e.response?.data || e.message);
+    // Se refresh falhou, marca conta como necessitando reconexão
+    await db.query(
+      `UPDATE marketplace_accounts SET token_expires_at=NOW() WHERE id=$1`, [account.id]
+    ).catch(() => {});
+    return null;
+  }
 }
 
 async function fetchMagalu(acc, days) {
+  // Sempre busca conta fresca do banco (cache pode ter token antigo)
+  const { rows: freshRows } = await db.query(
+    'SELECT * FROM marketplace_accounts WHERE id=$1', [acc.id]
+  );
+  if (freshRows.length) acc = freshRows[0];
+
   let token = acc.access_token;
-  if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date()) {
-    token = await refreshMagaluToken(acc);
-    if (!token) throw new Error('Token Magalu expirado');
+
+  // Renova se expirou OU se vai expirar nos próximos 10 minutos
+  const expiry = acc.token_expires_at ? new Date(acc.token_expires_at) : null;
+  const tenMinutes = new Date(Date.now() + 10 * 60 * 1000);
+  if (!token || !expiry || expiry <= tenMinutes) {
+    console.log('[Magalu] Token expirando/expirado, renovando...');
+    const newToken = await refreshMagaluToken(acc);
+    if (newToken) {
+      token = newToken;
+    } else if (!token) {
+      throw new Error('Token Magalu expirado e não foi possível renovar. Reconecte a conta.');
+    }
   }
 
   const since = new Date(Date.now() - days * 86400000).toISOString();
@@ -443,18 +510,46 @@ async function fetchMagalu(acc, days) {
     });
 }
 
-// ── ENRIQUECE COM CUSTOS ──
+// ── ENRIQUECE COM CUSTOS v2 — por SKU+plataforma ──
 async function enrichWithCosts(orders, userId) {
-  const { rows } = await db.query('SELECT sku, cost FROM products WHERE user_id=$1', [userId]);
-  const costMap = {};
-  rows.forEach(p => { costMap[p.sku] = parseFloat(p.cost || 0); });
+  const { rows } = await db.query(
+    'SELECT sku, cost, tax_rate, platform FROM products WHERE user_id=$1 AND is_active=true',
+    [userId]
+  );
+  // Mapa: sku+platform (específico) e sku (genérico)
+  const costMap = {};   // sku → custo genérico
+  const platMap = {};   // sku|platform → custo específico
+  const taxMap  = {};   // sku → alíquota imposto
+
+  rows.forEach(p => {
+    const cost = parseFloat(p.cost || 0);
+    const tax  = parseFloat(p.tax_rate || 0);
+    if (p.platform) {
+      platMap[`${p.sku}|${p.platform}`] = cost;
+    } else {
+      costMap[p.sku] = cost;
+      if (tax > 0) taxMap[p.sku] = tax;
+    }
+  });
+
   return orders.map(o => {
-    const cost       = costMap[o.item_sku] || 0;
-    const total_cost = cost * (o.quantity || 1);
-    const net_revenue= o.total_amount - o.platform_fee - o.shipping_fee - o.tax_amount;
-    const profit     = o.status === 'cancelled' ? 0 : (net_revenue - total_cost);
-    const margin     = o.total_amount > 0 ? (profit / o.total_amount * 100) : 0;
-    return { ...o, total_cost, net_revenue, profit, profit_margin_pct: margin };
+    // Prioridade: custo específico da plataforma > custo genérico > 0
+    const specificKey = `${o.item_sku}|${o.platform}`;
+    const cost = platMap[specificKey] !== undefined
+      ? platMap[specificKey]
+      : (costMap[o.item_sku] || 0);
+
+    // Imposto: taxa do produto (%) ou taxa padrão (6%)
+    const taxRate    = taxMap[o.item_sku] || 6;
+    const tax_amount = o.total_amount * taxRate / 100;
+
+    const total_cost  = cost * (o.quantity || 1);
+    const net_revenue = o.total_amount - o.platform_fee - o.shipping_fee - tax_amount;
+    const profit      = o.status === 'cancelled' ? 0 : (net_revenue - total_cost);
+    const margin      = o.total_amount > 0 ? (profit / o.total_amount * 100) : 0;
+
+    return { ...o, total_cost, net_revenue, profit, profit_margin_pct: margin,
+             tax_amount, tax_rate: taxRate, unit_cost: cost };
   });
 }
 
@@ -716,6 +811,71 @@ ${orders.map(o => {
 </body></html>`;
     res.send(html);
   } catch(e) { res.send(`<pre style="padding:20px;color:red">${e.message}</pre>`); }
+});
+
+
+// ── ETIQUETA DE ENVIO ──
+
+// ML — gera etiqueta
+app.get('/api/label/mercadolivre/:order_id', auth, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT * FROM marketplace_accounts WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true LIMIT 1`,
+      [req.user.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Conta ML não conectada' });
+    const acc = rows[0];
+
+    // Busca shipment_id do pedido
+    const { data: order } = await axios.get(
+      `https://api.mercadolibre.com/orders/${req.params.order_id}`,
+      { headers: { Authorization: `Bearer ${acc.access_token}` } }
+    );
+    const shipmentId = order.shipping?.id;
+    if (!shipmentId) return res.status(404).json({ error: 'Pedido sem envio associado' });
+
+    // Busca etiqueta (PDF)
+    const { data: label } = await axios.get(
+      `https://api.mercadolibre.com/shipments/${shipmentId}/labels`,
+      {
+        params: { response_type: 'pdf', shipment_ids: shipmentId },
+        headers: { Authorization: `Bearer ${acc.access_token}` },
+        responseType: 'arraybuffer'
+      }
+    );
+    res.set('Content-Type', 'application/pdf');
+    res.set('Content-Disposition', `inline; filename="etiqueta-${req.params.order_id}.pdf"`);
+    res.send(Buffer.from(label));
+  } catch(e) {
+    console.error('[ML Label]', e.response?.data || e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Magalu — gera etiqueta
+app.get('/api/label/magalu/:order_code', auth, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT * FROM marketplace_accounts WHERE user_id=$1 AND platform='magalu' AND is_active=true LIMIT 1`,
+      [req.user.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Conta Magalu não conectada' });
+    const acc = rows[0];
+
+    const { data } = await axios.get(
+      `https://api.magalu.com/seller/v1/orders/${req.params.order_code}/label`,
+      {
+        headers: { Authorization: `Bearer ${acc.access_token}` },
+        responseType: 'arraybuffer'
+      }
+    );
+    res.set('Content-Type', 'application/pdf');
+    res.set('Content-Disposition', `inline; filename="etiqueta-${req.params.order_code}.pdf"`);
+    res.send(Buffer.from(data));
+  } catch(e) {
+    console.error('[Magalu Label]', e.response?.data || e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:'4.1' }));
