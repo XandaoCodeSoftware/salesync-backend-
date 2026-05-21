@@ -782,7 +782,13 @@ app.get('/api/sync/:platform', auth, async (req, res) => {
 });
 
 // ── MERCADO LIVRE: ETIQUETA DE ENVIO ──
-app.get('/api/mercadolivre/shipments/:shipmentId/label', auth, async (req, res) => {
+app.get('/api/mercadolivre/shipments/:shipmentId/label', async (req, res, next) => {
+  if (req.query.token && !req.headers.authorization) {
+    try { req.user = jwt.verify(req.query.token, process.env.JWT_SECRET); return next(); }
+    catch { return res.status(401).json({ error: 'Token inválido' }); }
+  }
+  return auth(req, res, next);
+}, async (req, res) => {
   const shipmentId = req.params.shipmentId;
   try {
     const { rows } = await db.query(
@@ -903,17 +909,41 @@ app.get('/callback/shopee', async (req, res) => {
 app.get('/auth/magalu', (req, res) => {
   const state = req.query.user_id || '';
 
+  // v5.3 FIX:
+  // Voltamos para o escopo que já funcionava no seu client antigo.
+  // O escopo de entrega "open:order-delivery-seller:read" só deve ser usado
+  // se o client Magalu tiver sido criado com ele, senão o login mostra "houve um erro".
+  const scope = 'open:order-order-seller:read';
+
   const url = 'https://id.magalu.com/login?' + new URLSearchParams({
     client_id: process.env.MAGALU_CLIENT_ID,
     redirect_uri: process.env.MAGALU_REDIRECT_URI,
-    scope: 'open:order-order-seller:read open:order-delivery-seller:read',
+    scope,
     response_type: 'code',
     choose_tenants: 'true',
     state
   }).toString();
 
-  console.log('[MAGALU AUTH URL]', url);
+  console.log('[MAGALU AUTH URL - BASIC]', url);
+  res.redirect(url);
+});
 
+// Opcional: use esta rota só depois de criar um NOVO client Magalu com o scope de entrega liberado.
+// URL: /auth/magalu-full?user_id=...
+app.get('/auth/magalu-full', (req, res) => {
+  const state = req.query.user_id || '';
+  const scope = 'open:order-order-seller:read open:order-delivery-seller:read';
+
+  const url = 'https://id.magalu.com/login?' + new URLSearchParams({
+    client_id: process.env.MAGALU_CLIENT_ID,
+    redirect_uri: process.env.MAGALU_REDIRECT_URI,
+    scope,
+    response_type: 'code',
+    choose_tenants: 'true',
+    state
+  }).toString();
+
+  console.log('[MAGALU AUTH URL - FULL]', url);
   res.redirect(url);
 });
 
@@ -952,7 +982,14 @@ app.get('/callback/magalu', async (req, res) => {
     );
     console.log(`[Magalu] ✅ ${shopName} conectado`);
     res.redirect('https://salesync.shop?connected=magalu');
-  } catch(e) { console.error('[Magalu]', e.response?.data||e.message); res.redirect('https://salesync.shop?error=magalu_failed'); }
+  } catch(e) {
+    console.error('[Magalu callback]', {
+      status: e.response?.status,
+      data: e.response?.data,
+      message: e.message
+    });
+    res.redirect('https://salesync.shop?error=magalu_failed');
+  }
 });
 
 
