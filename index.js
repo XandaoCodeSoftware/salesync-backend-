@@ -1,4 +1,4 @@
-// SalesSync v5.0 — Backend Node.js
+// SalesSync v5.1 — Backend Node.js
 // Magalu corrigido com estrutura real da API
 const express = require('express');
 const { Pool } = require('pg');
@@ -205,6 +205,47 @@ app.put('/api/products/:sku/cost', auth, async (req, res) => {
 
     Object.keys(CACHE).forEach(k => { if (k.startsWith(req.user.id)) delete CACHE[k]; });
     res.json({ success: true, data: rows[0] });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+
+// Apaga um SKU específico da aba de custos
+app.delete('/api/products/:id', auth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'ID inválido' });
+  try {
+    const { rowCount } = await db.query(
+      `DELETE FROM products WHERE id=$1 AND user_id=$2`,
+      [id, req.user.id]
+    );
+    Object.keys(CACHE).forEach(k => { if (k.startsWith(req.user.id)) delete CACHE[k]; });
+    res.json({ success: true, deleted: rowCount });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Limpa todos os custos/configurações do usuário logado
+app.delete('/api/products', auth, async (req, res) => {
+  try {
+    const { rowCount } = await db.query(
+      `DELETE FROM products WHERE user_id=$1`,
+      [req.user.id]
+    );
+    Object.keys(CACHE).forEach(k => { if (k.startsWith(req.user.id)) delete CACHE[k]; });
+    res.json({ success: true, deleted: rowCount });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Zera valores, mas mantém SKUs cadastrados
+app.post('/api/products/reset-values', auth, async (req, res) => {
+  try {
+    const { rowCount } = await db.query(
+      `UPDATE products
+       SET cost=0, tax_pct=NULL, fee_pct=NULL, shipping_fee=NULL, updated_at=NOW()
+       WHERE user_id=$1`,
+      [req.user.id]
+    );
+    Object.keys(CACHE).forEach(k => { if (k.startsWith(req.user.id)) delete CACHE[k]; });
+    res.json({ success: true, updated: rowCount });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -870,4 +911,4 @@ ${orders.map(o => {
 app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:'5.0' }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v5.0 rodando na porta ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v5.1 rodando na porta ${PORT}`));
