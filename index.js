@@ -1,4 +1,4 @@
-// SalesSync v4.1 — Backend Node.js
+// SalesSync v5.0 — Backend Node.js
 // Magalu corrigido com estrutura real da API
 const express = require('express');
 const { Pool } = require('pg');
@@ -338,35 +338,10 @@ async function fetchML(acc, days) {
   });
   const results = data.results || [];
 
-  // Coleta IDs unicos para busca em lote (max 20 por request)
-  const itemIds = [...new Set(
-    results.map(o => o.order_items?.[0]?.item?.id).filter(Boolean)
-  )];
-
-  // Busca items em lotes de 20 — muito mais rapido que 1 a 1
+  // A API de /items pode retornar 403 dependendo do escopo do app.
+  // Para não quebrar o painel, usamos os dados que já vêm no pedido:
+  // order_items[].item.title, seller_sku e sale_fee.
   const itemMap = {};
-  for (let i = 0; i < itemIds.length; i += 20) {
-    const batch = itemIds.slice(i, i + 20);
-    try {
-      const { data: items } = await axios.get('https://api.mercadolibre.com/items', {
-        params: { ids: batch.join(',') },
-        headers
-      });
-      (Array.isArray(items) ? items : []).forEach(entry => {
-        if (entry.code === 200 && entry.body) {
-          const b = entry.body;
-          // Pega melhor imagem disponivel
-          const raw = b.pictures?.[0]?.url || b.thumbnail || null;
-          itemMap[b.id] = {
-            title: b.title,
-            image: raw,
-            sku:   b.seller_custom_field ||
-                   b.attributes?.find(a => a.id === 'SELLER_SKU')?.value_name || '',
-          };
-        }
-      });
-    } catch(e) { console.error('[ML items batch]', e.message); }
-  }
 
   const statusMap = {
     paid:'paid', payment_required:'pending', pending:'pending',
@@ -402,9 +377,9 @@ async function fetchML(acc, days) {
       tax_amount:       0,
       quantity:         item?.quantity || 1,
       order_date:       o.date_created,
-      item_title:       details.title || item?.item?.title || '',
+      item_title:       details.title || item?.item?.title || o.payments?.[0]?.reason || '',
       item_image:       details.image || null,
-      item_sku:         details.sku   || item?.item?.seller_sku || '',
+      item_sku:         details.sku || item?.item?.seller_sku || item?.item?.seller_custom_field || '',
     };
   });
 }
@@ -443,18 +418,44 @@ async function fetchShopee(acc, days) {
 // ── FETCH MAGALU — estrutura real confirmada pelo debug ──
 async function refreshMagaluToken(account) {
   try {
+    if (!account.refresh_token) throw new Error('Conta Magalu sem refresh_token');
+
     const { data } = await axios.post('https://id.magalu.com/oauth/token',
-      new URLSearchParams({ grant_type:'refresh_token', refresh_token:account.refresh_token,
-        client_id:process.env.MAGALU_CLIENT_ID, client_secret:process.env.MAGALU_CLIENT_SECRET }),
-      { headers: { 'Content-Type':'application/x-www-form-urlencoded' } }
+      new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: account.refresh_token,
+        client_id: process.env.MAGALU_CLIENT_ID,
+        client_secret: process.env.MAGALU_CLIENT_SECRET
+      }),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
     );
+
     await db.query(
-      `UPDATE marketplace_accounts SET access_token=$1,refresh_token=$2,token_expires_at=$3,updated_at=NOW() WHERE id=$4`,
-      [data.access_token, data.refresh_token, new Date(Date.now()+data.expires_in*1000), account.id]
+      `UPDATE marketplace_accounts
+       SET access_token=$1, refresh_token=COALESCE($2, refresh_token), token_expires_at=$3, updated_at=NOW()
+       WHERE id=$4`,
+      [data.access_token, data.refresh_token || null, new Date(Date.now() + (data.expires_in || 7200) * 1000), account.id]
     );
+
     console.log('[Magalu] 🔄 Token renovado');
     return data.access_token;
-  } catch(e) { console.error('[Magalu Refresh]', e.message); return null; }
+  } catch(e) {
+    const status = e.response?.status;
+    const body = e.response?.data || e.message;
+    console.error('[Magalu Refresh]', status || '', body);
+
+    // 400/401 normalmente significa refresh_token inválido/expirado ou app/scope diferente.
+    // Limpa os tokens para parar o loop de erro; depois é só reconectar Magalu no painel.
+    if (status === 400 || status === 401 || String(body).includes('refresh')) {
+      await db.query(
+        `UPDATE marketplace_accounts
+         SET access_token=NULL, refresh_token=NULL, token_expires_at=NULL, updated_at=NOW()
+         WHERE id=$1`,
+        [account.id]
+      ).catch(() => {});
+    }
+    return null;
+  }
 }
 
 async function fetchMagalu(acc, days) {
@@ -866,7 +867,7 @@ ${orders.map(o => {
   } catch(e) { res.send(`<pre style="padding:20px;color:red">${e.message}</pre>`); }
 });
 
-app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:'4.1' }));
+app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:'5.0' }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v4.1 rodando na porta ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v5.0 rodando na porta ${PORT}`));
