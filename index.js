@@ -363,26 +363,75 @@ async function refreshMLToken(account) {
 }
 
 // ── FETCH ML ──
+function mlShippingStatus(o, shipment) {
+  const tags = Array.isArray(o.tags) ? o.tags : [];
+  const st = String(shipment?.status || o.shipping?.status || '').toLowerCase();
+  const sub = String(shipment?.substatus || '').toLowerCase();
+
+  if (o.status === 'cancelled' || tags.includes('cancelled') || st === 'cancelled') return 'cancelled';
+  if (tags.includes('delivered') || st === 'delivered') return 'delivered';
+  if (tags.includes('not_delivered')) {
+    if (st === 'ready_to_ship') return 'ready_to_ship';
+    if (st === 'handling') return 'handling';
+    if (st === 'shipped') return 'shipped';
+    return 'not_delivered';
+  }
+  if (st) return st;
+  if (tags.includes('paid')) return 'paid_not_shipped';
+  return 'unknown';
+}
+
+function mlShippingStatusLabel(status) {
+  const map = {
+    ready_to_ship: 'Pronto p/ enviar',
+    handling: 'Preparando',
+    not_delivered: 'Pago · não enviado',
+    paid_not_shipped: 'Pago · não enviado',
+    shipped: 'Enviado',
+    delivered: 'Entregue',
+    cancelled: 'Cancelado',
+    pending: 'Pendente',
+    unknown: '—'
+  };
+  return map[status] || status || '—';
+}
+
+async function fetchMLShipmentDetails(token, shipmentId) {
+  if (!shipmentId) return null;
+  const headers = { Authorization: `Bearer ${token}` };
+  try {
+    const { data } = await axios.get(`https://api.mercadolibre.com/shipments/${shipmentId}`, { headers });
+    return data || null;
+  } catch (e) {
+    console.error('[ML shipment]', shipmentId, e.response?.status || '', e.response?.data || e.message);
+    return null;
+  }
+}
+
 async function fetchML(acc, days) {
-  // Verifica e renova token se necessário
   let token = acc.access_token;
   if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 5*60*1000)) {
     console.log('[ML] Token expirando, renovando...');
     const newToken = await refreshMLToken(acc);
     if (newToken) token = newToken;
   }
+
   const since = new Date(Date.now() - days * 86400000).toISOString();
   const headers = { Authorization: `Bearer ${token}` };
   const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
     params: { seller: acc.platform_shop_id, sort: 'date_desc', 'order.date_created.from': since, limit: 50 },
     headers
   });
+
   const results = data.results || [];
 
-  // A API de /items pode retornar 403 dependendo do escopo do app.
-  // Para não quebrar o painel, usamos os dados que já vêm no pedido:
-  // order_items[].item.title, seller_sku e sale_fee.
-  const itemMap = {};
+  // Puxa detalhes de envio em lote leve. Se der 403/erro, o pedido continua funcionando.
+  const shipmentIds = [...new Set(results.map(o => o.shipping?.id).filter(Boolean))];
+  const shipmentMap = {};
+  await Promise.all(shipmentIds.slice(0, 50).map(async id => {
+    const det = await fetchMLShipmentDetails(token, id);
+    if (det) shipmentMap[String(id)] = det;
+  }));
 
   const statusMap = {
     paid:'paid', payment_required:'pending', pending:'pending',
@@ -391,36 +440,75 @@ async function fetchML(acc, days) {
   };
 
   return results.map(o => {
-    const item    = o.order_items?.[0];
-    const details = itemMap[item?.item?.id] || {};
+    const item = o.order_items?.[0] || {};
+    const shipmentId = o.shipping?.id || null;
+    const shipment = shipmentId ? shipmentMap[String(shipmentId)] : null;
+    const qty = parseFloat(item?.quantity || 1);
+    const totalAmount = parseFloat(o.total_amount || 0);
+    const paidAmount = parseFloat(o.paid_amount || o.payments?.[0]?.total_paid_amount || 0);
 
-    // Mercado Livre já retorna a tarifa real do anúncio em order_items[].sale_fee.
-    // Frete normalmente vem dentro de payments[].shipping_cost; shipping.cost pode vir vazio.
+    // Tarifa real do ML: vem em order_items[].sale_fee.
     const platformFee = (o.order_items || []).reduce((sum, it) => {
       return sum + (parseFloat(it.sale_fee || 0) * parseFloat(it.quantity || 1));
     }, 0);
-    const shippingFee = (o.payments || []).reduce((sum, p) => {
-      return sum + parseFloat(p.shipping_cost || 0);
-    }, 0);
+
+    // Frete exibido no pagamento do ML. Em muitos pedidos o o.shipping_cost vem null.
+    const paymentShippingFee = (o.payments || []).reduce((sum, p) => sum + parseFloat(p.shipping_cost || 0), 0);
+    const orderShippingFee = parseFloat(o.shipping_cost || 0);
+    const shipmentCost = parseFloat(shipment?.shipping_option?.cost || shipment?.cost || 0);
+    const shippingFee = paymentShippingFee || orderShippingFee || shipmentCost || Math.max(0, paidAmount - totalAmount);
+
+    const payment = o.payments?.[0] || {};
+    const mlShipStatus = mlShippingStatus(o, shipment);
 
     return {
       id:               String(o.id),
       platform:         'mercadolivre',
       platform_order_id:String(o.id),
       shop_name:        acc.shop_name,
-      fulfillment_type: o.shipping?.logistic_type === 'fulfillment' ? 'full' : 'normal',
+      fulfillment_type: (shipment?.logistic_type || o.shipping?.logistic_type) === 'fulfillment' ? 'full' : 'normal',
       status:           statusMap[o.status] || o.status,
       buyer_name:       o.buyer?.nickname || '',
-      total_amount:     o.total_amount || 0,
-      paid_amount:      o.paid_amount || o.payments?.[0]?.total_paid_amount || 0,
+      buyer_id:         o.buyer?.id || null,
+      seller_id:        o.seller?.id || acc.platform_shop_id,
+      total_amount:     totalAmount,
+      paid_amount:      paidAmount,
       platform_fee:     platformFee,
       shipping_fee:     shippingFee,
+      payment_shipping_fee: paymentShippingFee,
       tax_amount:       0,
-      quantity:         item?.quantity || 1,
+      quantity:         qty,
       order_date:       o.date_created,
-      item_title:       details.title || item?.item?.title || o.payments?.[0]?.reason || '',
-      item_image:       details.image || null,
-      item_sku:         details.sku || item?.item?.seller_sku || item?.item?.seller_custom_field || '',
+      date_closed:      o.date_closed || null,
+      date_last_updated:o.date_last_updated || o.last_updated || null,
+      item_title:       item?.item?.title || payment.reason || '',
+      item_image:       null,
+      item_sku:         item?.item?.seller_sku || item?.item?.seller_custom_field || '',
+      item_id:          item?.item?.id || null,
+      category_id:      item?.item?.category_id || null,
+      unit_price:       parseFloat(item?.unit_price || 0),
+      gross_price:      parseFloat(item?.gross_price || item?.unit_price || 0),
+      listing_type_id:  item?.listing_type_id || '',
+      sale_fee:         platformFee,
+      coupon_amount:    parseFloat(o.coupon?.amount || payment.coupon_amount || 0),
+      payment_method:   payment.payment_method_id || '',
+      payment_type:     payment.payment_type || '',
+      installments:     payment.installments || 1,
+      payment_status:   payment.status || '',
+      payment_status_detail: payment.status_detail || '',
+      tags:             Array.isArray(o.tags) ? o.tags : [],
+      ml_shipping_id:   shipmentId,
+      ml_shipping_status: mlShipStatus,
+      ml_shipping_status_label: mlShippingStatusLabel(mlShipStatus),
+      ml_shipping_mode: shipment?.mode || shipment?.shipping_mode || o.shipping?.mode || '',
+      ml_logistic_type: shipment?.logistic_type || o.shipping?.logistic_type || '',
+      ml_tracking_number: shipment?.tracking_number || shipment?.tracking?.number || '',
+      ml_tracking_method: shipment?.tracking_method || shipment?.tracking?.method || '',
+      ml_receiver_name: shipment?.receiver_address?.receiver_name || '',
+      ml_receiver_city: shipment?.receiver_address?.city?.name || '',
+      ml_receiver_state: shipment?.receiver_address?.state?.name || '',
+      ml_receiver_zip: shipment?.receiver_address?.zip_code || '',
+      ml_label_available: Boolean(shipmentId) && !['cancelled','delivered'].includes(mlShipStatus),
     };
   });
 }
@@ -693,6 +781,55 @@ app.get('/api/sync/:platform', auth, async (req, res) => {
   res.json({ success: true });
 });
 
+// ── MERCADO LIVRE: ETIQUETA DE ENVIO ──
+app.get('/api/mercadolivre/shipments/:shipmentId/label', auth, async (req, res) => {
+  const shipmentId = req.params.shipmentId;
+  try {
+    const { rows } = await db.query(
+      `SELECT * FROM marketplace_accounts
+       WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND access_token IS NOT NULL
+       LIMIT 1`,
+      [req.user.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Mercado Livre não conectado' });
+
+    let acc = rows[0];
+    let token = acc.access_token;
+    if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 5*60*1000)) {
+      const newToken = await refreshMLToken(acc);
+      if (newToken) token = newToken;
+    }
+
+    const headers = { Authorization: `Bearer ${token}` };
+    const attempts = [
+      `https://api.mercadolibre.com/shipment_labels?shipment_ids=${encodeURIComponent(shipmentId)}&response_type=pdf`,
+      `https://api.mercadolibre.com/shipments/${encodeURIComponent(shipmentId)}/labels?response_type=pdf`
+    ];
+
+    let lastError = null;
+    for (const url of attempts) {
+      try {
+        const r = await axios.get(url, { headers, responseType: 'arraybuffer', validateStatus: s => s < 500 });
+        const ct = String(r.headers['content-type'] || '');
+        if (r.status >= 200 && r.status < 300 && (ct.includes('pdf') || Buffer.byteLength(r.data || Buffer.alloc(0)) > 500)) {
+          res.setHeader('Content-Type', ct.includes('pdf') ? ct : 'application/pdf');
+          res.setHeader('Content-Disposition', `inline; filename="etiqueta-ml-${shipmentId}.pdf"`);
+          return res.send(Buffer.from(r.data));
+        }
+        lastError = { status: r.status, data: Buffer.from(r.data || '').toString('utf8').slice(0, 500) };
+      } catch(e) {
+        lastError = e.response?.data || e.message;
+      }
+    }
+
+    return res.status(422).json({ error: 'Etiqueta ainda não disponível para esse envio', details: lastError });
+  } catch(e) {
+    console.error('[ML label]', e.response?.data || e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
 setInterval(() => {
   const now = Date.now();
   Object.keys(CACHE).forEach(k => { if ((now - CACHE[k].ts) >= CACHE_TTL) delete CACHE[k]; });
@@ -765,12 +902,19 @@ app.get('/callback/shopee', async (req, res) => {
 // ── OAUTH MAGALU ──
 app.get('/auth/magalu', (req, res) => {
   const state = req.query.user_id || '';
-  res.redirect('https://id.magalu.com/login?' + new URLSearchParams({
+
+  const url = 'https://id.magalu.com/login?' + new URLSearchParams({
     client_id: process.env.MAGALU_CLIENT_ID,
     redirect_uri: process.env.MAGALU_REDIRECT_URI,
     scope: 'open:order-order-seller:read open:order-delivery-seller:read',
-    response_type: 'code', choose_tenants: 'true', state
-  }).toString());
+    response_type: 'code',
+    choose_tenants: 'true',
+    state
+  }).toString();
+
+  console.log('[MAGALU AUTH URL]', url);
+
+  res.redirect(url);
 });
 
 app.get('/callback/magalu', async (req, res) => {
