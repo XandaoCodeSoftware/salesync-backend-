@@ -562,7 +562,7 @@ app.get('/callback/shopee', async (req, res) => {
     );
     await db.query(`
       INSERT INTO marketplace_accounts (user_id,platform,platform_shop_id,shop_name,access_token,refresh_token,token_expires_at,mode,is_active)
-      VALUES ($1,'shopee',$2,$3,$4,$4,$5,$6,'normal',true)
+      VALUES ($1,'shopee',$2,$3,$4,$5,$6,$7,'normal',true)
       ON CONFLICT (user_id,platform,platform_shop_id) DO UPDATE SET
         access_token=EXCLUDED.access_token,refresh_token=EXCLUDED.refresh_token,
         token_expires_at=EXCLUDED.token_expires_at,is_active=true,updated_at=NOW()`,
@@ -575,20 +575,14 @@ app.get('/callback/shopee', async (req, res) => {
 // ── OAUTH MAGALU ──
 app.get('/auth/magalu', (req, res) => {
   const state = req.query.user_id || '';
-
-  const url = 'https://id.magalu.com/login?' + new URLSearchParams({
+  res.redirect('https://id.magalu.com/login?' + new URLSearchParams({
     client_id: process.env.MAGALU_CLIENT_ID,
     redirect_uri: process.env.MAGALU_REDIRECT_URI,
-    scope: 'open:order-order-seller:read',
-    response_type: 'code',
-    choose_tenants: 'true',
-    state
-  }).toString();
-
-  console.log('[MAGALU AUTH URL]', url);
-
-  res.redirect(url);
+    scope: 'open:order-order-seller:read open:order-delivery-seller:read',
+    response_type: 'code', choose_tenants: 'true', state
+  }).toString());
 });
+
 app.get('/callback/magalu', async (req, res) => {
   const { code, state } = req.query;
   if (!code) return res.redirect('https://salesync.shop?error=magalu_no_code');
@@ -728,4 +722,3 @@ app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v4.1 rodando na porta ${PORT}`));
-
