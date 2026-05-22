@@ -61,10 +61,23 @@ async function ensureProductSchema() {
 }
 
 function auth(req, res, next) {
-  const token = req.headers.authorization?.split(' ')[1];
+  // Aceita token pelo header Authorization ou pela query string.
+  // A query é necessária para abrir PDF direto em nova aba via window.open(),
+  // porque o navegador não envia header Authorization nesse caso.
+  const headerToken = req.headers.authorization?.startsWith('Bearer ')
+    ? req.headers.authorization.split(' ')[1]
+    : null;
+  const queryToken = req.query?.token ? String(req.query.token) : null;
+  const token = headerToken || queryToken;
+
   if (!token) return res.status(401).json({ error: 'Token não fornecido' });
-  try { req.user = jwt.verify(token, process.env.JWT_SECRET); next(); }
-  catch { res.status(401).json({ error: 'Token inválido' }); }
+
+  try {
+    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    next();
+  } catch {
+    res.status(401).json({ error: 'Token inválido' });
+  }
 }
 
 // ── AUTH ──
@@ -1566,6 +1579,31 @@ function magaluLabelPayloads(deliveryId, options = {}) {
   return payloads;
 }
 
+
+
+function summarizeMagaluLabelDiagnosis(deliveryProbe, results) {
+  const d = (deliveryProbe || []).find(x => x.path && x.path.includes('/seller/v1/deliveries/') && x.status === 200)?.data || {};
+  const invoice = Array.isArray(d.invoices) ? d.invoices[0] : null;
+  const provider = d.shipping?.provider || {};
+  const all500 = Array.isArray(results) && results.length > 0 && results.every(r => Number(r.status) === 500);
+  return {
+    delivery_id: d.id || null,
+    delivery_code: d.code || null,
+    delivery_status: d.status || null,
+    provider_id: provider.id || null,
+    provider_name: provider.description || provider.name || null,
+    is_mle: Boolean(provider.extras?.is_mle),
+    is_fulfillment: Boolean(provider.extras?.is_fulfillment),
+    invoice_key: invoice?.key || null,
+    invoice_status: invoice?.status?.id || null,
+    invoice_description: invoice?.status?.description || null,
+    label_endpoint_all_500: all500,
+    conclusion: all500
+      ? 'Entrega aparenta apta para etiqueta, mas o endpoint oficial retornou 500. Provável falha/instabilidade/processamento interno da Magalu.'
+      : 'Verifique os detalhes dos payloads/retornos para identificar validação ou sucesso parcial.'
+  };
+}
+
 app.get('/api/magalu/delivery/:id/official-label-debug', auth, async (req, res) => {
   const deliveryId = req.params.id;
 
@@ -1601,7 +1639,8 @@ app.get('/api/magalu/delivery/:id/official-label-debug', auth, async (req, res) 
 
     res.json({
       delivery_id: deliveryId,
-      diagnosis: 'Se delivery_probe retornar 200 e todos os payloads com channel/label retornarem 500, o erro está no serviço Magalu ou a entrega não está apta para etiqueta. Verifique invoice/NF-e, logística e status da entrega.',
+      support_summary: summarizeMagaluLabelDiagnosis(delivery_probe, results),
+      diagnosis: 'Se delivery_probe retornar 200, status=invoiced, provider.extras.is_mle=true, invoice.status.id=approved e todos os payloads com channel/label retornarem 500, o payload está validado e a falha está no serviço de etiquetas da Magalu ou em processamento interno ainda não liberado.',
       delivery_probe,
       inferred_channels: channels,
       results
@@ -1646,7 +1685,7 @@ app.get('/api/magalu/delivery/:id/official-label', auth, async (req, res) => {
 
     res.status(422).json({
       error: 'Não foi possível gerar etiqueta Magalu',
-      hint: 'Abra /official-label-debug para ver delivery_probe. Se a entrega não estiver faturada/NF-e/logística válida, a Magalu pode devolver 500 genérico.',
+      hint: 'Entrega validada/faturada e NF-e aprovada, mas a API da Magalu retornou 500 na geração da etiqueta. Isso indica falha/instabilidade/inelegibilidade interna do serviço de etiquetas. Abra /official-label-debug e envie o relatório ao suporte Magalu.',
       endpoint: 'POST /seller/v1/logistics/shipping-labels',
       delivery_id: deliveryId,
       delivery_probe,
