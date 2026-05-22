@@ -1,4 +1,4 @@
-// SalesSync v5.1 — Backend Node.js
+// SalesSync v5.2 — Backend Node.js
 // Magalu corrigido com estrutura real da API
 const express = require('express');
 const { Pool } = require('pg');
@@ -796,7 +796,7 @@ async function enrichWithCosts(orders, userId) {
 app.get('/api/orders', auth, async (req, res) => {
   const { period = '7', platform, date_from, date_to } = req.query;
 
-  let days = Math.min(Math.max(parseInt(period) || 7, 1), 90);
+  let days = Math.min(Math.max(parseInt(period) || 7, 1), 45);
   let customFrom = null;
   let customTo = null;
 
@@ -804,8 +804,11 @@ app.get('/api/orders', auth, async (req, res) => {
     customFrom = new Date(String(date_from) + 'T00:00:00-03:00');
     customTo = new Date(String(date_to) + 'T23:59:59-03:00');
     if (Number.isFinite(customFrom.getTime()) && Number.isFinite(customTo.getTime())) {
+      const selectedRangeDays = Math.ceil((customTo.getTime() - customFrom.getTime()) / 86400000) + 1;
+      if (selectedRangeDays < 1) return res.status(400).json({ error: 'Data final precisa ser maior ou igual à inicial' });
+      if (selectedRangeDays > 45) return res.status(400).json({ error: 'Período personalizado limitado a 45 dias' });
       const diffDays = Math.ceil((Date.now() - customFrom.getTime()) / 86400000);
-      days = Math.min(Math.max(diffDays || 1, 1), 90);
+      days = Math.min(Math.max(diffDays || selectedRangeDays || 1, 1), 45);
     } else {
       customFrom = null;
       customTo = null;
@@ -1443,11 +1446,12 @@ app.get('/api/magalu/delivery/:id/label', auth, async (req, res) => {
       const r = await postMagaluShippingLabel(acc, payload);
       const ct = r.headers?.['content-type'] || '';
       const buf = Buffer.from(r.data || '');
+      const pdf = extractPdfBufferFromLabelResponse(r.data, ct);
 
-      if (r.status >= 200 && r.status < 300 && (ct.includes('pdf') || looksLikePdfBuffer(buf))) {
+      if (r.status >= 200 && r.status < 300 && pdf) {
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `inline; filename="magalu-etiqueta-${deliveryId}.pdf"`);
-        return res.send(buf);
+        return res.send(pdf);
       }
 
       let parsed = null;
@@ -1472,6 +1476,48 @@ function looksLikePdfBuffer(buf) {
   if (!buf) return false;
   const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
   return b.slice(0, 4).toString() === '%PDF';
+}
+
+function extractPdfBufferFromLabelResponse(data, contentType) {
+  const buf = Buffer.from(data || '');
+  if (!buf.length) return null;
+  if (String(contentType || '').toLowerCase().includes('pdf') || looksLikePdfBuffer(buf)) return buf;
+
+  const text = buf.toString('utf8').trim();
+  if (!text) return null;
+
+  const cleanBase64 = (v) => String(v || '').replace(/^data:application\/pdf;base64,/i, '').trim();
+  const tryBase64Pdf = (v) => {
+    const raw = cleanBase64(v);
+    if (!raw || !raw.includes('JVBER')) return null;
+    const start = raw.indexOf('JVBER');
+    const sliced = raw.slice(start).replace(/\s/g, '');
+    try {
+      const pdf = Buffer.from(sliced, 'base64');
+      return looksLikePdfBuffer(pdf) ? pdf : null;
+    } catch { return null; }
+  };
+
+  const direct = tryBase64Pdf(text);
+  if (direct) return direct;
+
+  try {
+    const parsed = JSON.parse(text);
+    const stack = [parsed];
+    const keys = ['file','pdf','content','data','base64','label','document','body','url'];
+    while (stack.length) {
+      const cur = stack.shift();
+      if (typeof cur === 'string') {
+        const pdf = tryBase64Pdf(cur);
+        if (pdf) return pdf;
+      } else if (cur && typeof cur === 'object') {
+        for (const k of keys) if (cur[k] !== undefined) stack.push(cur[k]);
+        for (const v of Object.values(cur)) if (v && typeof v === 'object') stack.push(v);
+      }
+    }
+  } catch {}
+
+  return null;
 }
 
 async function postMagaluShippingLabel(acc, payload) {
@@ -1669,11 +1715,12 @@ app.get('/api/magalu/delivery/:id/official-label', auth, async (req, res) => {
       const r = await postMagaluShippingLabel(acc, payload);
       const ct = r.headers?.['content-type'] || '';
       const buf = Buffer.from(r.data || '');
+      const pdf = extractPdfBufferFromLabelResponse(r.data, ct);
 
-      if (r.status >= 200 && r.status < 300 && (ct.includes('pdf') || looksLikePdfBuffer(buf))) {
+      if (r.status >= 200 && r.status < 300 && pdf) {
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `inline; filename="magalu-etiqueta-${deliveryId}.pdf"`);
-        return res.send(buf);
+        return res.send(pdf);
       }
 
       let parsed = null;
@@ -1703,4 +1750,4 @@ app.get('/api/magalu/delivery/:id/official-label', auth, async (req, res) => {
 app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:'5.0' }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v5.1 rodando na porta ${PORT}`));  
+app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v5.2 rodando na porta ${PORT}`));  
