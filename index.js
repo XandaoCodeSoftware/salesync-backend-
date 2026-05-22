@@ -775,8 +775,24 @@ async function enrichWithCosts(orders, userId) {
 
 // ── API PEDIDOS ──
 app.get('/api/orders', auth, async (req, res) => {
-  const { period = '7', platform } = req.query;
-  const days = Math.min(Math.max(parseInt(period) || 7, 1), 30);
+  const { period = '7', platform, date_from, date_to } = req.query;
+
+  let days = Math.min(Math.max(parseInt(period) || 7, 1), 90);
+  let customFrom = null;
+  let customTo = null;
+
+  if (date_from && date_to) {
+    customFrom = new Date(String(date_from) + 'T00:00:00-03:00');
+    customTo = new Date(String(date_to) + 'T23:59:59-03:00');
+    if (Number.isFinite(customFrom.getTime()) && Number.isFinite(customTo.getTime())) {
+      const diffDays = Math.ceil((Date.now() - customFrom.getTime()) / 86400000);
+      days = Math.min(Math.max(diffDays || 1, 1), 90);
+    } else {
+      customFrom = null;
+      customTo = null;
+    }
+  }
+
   try {
     const { rows: accounts } = await db.query(
       `SELECT * FROM marketplace_accounts WHERE user_id=$1 AND is_active=true AND access_token IS NOT NULL`,
@@ -788,7 +804,7 @@ app.get('/api/orders', auth, async (req, res) => {
     const filtered = platform ? accounts.filter(a => a.platform === platform) : accounts;
 
     for (const acc of filtered) {
-      const cacheKey = `${req.user.id}_${acc.platform}_${days}`;
+      const cacheKey = `${req.user.id}_${acc.platform}_${days}_${customFrom ? customFrom.toISOString().slice(0,10) : ''}_${customTo ? customTo.toISOString().slice(0,10) : ''}`;
       const cached   = CACHE[cacheKey];
       if (cached && (Date.now() - cached.ts) < CACHE_TTL) {
         allOrders = allOrders.concat(cached.data); continue;
@@ -798,6 +814,14 @@ app.get('/api/orders', auth, async (req, res) => {
         if (acc.platform === 'mercadolivre') orders = await fetchML(acc, days);
         else if (acc.platform === 'shopee')  orders = await fetchShopee(acc, days);
         else if (acc.platform === 'magalu')  orders = await fetchMagalu(acc, days);
+
+        if (customFrom && customTo) {
+          orders = orders.filter(o => {
+            const dt = new Date(o.order_date).getTime();
+            return Number.isFinite(dt) && dt >= customFrom.getTime() && dt <= customTo.getTime();
+          });
+        }
+
         CACHE[cacheKey] = { data: orders, ts: Date.now() };
         allOrders = allOrders.concat(orders);
         await db.query(`UPDATE marketplace_accounts SET last_sync_at=NOW() WHERE id=$1`, [acc.id]);
@@ -1448,11 +1472,19 @@ async function postMagaluShippingLabel(acc, payload) {
 }
 
 function magaluLabelPayloads(deliveryId) {
-  // Endpoint oficial Magalu: POST /seller/v1/logistics/shipping-labels
-  // Não enviar channel/label/type aqui; esses campos causavam server_error no retorno da Magalu.
+  // A API valida obrigatoriamente: channel, label e deliveries.
+  // Mantemos várias tentativas porque o Magalu retorna 422 detalhado quando algum formato não bate,
+  // e algumas contas aceitam variações de channel/formato de etiqueta.
+  const idObj = { id: deliveryId };
   return [
-    { deliveries: [{ id: deliveryId }] },
-    { deliveries: [deliveryId] }
+    { channel: 'MagazineLuiza', label: { type: 'full', format: 'A4' }, deliveries: [idObj] },
+    { channel: 'MagazineLuiza', label: { type: 'summary', format: 'A4' }, deliveries: [idObj] },
+    { channel: 'MagazineLuiza', label: { type: 'full' }, deliveries: [idObj] },
+    { channel: 'MagazineLuiza', label: { type: 'summary' }, deliveries: [idObj] },
+    { channel: 'magalu', label: { type: 'full', format: 'A4' }, deliveries: [idObj] },
+    { channel: 'magalu', label: { type: 'summary', format: 'A4' }, deliveries: [idObj] },
+    { channel: 'MagazineLuiza', label: { format: 'A4' }, deliveries: [idObj] },
+    { channel: 'MagazineLuiza', label: { format: 'ZEBRA' }, deliveries: [idObj] }
   ];
 }
 
