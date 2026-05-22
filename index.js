@@ -911,11 +911,15 @@ app.get('/callback/shopee', async (req, res) => {
 app.get('/auth/magalu', (req, res) => {
   const state = req.query.user_id || '';
 
-  // v5.3 FIX:
-  // Voltamos para o escopo que já funcionava no seu client antigo.
-  // O escopo de entrega "open:order-delivery-seller:read" só deve ser usado
-  // se o client Magalu tiver sido criado com ele, senão o login mostra "houve um erro".
-  const scope = 'open:order-order-seller:read';
+  const scope = [
+    'open:order-order-seller:read',
+    'open:order-delivery-seller:read',
+    'open:order-delivery-seller:write',
+    'open:order-invoice-seller:read',
+    'open:order-logistics-seller:read',
+    'open:order-logistics-seller:write',
+    'open:logistic-seller-shippings:read'
+  ].join(' ');
 
   const url = 'https://id.magalu.com/login?' + new URLSearchParams({
     client_id: process.env.MAGALU_CLIENT_ID,
@@ -926,7 +930,8 @@ app.get('/auth/magalu', (req, res) => {
     state
   }).toString();
 
-  console.log('[MAGALU AUTH URL - BASIC]', url);
+  console.log('[MAGALU AUTH URL]', url);
+
   res.redirect(url);
 });
 
