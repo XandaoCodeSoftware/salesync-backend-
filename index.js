@@ -465,6 +465,8 @@ async function fetchML(acc, days) {
       id:               String(o.id),
       platform:         'mercadolivre',
       platform_order_id:String(o.id),
+      shipping_id:      o.shipping?.id || null,
+      tags:             Array.isArray(o.tags) ? o.tags : [],
       shop_name:        acc.shop_name,
       fulfillment_type: (shipment?.logistic_type || o.shipping?.logistic_type) === 'fulfillment' ? 'full' : 'normal',
       status:           statusMap[o.status] || o.status,
@@ -1088,6 +1090,237 @@ ${orders.map(o => {
     res.send(html);
   } catch(e) { res.send(`<pre style="padding:20px;color:red">${e.message}</pre>`); }
 });
+
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v5.7 — EXPEDIÇÃO / ETIQUETAS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function mlCanShowLabel(orderLike = {}) {
+  const status = String(orderLike.status || '').toLowerCase();
+  const fulfillment = String(orderLike.fulfillment_type || '').toLowerCase();
+  const shippingStatus = String(orderLike.shipping_status || '').toLowerCase();
+  const tags = Array.isArray(orderLike.tags) ? orderLike.tags : [];
+
+  if (fulfillment === 'full') return false;
+  if (!orderLike.shipping_id) return false;
+  if (status === 'cancelled' || status === 'delivered') return false;
+  if (shippingStatus === 'shipped' || shippingStatus === 'delivered') return false;
+  if (tags.includes('delivered') || tags.includes('shipped')) return false;
+
+  return status === 'paid' || tags.includes('paid') || tags.includes('not_delivered');
+}
+
+async function getMagaluAccount(userId) {
+  const { rows } = await db.query(
+    `SELECT * FROM marketplace_accounts
+     WHERE user_id=$1 AND platform='magalu'
+     AND is_active=true AND access_token IS NOT NULL
+     LIMIT 1`,
+    [userId]
+  );
+  if (!rows.length) return null;
+
+  const acc = rows[0];
+  let token = acc.access_token;
+
+  if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 5 * 60 * 1000)) {
+    const newToken = await refreshMagaluToken(acc);
+    if (!newToken) return null;
+    token = newToken;
+  }
+
+  return { ...acc, access_token: token };
+}
+
+function escapeHtml(v) {
+  return String(v ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function pickMagaluDelivery(order) {
+  const d = order?.deliveries?.[0] || {};
+  const item = d.items?.[0] || {};
+  const info = item.info || {};
+  return { d, item, info };
+}
+
+app.get('/debug/magalu-expedicao', auth, async (req, res) => {
+  try {
+    const acc = await getMagaluAccount(req.user.id);
+    if (!acc) {
+      return res.send('<h2 style="font-family:sans-serif;color:#ef4444;padding:20px">Magalu não conectado ou token expirado. Reconecte a conta.</h2>');
+    }
+
+    const { data } = await axios.get('https://api.magalu.com/seller/v1/orders', {
+      params: { _limit: 1, _sort: 'created_at:desc' },
+      headers: { Authorization: `Bearer ${acc.access_token}` }
+    });
+
+    const order = data.results?.[0];
+    if (!order) {
+      return res.send('<h2 style="font-family:sans-serif;color:#ef4444;padding:20px">Nenhum pedido Magalu encontrado.</h2>');
+    }
+
+    const { d, info } = pickMagaluDelivery(order);
+    const deliveryId = d.id || d.uuid || d.code || d.delivery_id || '';
+    const orderId = order.code || order.id || '';
+    const isFull = d.shipping?.provider?.extras?.is_fulfillment === true;
+    const providerName = d.shipping?.provider?.name || d.shipping?.provider?.description || '—';
+    const status = order.status || d.status || '—';
+    const tokenParam = encodeURIComponent(req.query.token || '');
+
+    const page = `<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"/><title>Debug Magalu Expedição</title>
+<style>
+*{box-sizing:border-box}body{font-family:Inter,Segoe UI,Arial,sans-serif;background:#070b16;color:#e5e7eb;margin:0;padding:22px}
+h1{margin:0 0 6px;color:#a78bfa}.sub{color:#64748b;font-size:13px;margin-bottom:18px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.card{background:#0f172a;border:1px solid rgba(148,163,184,.18);border-radius:14px;padding:16px}
+.card h2{font-size:13px;text-transform:uppercase;letter-spacing:.8px;color:#94a3b8;margin:0 0 12px}
+.row{display:flex;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,.06);padding:7px 0;font-size:12px;gap:10px}
+.l{color:#64748b}.v{font-weight:700;color:#f8fafc;text-align:right;word-break:break-all}
+.btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.btn{border:1px solid rgba(167,139,250,.35);background:rgba(109,40,217,.2);color:#c4b5fd;padding:10px 13px;border-radius:10px;text-decoration:none;font-weight:800;font-size:12px}
+.btn.yellow{border-color:rgba(251,191,36,.35);background:rgba(251,191,36,.1);color:#fbbf24}.bad{color:#f87171}.ok{color:#10b981}
+pre{background:#020617;border:1px solid rgba(148,163,184,.15);border-radius:12px;padding:14px;overflow:auto;max-height:480px;font-size:11px;color:#67e8f9}
+.notice{background:rgba(251,191,36,.09);border:1px solid rgba(251,191,36,.24);color:#fde68a;border-radius:12px;padding:12px;font-size:13px;margin-bottom:14px}
+input{background:#111827;border:1px solid rgba(148,163,184,.22);color:#e5e7eb;border-radius:9px;padding:9px;width:100%;margin-top:6px}
+label{font-size:11px;color:#94a3b8;font-weight:700;text-transform:uppercase}
+</style></head><body>
+<h1>⚡ Debug Magalu Expedição</h1>
+<div class="sub">Último pedido Magalu · ${new Date().toLocaleString('pt-BR')}</div>
+<div class="notice">Para etiqueta Magalu, normalmente o pedido precisa ser <b>envio normal / Magalu Entregas</b> e estar <b>faturado com NF-e</b>. Full/Fulfillment não entra aqui.</div>
+<div class="grid">
+<div class="card"><h2>Pedido</h2>
+<div class="row"><span class="l">Order ID</span><span class="v">${escapeHtml(orderId)}</span></div>
+<div class="row"><span class="l">Delivery ID detectado</span><span class="v">${escapeHtml(deliveryId || 'não encontrado')}</span></div>
+<div class="row"><span class="l">Status</span><span class="v">${escapeHtml(status)}</span></div>
+<div class="row"><span class="l">Full/Fulfillment</span><span class="v ${isFull?'bad':'ok'}">${isFull ? 'SIM — não gerar etiqueta aqui' : 'NÃO — envio normal'}</span></div>
+<div class="row"><span class="l">Transportadora/Provider</span><span class="v">${escapeHtml(providerName)}</span></div>
+<div class="row"><span class="l">Produto</span><span class="v">${escapeHtml(info.name || info.description || '—')}</span></div>
+<div class="row"><span class="l">SKU</span><span class="v">${escapeHtml(info.sku || '—')}</span></div>
+<div class="btns">
+<a class="btn" target="_blank" href="/debug/magalu-expedicao/json?token=${tokenParam}">Ver JSON bruto</a>
+${deliveryId ? `<a class="btn yellow" target="_blank" href="/api/magalu/delivery/${encodeURIComponent(deliveryId)}/debug?token=${tokenParam}">Testar endpoints</a>` : ''}
+${deliveryId ? `<a class="btn" target="_blank" href="/api/magalu/delivery/${encodeURIComponent(deliveryId)}/label?token=${tokenParam}">Tentar etiqueta</a>` : ''}
+</div></div>
+<div class="card"><h2>Possíveis requisitos</h2>
+<div class="row"><span class="l">NF-e / chave</span><span class="v">provável obrigatório</span></div>
+<div class="row"><span class="l">Status faturado/invoiced</span><span class="v">provável obrigatório</span></div>
+<div class="row"><span class="l">Magalu Entregas</span><span class="v">provável obrigatório</span></div>
+<div class="row"><span class="l">Escopo delivery</span><span class="v">pode ser necessário</span></div>
+<div class="row"><span class="l">Full</span><span class="v">não usar etiqueta normal</span></div>
+<div style="margin-top:14px"><label>Delivery ID manual</label><input id="did" placeholder="Cole um delivery id"/>
+<div class="btns">
+<a class="btn" href="#" onclick="this.href='/api/magalu/delivery/'+encodeURIComponent(document.getElementById('did').value)+'/debug?token=${tokenParam}'" target="_blank">Testar ID manual</a>
+<a class="btn" href="#" onclick="this.href='/api/magalu/delivery/'+encodeURIComponent(document.getElementById('did').value)+'/label?token=${tokenParam}'" target="_blank">Etiqueta ID manual</a>
+</div></div></div></div>
+<div class="card" style="margin-top:14px"><h2>delivery[0] bruto</h2><pre>${escapeHtml(JSON.stringify(d, null, 2))}</pre></div>
+<div class="card" style="margin-top:14px"><h2>order bruto</h2><pre>${escapeHtml(JSON.stringify(order, null, 2))}</pre></div>
+</body></html>`;
+
+    res.send(page);
+  } catch (e) {
+    res.send(`<pre style="padding:20px;color:red">${escapeHtml(e.message)}\n${escapeHtml(e.stack)}</pre>`);
+  }
+});
+
+app.get('/debug/magalu-expedicao/json', auth, async (req, res) => {
+  try {
+    const acc = await getMagaluAccount(req.user.id);
+    if (!acc) return res.status(401).json({ error: 'Magalu não conectado ou token expirado' });
+    const { data } = await axios.get('https://api.magalu.com/seller/v1/orders', {
+      params: { _limit: 1, _sort: 'created_at:desc' },
+      headers: { Authorization: `Bearer ${acc.access_token}` }
+    });
+    res.json(data.results?.[0] || null);
+  } catch(e) {
+    res.status(e.response?.status || 500).json({ error: e.message, data: e.response?.data });
+  }
+});
+
+app.get('/api/magalu/delivery/:id/debug', auth, async (req, res) => {
+  const deliveryId = req.params.id;
+  try {
+    const acc = await getMagaluAccount(req.user.id);
+    if (!acc) return res.status(401).json({ error: 'Magalu não conectado ou token expirado' });
+
+    const candidates = [
+      `/seller/v1/deliveries/${deliveryId}`,
+      `/seller/v1/deliveries/${deliveryId}/shippings`,
+      `/seller/v1/deliveries/${deliveryId}/labels`,
+      `/seller/v1/deliveries/${deliveryId}/label`,
+      `/seller/v1/deliveries/${deliveryId}/invoices`,
+      `/seller/v1/deliveries/${deliveryId}/histories`,
+      `/seller/v1/orders/${deliveryId}`,
+      `/seller/v1/orders/${deliveryId}/deliveries`
+    ];
+
+    const results = [];
+    for (const path of candidates) {
+      const url = `https://api.magalu.com${path}`;
+      const r = await axios.get(url, {
+        headers: { Authorization: `Bearer ${acc.access_token}` },
+        validateStatus: () => true
+      });
+      results.push({ path, status: r.status, content_type: r.headers?.['content-type'], data: r.data });
+    }
+
+    res.json({
+      delivery_id: deliveryId,
+      note: 'Se etiqueta voltar 404/403/422, provavelmente precisa NF-e/faturamento, Magalu Entregas, escopo delivery ou endpoint específico.',
+      results
+    });
+  } catch(e) {
+    res.status(e.response?.status || 500).json({ error: e.message, data: e.response?.data });
+  }
+});
+
+app.get('/api/magalu/delivery/:id/label', auth, async (req, res) => {
+  const deliveryId = req.params.id;
+  try {
+    const acc = await getMagaluAccount(req.user.id);
+    if (!acc) return res.status(401).json({ error: 'Magalu não conectado ou token expirado' });
+
+    const candidates = [
+      `/seller/v1/deliveries/${deliveryId}/labels`,
+      `/seller/v1/deliveries/${deliveryId}/label`,
+      `/seller/v1/deliveries/${deliveryId}/shippings/label`,
+      `/seller/v1/deliveries/${deliveryId}/shippings/labels`
+    ];
+
+    const attempts = [];
+    for (const path of candidates) {
+      const url = `https://api.magalu.com${path}`;
+      const r = await axios.get(url, {
+        headers: { Authorization: `Bearer ${acc.access_token}`, Accept: 'application/pdf,application/json,*/*' },
+        responseType: 'arraybuffer',
+        validateStatus: () => true
+      });
+      const ct = r.headers?.['content-type'] || '';
+      const bodyText = Buffer.from(r.data || '').toString('utf8');
+      attempts.push({ path, status: r.status, content_type: ct, sample: bodyText.slice(0, 500) });
+      if (r.status >= 200 && r.status < 300 && ct.includes('pdf')) {
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `inline; filename="magalu-etiqueta-${deliveryId}.pdf"`);
+        return res.send(Buffer.from(r.data));
+      }
+    }
+
+    res.status(404).json({
+      error: 'Não foi possível baixar a etiqueta Magalu nos endpoints testados',
+      delivery_id: deliveryId,
+      possible_reason: 'Pode precisar NF-e/faturamento, Magalu Entregas, escopo de delivery, ou endpoint específico não disponível no client atual.',
+      attempts
+    });
+  } catch(e) {
+    res.status(e.response?.status || 500).json({ error: e.message, data: e.response?.data });
+  }
+});
+
 
 app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:'5.0' }));
 
