@@ -1093,6 +1093,65 @@ ${orders.map(o => {
 
 
 
+
+// ══ ETIQUETA MERCADO LIVRE — v5.9 restaurada ══
+app.get('/api/ml/label/:shippingId', auth, async (req, res) => {
+  const { shippingId } = req.params;
+
+  try {
+    const { rows } = await db.query(
+      `SELECT * FROM marketplace_accounts
+       WHERE user_id=$1
+       AND platform='mercadolivre'
+       AND is_active=true
+       AND access_token IS NOT NULL
+       LIMIT 1`,
+      [req.user.id]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ error: 'Mercado Livre não conectado' });
+    }
+
+    const acc = rows[0];
+    let token = acc.access_token;
+
+    if (
+      acc.token_expires_at &&
+      new Date(acc.token_expires_at) <= new Date(Date.now() + 5 * 60 * 1000)
+    ) {
+      const newToken = await refreshMLToken(acc);
+      if (newToken) token = newToken;
+    }
+
+    const labelUrl =
+      `https://api.mercadolibre.com/shipment_labels?shipment_ids=${shippingId}&response_type=pdf`;
+
+    const labelResp = await axios.get(labelUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+      responseType: 'arraybuffer'
+    });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="etiqueta-${shippingId}.pdf"`);
+    res.send(Buffer.from(labelResp.data));
+
+  } catch (e) {
+    console.error('[ML Label]', {
+      status: e.response?.status,
+      data: e.response?.data?.toString?.() || e.response?.data || e.message
+    });
+
+    res.status(e.response?.status || 500).json({
+      error: 'Não foi possível baixar a etiqueta',
+      details: {
+        status: e.response?.status,
+        data: e.response?.data?.toString?.() || e.response?.data || e.message
+      }
+    });
+  }
+});
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // v5.7 — EXPEDIÇÃO / ETIQUETAS
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1134,6 +1193,10 @@ async function getMagaluAccount(userId) {
   return { ...acc, access_token: token };
 }
 
+function publicBaseUrl(req) {
+  return process.env.PUBLIC_API_URL || `${req.protocol}://${req.get('host')}`;
+}
+
 function escapeHtml(v) {
   return String(v ?? '')
     .replace(/&/g, '&amp;')
@@ -1173,6 +1236,7 @@ app.get('/debug/magalu-expedicao', auth, async (req, res) => {
     const providerName = d.shipping?.provider?.name || d.shipping?.provider?.description || '—';
     const status = order.status || d.status || '—';
     const tokenParam = encodeURIComponent(req.query.token || '');
+    const baseUrl = publicBaseUrl(req);
 
     const page = `<!doctype html>
 <html lang="pt-BR"><head><meta charset="utf-8"/><title>Debug Magalu Expedição</title>
@@ -1203,9 +1267,9 @@ label{font-size:11px;color:#94a3b8;font-weight:700;text-transform:uppercase}
 <div class="row"><span class="l">Produto</span><span class="v">${escapeHtml(info.name || info.description || '—')}</span></div>
 <div class="row"><span class="l">SKU</span><span class="v">${escapeHtml(info.sku || '—')}</span></div>
 <div class="btns">
-<a class="btn" target="_blank" href="/debug/magalu-expedicao/json?token=${tokenParam}">Ver JSON bruto</a>
-${deliveryId ? `<a class="btn yellow" target="_blank" href="/api/magalu/delivery/${encodeURIComponent(deliveryId)}/debug?token=${tokenParam}">Testar endpoints</a>` : ''}
-${deliveryId ? `<a class="btn" target="_blank" href="/api/magalu/delivery/${encodeURIComponent(deliveryId)}/label?token=${tokenParam}">Tentar etiqueta</a>` : ''}
+<a class="btn" target="_blank" href="${baseUrl}/debug/magalu-expedicao/json?token=${tokenParam}">Ver JSON bruto</a>
+${deliveryId ? `<a class="btn yellow" target="_blank" href="${baseUrl}/api/magalu/delivery/${encodeURIComponent(deliveryId)}/debug?token=${tokenParam}">Testar endpoints</a>` : ''}
+${deliveryId ? `<a class="btn" target="_blank" href="${baseUrl}/api/magalu/delivery/${encodeURIComponent(deliveryId)}/label?token=${tokenParam}">Tentar etiqueta</a>` : ''}
 </div></div>
 <div class="card"><h2>Possíveis requisitos</h2>
 <div class="row"><span class="l">NF-e / chave</span><span class="v">provável obrigatório</span></div>
@@ -1215,8 +1279,8 @@ ${deliveryId ? `<a class="btn" target="_blank" href="/api/magalu/delivery/${enco
 <div class="row"><span class="l">Full</span><span class="v">não usar etiqueta normal</span></div>
 <div style="margin-top:14px"><label>Delivery ID manual</label><input id="did" placeholder="Cole um delivery id"/>
 <div class="btns">
-<a class="btn" href="#" onclick="this.href='/api/magalu/delivery/'+encodeURIComponent(document.getElementById('did').value)+'/debug?token=${tokenParam}'" target="_blank">Testar ID manual</a>
-<a class="btn" href="#" onclick="this.href='/api/magalu/delivery/'+encodeURIComponent(document.getElementById('did').value)+'/label?token=${tokenParam}'" target="_blank">Etiqueta ID manual</a>
+<a class="btn" href="#" onclick="this.href='${baseUrl}/api/magalu/delivery/'+encodeURIComponent(document.getElementById('did').value)+'/debug?token=${tokenParam}'" target="_blank">Testar ID manual</a>
+<a class="btn" href="#" onclick="this.href='${baseUrl}/api/magalu/delivery/'+encodeURIComponent(document.getElementById('did').value)+'/label?token=${tokenParam}'" target="_blank">Etiqueta ID manual</a>
 </div></div></div></div>
 <div class="card" style="margin-top:14px"><h2>delivery[0] bruto</h2><pre>${escapeHtml(JSON.stringify(d, null, 2))}</pre></div>
 <div class="card" style="margin-top:14px"><h2>order bruto</h2><pre>${escapeHtml(JSON.stringify(order, null, 2))}</pre></div>
