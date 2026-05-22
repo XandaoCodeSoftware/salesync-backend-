@@ -416,17 +416,52 @@ async function fetchML(acc, days) {
     if (newToken) token = newToken;
   }
 
-  const since = new Date(Date.now() - days * 86400000).toISOString();
+  const safeDays = Math.max(1, Math.min(parseInt(days || 30, 10), 90));
+  const since = new Date(Date.now() - safeDays * 86400000).toISOString();
   const headers = { Authorization: `Bearer ${token}` };
-  const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
-    params: { seller: acc.platform_shop_id, sort: 'date_desc', 'order.date_created.from': since, limit: 50 },
-    headers
+
+  // ML retorna no máximo uma página por chamada. Antes estava buscando só limit=50,
+  // então, se houvesse muitas vendas, parava no dia 17 ou em qualquer data onde a primeira página acabasse.
+  const results = [];
+  const limit = 50;
+  const maxPages = 20; // até 1000 pedidos por sincronização
+
+  for (let page = 0; page < maxPages; page++) {
+    const offset = page * limit;
+    const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
+      params: {
+        seller: acc.platform_shop_id,
+        sort: 'date_desc',
+        'order.date_created.from': since,
+        limit,
+        offset
+      },
+      headers
+    });
+
+    const pageResults = Array.isArray(data.results) ? data.results : [];
+    results.push(...pageResults);
+
+    const total = Number(data.paging?.total || 0);
+    const returned = Number(data.paging?.limit || limit);
+    const currentOffset = Number(data.paging?.offset || offset);
+
+    if (!pageResults.length) break;
+    if (total && currentOffset + returned >= total) break;
+    if (pageResults.length < limit) break;
+  }
+
+  // Segurança contra duplicidade entre páginas.
+  const seenOrders = new Set();
+  const uniqueResults = results.filter(o => {
+    const id = String(o?.id || '');
+    if (!id || seenOrders.has(id)) return false;
+    seenOrders.add(id);
+    return true;
   });
 
-  const results = data.results || [];
-
   // Puxa detalhes de envio em lote leve. Se der 403/erro, o pedido continua funcionando.
-  const shipmentIds = [...new Set(results.map(o => o.shipping?.id).filter(Boolean))];
+  const shipmentIds = [...new Set(uniqueResults.map(o => o.shipping?.id).filter(Boolean))];
   const shipmentMap = {};
   await Promise.all(shipmentIds.slice(0, 50).map(async id => {
     const det = await fetchMLShipmentDetails(token, id);
@@ -439,7 +474,7 @@ async function fetchML(acc, days) {
     cancelled:'cancelled', invalid:'cancelled',
   };
 
-  return results.map(o => {
+  return uniqueResults.map(o => {
     const item = o.order_items?.[0] || {};
     const shipmentId = o.shipping?.id || null;
     const shipment = shipmentId ? shipmentMap[String(shipmentId)] : null;
@@ -1013,11 +1048,20 @@ app.get('/debug/mercadolivre', auth, async (req, res) => {
     const since = new Date(Date.now() - days * 86400000).toISOString();
     let rawData = null, error = '';
     try {
-      const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
-        params: { seller: acc.platform_shop_id, sort: 'date_desc', 'order.date_created.from': since, limit: 20 },
-        headers: { Authorization: `Bearer ${acc.access_token}` }
-      });
-      rawData = data;
+      const debugResults = [];
+      const limit = 50;
+      for (let page = 0; page < 10; page++) {
+        const offset = page * limit;
+        const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
+          params: { seller: acc.platform_shop_id, sort: 'date_desc', 'order.date_created.from': since, limit, offset },
+          headers: { Authorization: `Bearer ${acc.access_token}` }
+        });
+        const pageResults = Array.isArray(data.results) ? data.results : [];
+        debugResults.push(...pageResults);
+        const total = Number(data.paging?.total || 0);
+        if (!pageResults.length || pageResults.length < limit || (total && offset + limit >= total)) break;
+      }
+      rawData = { results: debugResults, paging: { total: debugResults.length } };
     } catch(e) { error = e.response?.status + ' ' + JSON.stringify(e.response?.data || e.message); }
 
     const orders = rawData?.results || [];
@@ -1345,46 +1389,39 @@ app.get('/api/magalu/delivery/:id/debug', auth, async (req, res) => {
 
 app.get('/api/magalu/delivery/:id/label', auth, async (req, res) => {
   const deliveryId = req.params.id;
+
   try {
     const acc = await getMagaluAccount(req.user.id);
     if (!acc) return res.status(401).json({ error: 'Magalu não conectado ou token expirado' });
 
-    const candidates = [
-      `/seller/v1/deliveries/${deliveryId}/labels`,
-      `/seller/v1/deliveries/${deliveryId}/label`,
-      `/seller/v1/deliveries/${deliveryId}/shippings/label`,
-      `/seller/v1/deliveries/${deliveryId}/shippings/labels`
-    ];
-
     const attempts = [];
-    for (const path of candidates) {
-      const url = `https://api.magalu.com${path}`;
-      const r = await axios.get(url, {
-        headers: { Authorization: `Bearer ${acc.access_token}`, Accept: 'application/pdf,application/json,*/*' },
-        responseType: 'arraybuffer',
-        validateStatus: () => true
-      });
+
+    for (const payload of magaluLabelPayloads(deliveryId)) {
+      const r = await postMagaluShippingLabel(acc, payload);
       const ct = r.headers?.['content-type'] || '';
-      const bodyText = Buffer.from(r.data || '').toString('utf8');
-      attempts.push({ path, status: r.status, content_type: ct, sample: bodyText.slice(0, 500) });
-      if (r.status >= 200 && r.status < 300 && ct.includes('pdf')) {
+      const buf = Buffer.from(r.data || '');
+
+      if (r.status >= 200 && r.status < 300 && (ct.includes('pdf') || looksLikePdfBuffer(buf))) {
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `inline; filename="magalu-etiqueta-${deliveryId}.pdf"`);
-        return res.send(Buffer.from(r.data));
+        return res.send(buf);
       }
+
+      let parsed = null;
+      try { parsed = JSON.parse(buf.toString('utf8')); } catch {}
+      attempts.push({ payload, status: r.status, content_type: ct, response: parsed || buf.toString('utf8').slice(0, 1500) });
     }
 
-    res.status(404).json({
-      error: 'Não foi possível baixar a etiqueta Magalu nos endpoints testados',
+    return res.status(422).json({
+      error: 'Não foi possível gerar etiqueta Magalu',
+      endpoint: 'POST /seller/v1/logistics/shipping-labels',
       delivery_id: deliveryId,
-      possible_reason: 'Pode precisar NF-e/faturamento, Magalu Entregas, escopo de delivery, ou endpoint específico não disponível no client atual.',
       attempts
     });
   } catch(e) {
-    res.status(e.response?.status || 500).json({ error: e.message, data: e.response?.data });
+    res.status(e.response?.status || 500).json({ error: e.message, data: e.response?.data?.toString?.() || e.response?.data });
   }
 });
-
 
 
 
@@ -1411,17 +1448,11 @@ async function postMagaluShippingLabel(acc, payload) {
 }
 
 function magaluLabelPayloads(deliveryId) {
+  // Endpoint oficial Magalu: POST /seller/v1/logistics/shipping-labels
+  // Não enviar channel/label/type aqui; esses campos causavam server_error no retorno da Magalu.
   return [
-    {
-      channel: 'MagazineLuiza',
-      label: { type: 'full', format: 'pdf' },
-      deliveries: [{ id: deliveryId }]
-    },
-    {
-      channel: 'MagazineLuiza',
-      label: { type: 'summary', format: 'pdf' },
-      deliveries: [{ id: deliveryId }]
-    }
+    { deliveries: [{ id: deliveryId }] },
+    { deliveries: [deliveryId] }
   ];
 }
 
