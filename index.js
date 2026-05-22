@@ -1388,67 +1388,167 @@ app.get('/api/magalu/delivery/:id/label', auth, async (req, res) => {
 
 
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// v6.1 — MAGALU ETIQUETA OFICIAL
-// Endpoint oficial: POST /seller/v1/logistics/shipping-labels
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
+// MAGALU — ETIQUETA OFICIAL
+// Endpoint oficial:
+// POST /seller/v1/logistics/shipping-labels
+// ═══════════════════════════════════════════════════════════════════════
 
 function looksLikePdfBuffer(buf) {
   if (!buf) return false;
-  const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+
+  const b = Buffer.isBuffer(buf)
+    ? buf
+    : Buffer.from(buf);
+
   return b.slice(0, 4).toString() === '%PDF';
 }
 
 function tryExtractPdfFromJson(data) {
   if (!data || typeof data !== 'object') return null;
+
   const candidates = [
-    data.pdf, data.label, data.file, data.content, data.base64,
-    data.document, data.shipping_label, data.shippingLabel,
-    data.result?.pdf, data.result?.label, data.result?.base64,
-    data.results?.[0]?.pdf, data.results?.[0]?.label,
-    data.results?.[0]?.base64, data.results?.[0]?.content,
-    data.results?.[0]?.document, data.results?.[0]?.shipping_label,
-    data.results?.[0]?.shippingLabel
+    data.pdf,
+    data.label,
+    data.file,
+    data.content,
+    data.base64,
+    data.document,
+    data.shipping_label,
+    data.shippingLabel,
+
+    data.result?.pdf,
+    data.result?.label,
+    data.result?.base64,
+    data.result?.file,
+    data.result?.content,
+
+    data.results?.[0]?.pdf,
+    data.results?.[0]?.label,
+    data.results?.[0]?.base64,
+    data.results?.[0]?.file,
+    data.results?.[0]?.content,
   ].filter(Boolean);
 
-  for (const c of candidates) {
-    if (typeof c === 'string') {
-      const cleaned = c.replace(/^data:application\/pdf;base64,/, '').trim();
-      if (cleaned.length > 100) {
-        try {
-          const buf = Buffer.from(cleaned, 'base64');
-          if (looksLikePdfBuffer(buf)) return buf;
-        } catch {}
-      }
-    }
-    if (typeof c === 'object') {
-      const nested = tryExtractPdfFromJson(c);
-      if (nested) return nested;
+  for (const item of candidates) {
+    if (typeof item === 'string') {
+      try {
+        const cleaned = item
+          .replace(/^data:application\/pdf;base64,/, '')
+          .trim();
+
+        const buf = Buffer.from(cleaned, 'base64');
+
+        if (looksLikePdfBuffer(buf)) {
+          return buf;
+        }
+      } catch {}
     }
   }
+
   return null;
 }
 
 async function postMagaluShippingLabel(acc, payload) {
-  return axios.post('https://api.magalu.com/seller/v1/logistics/shipping-labels', payload, {
-    headers: {
-      Authorization: `Bearer ${acc.access_token}`,
-      Accept: 'application/pdf,application/json,*/*',
-      'Content-Type': 'application/json'
-    },
-    responseType: 'arraybuffer',
-    validateStatus: () => true
-  });
+  return axios.post(
+    'https://api.magalu.com/seller/v1/logistics/shipping-labels',
+    payload,
+    {
+      headers: {
+        Authorization: `Bearer ${acc.access_token}`,
+        Accept: 'application/pdf,application/json,*/*',
+        'Content-Type': 'application/json'
+      },
+
+      responseType: 'arraybuffer',
+
+      validateStatus: () => true
+    }
+  );
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// DEBUG ETIQUETA
+// ═══════════════════════════════════════════════════════════════════════
 
 app.get('/api/magalu/delivery/:id/official-label-debug', auth, async (req, res) => {
   const deliveryId = req.params.id;
 
   try {
     const acc = await getMagaluAccount(req.user.id);
-    if (!acc) return res.status(401).json({ error: 'Magalu não conectado ou token expirado' });
+
+    if (!acc) {
+      return res.status(401).json({
+        error: 'Magalu não conectado'
+      });
+    }
 
     const payloads = [
+
+      // NOVOS PAYLOADS
+      {
+        channel: 'MagazineLuiza',
+        label: {
+          type: 'PDF'
+        },
+        deliveries: [
+          {
+            id: deliveryId
+          }
+        ]
+      },
+
+      {
+        channel: 'magazine_luiza',
+        label: {
+          type: 'PDF'
+        },
+        deliveries: [
+          {
+            id: deliveryId
+          }
+        ]
+      },
+
+      {
+        channel: 'MagazineLuiza',
+        label: {
+          format: 'PDF'
+        },
+        deliveries: [
+          {
+            id: deliveryId
+          }
+        ]
+      },
+
+      {
+        channel: 'MagazineLuiza',
+        label: {
+          type: 'pdf'
+        },
+        deliveries: [
+          {
+            id: deliveryId
+          }
+        ]
+      },
+
+      {
+        channel: {
+          id: 'MagazineLuiza'
+        },
+        label: {
+          type: 'PDF'
+        },
+        deliveries: [
+          {
+            id: deliveryId
+          }
+        ]
+      },
+
+      // ANTIGOS
       { delivery_id: deliveryId },
       { deliveryId },
       { id: deliveryId },
@@ -1458,18 +1558,39 @@ app.get('/api/magalu/delivery/:id/official-label-debug', auth, async (req, res) 
       { ids: [deliveryId] },
       { shipping_ids: [deliveryId] },
       { shippingIds: [deliveryId] },
-      { shipments: [{ id: deliveryId }] },
-      { deliveries: [{ id: deliveryId }] }
+
+      {
+        shipments: [
+          {
+            id: deliveryId
+          }
+        ]
+      },
+
+      {
+        deliveries: [
+          {
+            id: deliveryId
+          }
+        ]
+      }
     ];
 
     const results = [];
 
     for (const payload of payloads) {
+
       const r = await postMagaluShippingLabel(acc, payload);
+
       const ct = r.headers?.['content-type'] || '';
+
       const buf = Buffer.from(r.data || '');
+
       let parsed = null;
-      try { parsed = JSON.parse(buf.toString('utf8')); } catch {}
+
+      try {
+        parsed = JSON.parse(buf.toString('utf8'));
+      } catch {}
 
       results.push({
         endpoint: 'POST /seller/v1/logistics/shipping-labels',
@@ -1478,111 +1599,203 @@ app.get('/api/magalu/delivery/:id/official-label-debug', auth, async (req, res) 
         content_type: ct,
         is_pdf: ct.includes('pdf') || looksLikePdfBuffer(buf),
         parsed,
-        sample: parsed ? undefined : buf.toString('utf8').slice(0, 1000)
+        sample: parsed
+          ? undefined
+          : buf.toString('utf8').slice(0, 1500)
       });
     }
 
-    res.json({ delivery_id: deliveryId, results });
-
-  } catch(e) {
-    res.status(e.response?.status || 500).json({
-      error: e.message,
-      data: e.response?.data?.toString?.() || e.response?.data
+    res.json({
+      delivery_id: deliveryId,
+      results
     });
+
+  } catch (e) {
+
+    res.status(
+      e.response?.status || 500
+    ).json({
+      error: e.message,
+      data:
+        e.response?.data?.toString?.()
+        || e.response?.data
+    });
+
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════
+// ETIQUETA FINAL
+// ═══════════════════════════════════════════════════════════════════════
+
 app.get('/api/magalu/delivery/:id/official-label', auth, async (req, res) => {
+
   const deliveryId = req.params.id;
 
   try {
+
     const acc = await getMagaluAccount(req.user.id);
-    if (!acc) return res.status(401).json({ error: 'Magalu não conectado ou token expirado' });
+
+    if (!acc) {
+      return res.status(401).json({
+        error: 'Magalu não conectado'
+      });
+    }
 
     const payloads = [
-      { delivery_id: deliveryId },
-      { deliveryId },
-      { id: deliveryId },
-      { deliveries: [deliveryId] },
-      { delivery_ids: [deliveryId] },
-      { deliveryIds: [deliveryId] },
-      { ids: [deliveryId] },
-      { shipping_ids: [deliveryId] },
-      { shippingIds: [deliveryId] },
-      { shipments: [{ id: deliveryId }] },
-      { deliveries: [{ id: deliveryId }] }
+
+      {
+        channel: 'MagazineLuiza',
+        label: {
+          type: 'PDF'
+        },
+        deliveries: [
+          {
+            id: deliveryId
+          }
+        ]
+      },
+
+      {
+        channel: 'magazine_luiza',
+        label: {
+          type: 'PDF'
+        },
+        deliveries: [
+          {
+            id: deliveryId
+          }
+        ]
+      },
+
+      {
+        channel: 'MagazineLuiza',
+        label: {
+          format: 'PDF'
+        },
+        deliveries: [
+          {
+            id: deliveryId
+          }
+        ]
+      },
+
+      {
+        channel: {
+          id: 'MagazineLuiza'
+        },
+        label: {
+          type: 'PDF'
+        },
+        deliveries: [
+          {
+            id: deliveryId
+          }
+        ]
+      }
     ];
 
     const attempts = [];
 
     for (const payload of payloads) {
+
       const r = await postMagaluShippingLabel(acc, payload);
+
       const ct = r.headers?.['content-type'] || '';
+
       const buf = Buffer.from(r.data || '');
 
-      if (r.status >= 200 && r.status < 300) {
-        if (ct.includes('pdf') || looksLikePdfBuffer(buf)) {
-          res.setHeader('Content-Type', 'application/pdf');
-          res.setHeader('Content-Disposition', `inline; filename="magalu-etiqueta-${deliveryId}.pdf"`);
-          return res.send(buf);
-        }
+      // PDF DIRETO
+      if (
+        r.status >= 200
+        && r.status < 300
+        && (
+          ct.includes('pdf')
+          || looksLikePdfBuffer(buf)
+        )
+      ) {
 
-        let json = null;
-        const text = buf.toString('utf8');
-        try { json = JSON.parse(text); } catch {}
+        res.setHeader(
+          'Content-Type',
+          'application/pdf'
+        );
 
-        if (json) {
-          const extractedPdf = tryExtractPdfFromJson(json);
-          if (extractedPdf) {
-            res.setHeader('Content-Type', 'application/pdf');
-            res.setHeader('Content-Disposition', `inline; filename="magalu-etiqueta-${deliveryId}.pdf"`);
-            return res.send(extractedPdf);
-          }
+        res.setHeader(
+          'Content-Disposition',
+          `inline; filename="magalu-etiqueta-${deliveryId}.pdf"`
+        );
 
-          const url =
-            json.url || json.label_url || json.labelUrl ||
-            json.result?.url || json.result?.label_url || json.result?.labelUrl ||
-            json.results?.[0]?.url || json.results?.[0]?.label_url || json.results?.[0]?.labelUrl;
-
-          if (url) return res.json({ success: true, type: 'url', url, payload_used: payload, raw: json });
-
-          return res.json({ success: true, type: 'json', payload_used: payload, raw: json });
-        }
-
-        return res.json({
-          success: true,
-          type: 'unknown_success',
-          payload_used: payload,
-          content_type: ct,
-          sample: text.slice(0, 1000)
-        });
+        return res.send(buf);
       }
 
-      attempts.push({
-        payload,
-        status: r.status,
-        content_type: ct,
-        sample: buf.toString('utf8').slice(0, 1000)
-      });
+      // JSON
+      let json = null;
+
+      try {
+        json = JSON.parse(
+          buf.toString('utf8')
+        );
+      } catch {}
+
+      if (json) {
+
+        const extractedPdf =
+          tryExtractPdfFromJson(json);
+
+        if (extractedPdf) {
+
+          res.setHeader(
+            'Content-Type',
+            'application/pdf'
+          );
+
+          res.setHeader(
+            'Content-Disposition',
+            `inline; filename="magalu-etiqueta-${deliveryId}.pdf"`
+          );
+
+          return res.send(extractedPdf);
+        }
+
+        attempts.push({
+          payload,
+          status: r.status,
+          response: json
+        });
+
+      } else {
+
+        attempts.push({
+          payload,
+          status: r.status,
+          sample: buf.toString('utf8').slice(0, 1000)
+        });
+
+      }
     }
 
-    res.status(422).json({
-      error: 'Não foi possível gerar etiqueta Magalu no endpoint oficial',
+    return res.status(422).json({
+      error: 'Não foi possível gerar etiqueta Magalu',
       endpoint: 'POST /seller/v1/logistics/shipping-labels',
       delivery_id: deliveryId,
-      hint: 'Confira scopes open:order-logistics-seller:read/write e se a entrega está apta.',
       attempts
     });
 
-  } catch(e) {
-    res.status(e.response?.status || 500).json({
+  } catch (e) {
+
+    return res.status(
+      e.response?.status || 500
+    ).json({
       error: e.message,
-      data: e.response?.data?.toString?.() || e.response?.data
+      data:
+        e.response?.data?.toString?.()
+        || e.response?.data
     });
+
   }
 });
 
 app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:'5.0' }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v5.1 rodando na porta ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v5.1 rodando na porta ${PORT}`));  
