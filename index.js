@@ -702,6 +702,12 @@ async function fetchMagalu(acc, days) {
         shop_name:        delivery.seller?.name || acc.shop_name,
         fulfillment_type: isFull ? 'full' : 'normal',
         status,
+        // Dados de entrega para botão/diagnóstico de etiqueta Magalu
+        delivery_id:      delivery.id || null,
+        shipping_id:      delivery.id || null,
+        magalu_delivery_id: delivery.id || null,
+        magalu_channel:   o.channel || o.sales_channel || delivery.channel || 'MagazineLuiza',
+        magalu_label_available: Boolean(delivery.id) && !isFull && !['cancelled','delivered'].includes(status),
         buyer_name:       o.customer?.name || '',
         total_amount:     total,
         platform_fee:     commission,
@@ -1471,21 +1477,93 @@ async function postMagaluShippingLabel(acc, payload) {
   );
 }
 
-function magaluLabelPayloads(deliveryId) {
-  // A API valida obrigatoriamente: channel, label e deliveries.
-  // Mantemos várias tentativas porque o Magalu retorna 422 detalhado quando algum formato não bate,
-  // e algumas contas aceitam variações de channel/formato de etiqueta.
-  const idObj = { id: deliveryId };
-  return [
-    { channel: 'MagazineLuiza', label: { type: 'full', format: 'A4' }, deliveries: [idObj] },
-    { channel: 'MagazineLuiza', label: { type: 'summary', format: 'A4' }, deliveries: [idObj] },
-    { channel: 'MagazineLuiza', label: { type: 'full' }, deliveries: [idObj] },
-    { channel: 'MagazineLuiza', label: { type: 'summary' }, deliveries: [idObj] },
-    { channel: 'magalu', label: { type: 'full', format: 'A4' }, deliveries: [idObj] },
-    { channel: 'magalu', label: { type: 'summary', format: 'A4' }, deliveries: [idObj] },
-    { channel: 'MagazineLuiza', label: { format: 'A4' }, deliveries: [idObj] },
-    { channel: 'MagazineLuiza', label: { format: 'ZEBRA' }, deliveries: [idObj] }
+
+function uniq(arr) {
+  return [...new Set(arr.filter(v => v !== undefined && v !== null && String(v).trim() !== '').map(v => String(v).trim()))];
+}
+
+function compactProbe(data) {
+  if (!data || typeof data !== 'object') return data;
+  const delivery = data.delivery || data;
+  return {
+    id: delivery.id || data.id || null,
+    status: delivery.status || data.status || null,
+    channel: delivery.channel || data.channel || data.sales_channel || null,
+    seller: delivery.seller || data.seller || null,
+    shipping: delivery.shipping || data.shipping || null,
+    invoice: delivery.invoice || data.invoice || data.fiscal_document || data.fiscal_documents || null,
+    nf: delivery.nfe || delivery.nf || data.nfe || data.nf || null,
+    raw_keys: Object.keys(data || {})
+  };
+}
+
+async function magaluGetJson(acc, path) {
+  const r = await axios.get(`https://api.magalu.com${path}`, {
+    headers: { Authorization: `Bearer ${acc.access_token}`, Accept: 'application/json' },
+    validateStatus: () => true
+  });
+  return { path, status: r.status, content_type: r.headers?.['content-type'] || '', data: r.data };
+}
+
+async function inspectMagaluDelivery(acc, deliveryId) {
+  const paths = [
+    `/seller/v1/deliveries/${encodeURIComponent(deliveryId)}`,
+    `/seller/v1/deliveries/${encodeURIComponent(deliveryId)}/history`,
+    `/seller/v1/deliveries/${encodeURIComponent(deliveryId)}/invoices`,
+    `/seller/v1/deliveries/${encodeURIComponent(deliveryId)}/shippings`
   ];
+  const probes = [];
+  for (const path of paths) {
+    try {
+      const r = await magaluGetJson(acc, path);
+      probes.push({ ...r, compact: compactProbe(r.data) });
+    } catch (e) {
+      probes.push({ path, status: e.response?.status || 500, error: e.response?.data || e.message });
+    }
+  }
+  return probes;
+}
+
+function inferMagaluChannelsFromProbe(probes) {
+  const values = [];
+  for (const p of probes || []) {
+    const d = p?.data || {};
+    const c = p?.compact || {};
+    values.push(c.channel, d.channel, d.sales_channel, d.delivery?.channel, d.delivery?.sales_channel);
+  }
+  return uniq(values);
+}
+
+function magaluLabelPayloads(deliveryId, options = {}) {
+  // A API valida obrigatoriamente: channel, label e deliveries.
+  // Quando channel/label estão presentes, o 500 vem do lado Magalu; por isso testamos
+  // channel inferido da entrega + variações comuns e devolvemos o diagnóstico completo.
+  const idObj = { id: deliveryId };
+  const channels = uniq([
+    ...(options.channels || []),
+    options.channel,
+    'MagazineLuiza',
+    'MAGAZINELUIZA',
+    'magazineluiza',
+    'magazine_luiza',
+    'magalu',
+    'MAGALU'
+  ]);
+
+  const labels = [
+    { type: 'full', format: 'A4' },
+    { type: 'summary', format: 'A4' },
+    { type: 'full' },
+    { type: 'summary' },
+    { format: 'A4' },
+    { format: 'ZEBRA' }
+  ];
+
+  const payloads = [];
+  for (const channel of channels) {
+    for (const label of labels) payloads.push({ channel, label, deliveries: [idObj] });
+  }
+  return payloads;
 }
 
 app.get('/api/magalu/delivery/:id/official-label-debug', auth, async (req, res) => {
@@ -1495,9 +1573,12 @@ app.get('/api/magalu/delivery/:id/official-label-debug', auth, async (req, res) 
     const acc = await getMagaluAccount(req.user.id);
     if (!acc) return res.status(401).json({ error: 'Magalu não conectado' });
 
+    const delivery_probe = await inspectMagaluDelivery(acc, deliveryId);
+    const channels = uniq([req.query.channel, ...inferMagaluChannelsFromProbe(delivery_probe)]);
+    const payloads = magaluLabelPayloads(deliveryId, { channels }).slice(0, 24);
     const results = [];
 
-    for (const payload of magaluLabelPayloads(deliveryId)) {
+    for (const payload of payloads) {
       const r = await postMagaluShippingLabel(acc, payload);
       const ct = r.headers?.['content-type'] || '';
       const buf = Buffer.from(r.data || '');
@@ -1514,9 +1595,17 @@ app.get('/api/magalu/delivery/:id/official-label-debug', auth, async (req, res) 
         parsed,
         sample: parsed ? undefined : buf.toString('utf8').slice(0, 1500)
       });
+
+      if (r.status >= 200 && r.status < 300) break;
     }
 
-    res.json({ delivery_id: deliveryId, results });
+    res.json({
+      delivery_id: deliveryId,
+      diagnosis: 'Se delivery_probe retornar 200 e todos os payloads com channel/label retornarem 500, o erro está no serviço Magalu ou a entrega não está apta para etiqueta. Verifique invoice/NF-e, logística e status da entrega.',
+      delivery_probe,
+      inferred_channels: channels,
+      results
+    });
 
   } catch (e) {
     res.status(e.response?.status || 500).json({
@@ -1533,9 +1622,11 @@ app.get('/api/magalu/delivery/:id/official-label', auth, async (req, res) => {
     const acc = await getMagaluAccount(req.user.id);
     if (!acc) return res.status(401).json({ error: 'Magalu não conectado' });
 
+    const delivery_probe = await inspectMagaluDelivery(acc, deliveryId);
+    const channels = uniq([req.query.channel, ...inferMagaluChannelsFromProbe(delivery_probe)]);
     const attempts = [];
 
-    for (const payload of magaluLabelPayloads(deliveryId)) {
+    for (const payload of magaluLabelPayloads(deliveryId, { channels }).slice(0, 24)) {
       const r = await postMagaluShippingLabel(acc, payload);
       const ct = r.headers?.['content-type'] || '';
       const buf = Buffer.from(r.data || '');
@@ -1548,19 +1639,17 @@ app.get('/api/magalu/delivery/:id/official-label', auth, async (req, res) => {
 
       let parsed = null;
       try { parsed = JSON.parse(buf.toString('utf8')); } catch {}
+      attempts.push({ payload, status: r.status, content_type: ct, response: parsed || buf.toString('utf8').slice(0, 1500) });
 
-      attempts.push({
-        payload,
-        status: r.status,
-        content_type: ct,
-        response: parsed || buf.toString('utf8').slice(0, 1500)
-      });
+      // 422 de validação é útil; 500 em todos indica problema/inelegibilidade no lado Magalu.
     }
 
     res.status(422).json({
       error: 'Não foi possível gerar etiqueta Magalu',
+      hint: 'Abra /official-label-debug para ver delivery_probe. Se a entrega não estiver faturada/NF-e/logística válida, a Magalu pode devolver 500 genérico.',
       endpoint: 'POST /seller/v1/logistics/shipping-labels',
       delivery_id: deliveryId,
+      delivery_probe,
       attempts
     });
 
