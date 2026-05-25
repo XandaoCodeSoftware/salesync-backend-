@@ -1478,6 +1478,54 @@ function looksLikePdfBuffer(buf) {
   return b.slice(0, 4).toString() === '%PDF';
 }
 
+
+function parseMagaluLabelResponse(data) {
+  const buf = Buffer.from(data || '');
+  const text = buf.toString('utf8').trim();
+  if (!text) return null;
+  try { return JSON.parse(text); } catch { return null; }
+}
+
+function findMagaluSignedUrl(obj) {
+  if (!obj) return null;
+  if (typeof obj === 'string') {
+    if (/^https?:\/\//i.test(obj) && /shipping_label\.(pdf|zip|zpl)/i.test(obj)) return obj;
+    return null;
+  }
+  if (typeof obj !== 'object') return null;
+  if (typeof obj.signed_url === 'string') return obj.signed_url;
+  if (obj.label && typeof obj.label.signed_url === 'string') return obj.label.signed_url;
+  for (const v of Object.values(obj)) {
+    const found = findMagaluSignedUrl(v);
+    if (found) return found;
+  }
+  return null;
+}
+
+function normalizeMagaluLabelOptions(query = {}) {
+  const requestedType = String(query.type || 'full').toLowerCase();
+  const requestedFormat = String(query.format || 'pdf').toLowerCase();
+  return {
+    type: ['full','summary'].includes(requestedType) ? requestedType : 'full',
+    format: ['pdf','zpl'].includes(requestedFormat) ? requestedFormat : 'pdf'
+  };
+}
+
+function magaluSingleLabelPayload(deliveryId, channel, opts = {}) {
+  const { type, format } = normalizeMagaluLabelOptions(opts);
+  return {
+    channel,
+    deliveries: [{ id: deliveryId }],
+    label: { type, format }
+  };
+}
+
+function magaluLabelFilename(deliveryId, type, format) {
+  const suffix = type === 'summary' ? 'danfe-simplificado' : 'etiqueta';
+  const ext = format === 'zpl' ? 'zip' : 'pdf';
+  return `magalu-${suffix}-${deliveryId}.${ext}`;
+}
+
 function extractPdfBufferFromLabelResponse(data, contentType) {
   const buf = Buffer.from(data || '');
   if (!buf.length) return null;
@@ -1733,34 +1781,50 @@ app.get('/api/magalu/delivery/:id/official-label', auth, async (req, res) => {
     const delivery_probe = await inspectMagaluDelivery(acc, deliveryId);
     const channels = inferMagaluChannelObjectsFromProbe(delivery_probe);
     if (req.query.channel) channels.unshift({ id: String(req.query.channel), extras: {} });
-    const attempts = [];
 
-    for (const payload of magaluLabelPayloads(deliveryId, { channels }).slice(0, 16)) {
-      const r = await postMagaluShippingLabel(acc, payload);
-      const ct = r.headers?.['content-type'] || '';
-      const buf = Buffer.from(r.data || '');
-      const pdf = extractPdfBufferFromLabelResponse(r.data, ct);
-
-      if (r.status >= 200 && r.status < 300 && pdf) {
-        res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `inline; filename="magalu-etiqueta-${deliveryId}.pdf"`);
-        return res.send(pdf);
-      }
-
-      let parsed = null;
-      try { parsed = JSON.parse(buf.toString('utf8')); } catch {}
-      attempts.push({ payload, status: r.status, content_type: ct, response: parsed || buf.toString('utf8').slice(0, 1500) });
-
-      // 422 de validação é útil; 500 em todos indica problema/inelegibilidade no lado Magalu.
+    const channel = channels[0];
+    if (!channel?.id) {
+      return res.status(422).json({
+        error: 'Canal Magalu não encontrado para gerar etiqueta',
+        hint: 'A API exige channel como objeto { id, extras }. Verifique delivery.order.channel.id no debug.',
+        delivery_id: deliveryId,
+        delivery_probe
+      });
     }
 
-    res.status(422).json({
+    const opts = normalizeMagaluLabelOptions(req.query);
+    const payload = magaluSingleLabelPayload(deliveryId, channel, opts);
+    const r = await postMagaluShippingLabel(acc, payload);
+    const ct = r.headers?.['content-type'] || '';
+    const buf = Buffer.from(r.data || '');
+
+    // 1) PDF direto ou base64 PDF legado
+    const pdf = extractPdfBufferFromLabelResponse(r.data, ct);
+    if (r.status >= 200 && r.status < 300 && pdf) {
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${magaluLabelFilename(deliveryId, opts.type, 'pdf')}"`);
+      return res.send(pdf);
+    }
+
+    // 2) Fluxo oficial atual da Magalu: JSON com label.signed_url.
+    const parsed = parseMagaluLabelResponse(r.data);
+    const signedUrl = findMagaluSignedUrl(parsed);
+    if (r.status >= 200 && r.status < 300 && signedUrl) {
+      // Por padrão abre o PDF/ZIP assinado direto. Use ?redirect=0 para receber JSON.
+      if (String(req.query.redirect || '1') !== '0') return res.redirect(302, signedUrl);
+      return res.json({ success: true, delivery_id: deliveryId, payload, ...parsed });
+    }
+
+    return res.status(r.status || 422).json({
       error: 'Não foi possível gerar etiqueta Magalu',
-      hint: 'A rota usa o formato oficial: channel como objeto {id, extras} vindo de order.channel.id e label.format como pdf/zpl. Se ainda retornar erro, abra /official-label-debug e veja o payload/retorno.',
+      hint: 'A rota usa o formato oficial: channel como objeto {id, extras}, label.format=pdf|zpl e label.type=full|summary.',
       endpoint: 'POST /seller/v1/logistics/shipping-labels',
       delivery_id: deliveryId,
-      delivery_probe,
-      attempts
+      payload,
+      status: r.status,
+      content_type: ct,
+      response: parsed || buf.toString('utf8').slice(0, 2000),
+      delivery_probe
     });
 
   } catch (e) {
