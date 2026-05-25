@@ -8,8 +8,10 @@ const cors    = require('cors');
 const jwt     = require('jsonwebtoken');
 let PDFDocument = null;
 let bwipjs = null;
+let PDFLib = null;
 try { PDFDocument = require('pdfkit'); } catch {}
 try { bwipjs = require('bwip-js'); } catch {}
+try { PDFLib = require('pdf-lib'); } catch {}
 require('dotenv').config();
 
 const app = express();
@@ -2105,6 +2107,130 @@ async function buildMagaluDanfeOnlyPdfBuffer(items, opts = {}) {
     } catch (e) { reject(e); }
   });
 }
+
+
+
+// v13 — Combo Zebra: mantém a etiqueta oficial da Magalu e adiciona o DANFE SalesSync separado.
+// Saída final: 1 página Zebra para etiqueta oficial + 1 página Zebra para DANFE criado, repetindo por venda.
+async function fetchMagaluOfficialLabelPdfBuffer(acc, deliveryId, opts = {}) {
+  const deliveryProbe = opts.delivery_probe || await inspectMagaluDelivery(acc, deliveryId);
+  const channels = inferMagaluChannelObjectsFromProbe(deliveryProbe);
+  if (opts.channel) channels.unshift({ id: String(opts.channel), extras: {} });
+  const channel = channels[0];
+  if (!channel?.id) {
+    const e = new Error('Canal Magalu não encontrado para gerar etiqueta oficial');
+    e.delivery_probe = deliveryProbe;
+    throw e;
+  }
+
+  const payload = {
+    channel,
+    deliveries: [{ id: deliveryId }],
+    label: { type: 'full', format: 'pdf' }
+  };
+
+  const r = await postMagaluShippingLabel(acc, payload);
+  const ct = r.headers?.['content-type'] || '';
+  const directPdf = extractPdfBufferFromLabelResponse(r.data, ct);
+  if (r.status >= 200 && r.status < 300 && directPdf) {
+    return { pdf: directPdf, payload, response: null, delivery_probe: deliveryProbe };
+  }
+
+  const parsed = parseMagaluLabelResponse(r.data);
+  const signedUrl = findMagaluSignedUrl(parsed);
+  if (r.status >= 200 && r.status < 300 && signedUrl) {
+    const file = await axios.get(signedUrl, {
+      responseType: 'arraybuffer',
+      validateStatus: () => true
+    });
+    const fileCt = file.headers?.['content-type'] || '';
+    const buf = Buffer.from(file.data || '');
+    if (file.status >= 200 && file.status < 300 && (looksLikePdfBuffer(buf) || String(fileCt).toLowerCase().includes('pdf'))) {
+      return { pdf: buf, payload, response: parsed, signed_url: signedUrl, delivery_probe: deliveryProbe };
+    }
+    const e = new Error('A URL assinada da Magalu não retornou PDF válido');
+    e.status = file.status;
+    e.content_type = fileCt;
+    e.payload = payload;
+    e.response = parsed;
+    throw e;
+  }
+
+  const e = new Error('A Magalu não retornou etiqueta PDF nem signed_url');
+  e.status = r.status;
+  e.content_type = ct;
+  e.payload = payload;
+  e.response = parsed || Buffer.from(r.data || '').toString('utf8').slice(0, 1500);
+  e.delivery_probe = deliveryProbe;
+  throw e;
+}
+
+async function appendPdfPagesFitted(outDoc, sourceBuffer, targetSize = [288, 432]) {
+  const src = await PDFLib.PDFDocument.load(sourceBuffer);
+  const indices = src.getPageIndices();
+  const embeddedPages = await outDoc.embedPdf(sourceBuffer, indices);
+  for (const ep of embeddedPages) {
+    const page = outDoc.addPage(targetSize);
+    const pageW = targetSize[0], pageH = targetSize[1];
+    const margin = 0;
+    const scale = Math.min((pageW - margin * 2) / ep.width, (pageH - margin * 2) / ep.height);
+    const drawW = ep.width * scale;
+    const drawH = ep.height * scale;
+    page.drawPage(ep, {
+      x: (pageW - drawW) / 2,
+      y: (pageH - drawH) / 2,
+      width: drawW,
+      height: drawH
+    });
+  }
+}
+
+async function buildMagaluZebraLabelDanfePdfBuffer(acc, deliveryIds) {
+  if (!PDFLib) throw new Error('Dependência pdf-lib não instalada. Rode: npm install pdf-lib');
+  if (!PDFDocument) throw new Error('Dependência pdfkit não instalada. Rode: npm install pdfkit bwip-js');
+
+  const out = await PDFLib.PDFDocument.create();
+  const pageSize = [288, 432]; // Zebra/thermal 4x6, em pontos PDF.
+
+  for (const deliveryId of deliveryIds) {
+    const data = await fetchMagaluDeliveryAndInvoice(acc, deliveryId);
+
+    // 1) Página da etiqueta oficial Magalu. Não redesenha, só encaixa no papel Zebra.
+    const label = await fetchMagaluOfficialLabelPdfBuffer(acc, deliveryId);
+    await appendPdfPagesFitted(out, label.pdf, pageSize);
+
+    // 2) Página do DANFE simplificado criado pelo SalesSync, sempre em Zebra.
+    const danfePdf = await buildMagaluDanfeOnlyPdfBuffer([data], { mode: 'zebra' });
+    await appendPdfPagesFitted(out, danfePdf, pageSize);
+  }
+
+  return Buffer.from(await out.save());
+}
+
+app.get('/api/magalu/labels/zebra-completo', auth, async (req, res) => {
+  try {
+    const rawIds = String(req.query.ids || req.query.id || '').split(',').map(x => x.trim()).filter(Boolean);
+    const deliveryIds = [...new Set(rawIds)].slice(0, 20);
+    if (!deliveryIds.length) return res.status(400).json({ error: 'Informe ao menos um delivery id em ?ids=' });
+
+    const acc = await getMagaluAccount(req.user.id);
+    if (!acc) return res.status(401).json({ error: 'Magalu não conectado' });
+
+    const pdf = await buildMagaluZebraLabelDanfePdfBuffer(acc, deliveryIds);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="magalu-zebra-etiqueta-danfe-${deliveryIds.length}.pdf"`);
+    return res.send(pdf);
+  } catch (e) {
+    res.status(e.status || e.response?.status || 500).json({
+      error: 'Não foi possível gerar Zebra PDF com etiqueta oficial + DANFE simplificado',
+      message: e.message,
+      payload: e.payload || null,
+      response: e.response || e.response?.data || null,
+      content_type: e.content_type || null,
+      install: 'Dependências necessárias: pdfkit, bwip-js e pdf-lib'
+    });
+  }
+});
 
 app.get('/api/magalu/labels/danfe-simplificado', auth, async (req, res) => {
   try {
