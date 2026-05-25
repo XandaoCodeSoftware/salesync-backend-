@@ -1993,6 +1993,144 @@ async function buildMagaluSimplifiedPdfBuffer(items) {
   });
 }
 
+
+
+// v12 — DANFE simplificado separado: não redesenha/não altera a etiqueta oficial.
+// A etiqueta continua vindo oficial da Magalu. Aqui geramos somente a nota fiscal reduzida.
+function danfeDataFromDelivery(data) {
+  const d = data.delivery || {};
+  const nfe = data.nfe || {};
+  const rec = d.shipping?.recipient || {};
+  const ra = rec.address || {};
+  const drop = d.shipping?.drop_details || {};
+  const da = drop.address || {};
+  const key = nfe.key || d.invoices?.[0]?.key || '';
+  return {
+    key,
+    nfNumber: nfe.number || (key ? String(key).slice(25, 34).replace(/^0+/, '') : ''),
+    series: nfe.series || '1',
+    issuedAt: nfe.issuedAt || d.invoices?.[0]?.issued_at || '',
+    protocol: nfe.protocol || '',
+    protocolAt: nfe.protocolAt || nfe.issuedAt || d.invoices?.[0]?.issued_at || '',
+    emitName: nfe.emitName || 'KARAKA STORE',
+    emitCnpj: nfe.emitCnpj || '55938975000157',
+    emitIe: nfe.emitIe || '718285699111',
+    emitUf: nfe.emitUf || da.state || 'SP',
+    destName: nfe.destName || rec.name || '',
+    destDoc: nfe.destCpfCnpj || rec.document_number || '',
+    destIe: nfe.destIe || '',
+    destUf: nfe.destUf || ra.state || '',
+    value: nfe.value || '',
+    orderCode: d.order?.code || d.code || '',
+    deliveryId: d.id || '',
+  };
+}
+
+async function drawDanfeSimplificadoOnly(doc, data, box, opts = {}) {
+  const info = danfeDataFromDelivery(data);
+  const x = box.x, y = box.y, w = box.w, h = box.h;
+  const scale = Math.min(w / 276, h / 380);
+  const fs = (n) => Math.max(4.2, n * scale);
+  const pad = 8 * scale;
+
+  doc.rect(x, y, w, h).stroke();
+
+  const barcodeH = Math.max(28, 46 * scale);
+  await drawBarcode(doc, info.key || '00000000000000000000000000000000000000000000', x + w * 0.12, y + pad, w * 0.76, barcodeH);
+  doc.font('Helvetica').fontSize(fs(7)).text(info.key, x + pad, y + pad + barcodeH + 4, { width: w - pad*2, align:'center' });
+
+  const rowY = y + pad + barcodeH + 26 * scale;
+  const leftW = w * 0.26;
+  doc.rect(x + pad, rowY, leftW, 50 * scale).stroke();
+  doc.font('Helvetica').fontSize(fs(7)).text('1 - SAÍDA', x + pad + 4, rowY + 6 * scale);
+  doc.font('Helvetica-Bold').fontSize(fs(7)).text(`Nº ${info.nfNumber || '—'} / Série ${info.series || '1'}`, x + pad + 4, rowY + 21 * scale, { width:leftW - 8 });
+  doc.font('Helvetica').fontSize(fs(7)).text(`Emissão: ${onlyDateBR(info.issuedAt)}`, x + pad + 4, rowY + 36 * scale, { width:leftW - 8 });
+
+  const midX = x + pad + leftW + 8 * scale;
+  doc.font('Helvetica-Bold').fontSize(fs(8)).text('Chave de acesso', midX, rowY + 5 * scale, { width:w - leftW - pad*3 - 8*scale, align:'center' });
+  doc.font('Helvetica').fontSize(fs(5.5)).text(info.key, midX, rowY + 18 * scale, { width:w - leftW - pad*3 - 8*scale, align:'center' });
+  doc.font('Helvetica-Bold').fontSize(fs(8)).text('Protocolo de autorização de uso', midX, rowY + 34 * scale, { width:w - leftW - pad*3 - 8*scale, align:'center' });
+  doc.font('Helvetica').fontSize(fs(6)).text(`${info.protocol || '—'} ${dateTimeBR(info.protocolAt)}`, midX, rowY + 47 * scale, { width:w - leftW - pad*3 - 8*scale, align:'center' });
+
+  doc.moveTo(x, y + h * 0.34).lineTo(x + w, y + h * 0.34).stroke();
+
+  let yy = y + h * 0.62;
+  const line = 20 * scale;
+  const labelW = Math.min(90 * scale, w * 0.32);
+  const valX = x + pad + labelW;
+  const ufX = x + w - 44 * scale;
+
+  function kv(label, value, uf) {
+    doc.font('Helvetica-Bold').fontSize(fs(8)).text(label, x + pad, yy, { width: labelW });
+    doc.font('Helvetica').fontSize(fs(8)).text(String(value || ''), valX, yy, { width: uf ? (ufX - valX - 6) : (w - valX - pad) });
+    if (uf !== undefined) {
+      doc.font('Helvetica-Bold').fontSize(fs(8)).text('UF:', ufX, yy);
+      doc.font('Helvetica').fontSize(fs(8)).text(String(uf || ''), ufX + 18 * scale, yy);
+    }
+    yy += line;
+  }
+
+  kv('Emitente:', info.emitName);
+  kv('CNPJ:', info.emitCnpj);
+  kv('Inscrição Estadual:', info.emitIe, info.emitUf);
+  yy += 10 * scale;
+  kv('Destinatário:', info.destName);
+  kv('CNPJ/CPF:', info.destDoc);
+  kv('Inscrição Estadual:', info.destIe, info.destUf);
+
+  doc.font('Helvetica-Bold').fontSize(fs(10)).text('DANFE SIMPLIFICADO', x + pad, y + h - 24 * scale, { width:w - pad*2 });
+}
+
+async function buildMagaluDanfeOnlyPdfBuffer(items, opts = {}) {
+  if (!PDFDocument) throw new Error('Dependência pdfkit não instalada. Rode: npm install pdfkit bwip-js');
+  const mode = String(opts.mode || opts.size || 'a4').toLowerCase();
+  const isZebra = ['zebra','thermal','termica','4x6'].includes(mode);
+  return await new Promise(async (resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ size: isZebra ? [288, 432] : 'A4', margin: 0, bufferPages: false });
+      const chunks = [];
+      doc.on('data', c => chunks.push(c));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+      for (let i = 0; i < items.length; i++) {
+        if (i > 0) doc.addPage({ size: isZebra ? [288, 432] : 'A4', margin: 0 });
+        if (isZebra) {
+          await drawDanfeSimplificadoOnly(doc, items[i], { x: 8, y: 8, w: 272, h: 416 }, { zebra:true });
+        } else {
+          // Uma nota por página A4, sem mexer na etiqueta oficial.
+          await drawDanfeSimplificadoOnly(doc, items[i], { x: 70, y: 90, w: 455, h: 620 }, { zebra:false });
+        }
+      }
+      doc.end();
+    } catch (e) { reject(e); }
+  });
+}
+
+app.get('/api/magalu/labels/danfe-simplificado', auth, async (req, res) => {
+  try {
+    const rawIds = String(req.query.ids || req.query.id || '').split(',').map(x => x.trim()).filter(Boolean);
+    const deliveryIds = [...new Set(rawIds)].slice(0, 30);
+    if (!deliveryIds.length) return res.status(400).json({ error: 'Informe ao menos um delivery id em ?ids=' });
+
+    const acc = await getMagaluAccount(req.user.id);
+    if (!acc) return res.status(401).json({ error: 'Magalu não conectado' });
+
+    const items = [];
+    for (const id of deliveryIds) items.push(await fetchMagaluDeliveryAndInvoice(acc, id));
+    const mode = String(req.query.size || req.query.mode || 'a4').toLowerCase();
+    const pdf = await buildMagaluDanfeOnlyPdfBuffer(items, { mode });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="magalu-danfe-simplificado-${mode}-${deliveryIds.length}.pdf"`);
+    return res.send(pdf);
+  } catch (e) {
+    res.status(500).json({
+      error: 'Não foi possível gerar DANFE simplificado',
+      message: e.message,
+      install: 'Se faltar dependência, rode: npm install pdfkit bwip-js'
+    });
+  }
+});
+
 app.get('/api/magalu/labels/salesync-pdf', auth, async (req, res) => {
   try {
     const rawIds = String(req.query.ids || req.query.id || '').split(',').map(x => x.trim()).filter(Boolean);
