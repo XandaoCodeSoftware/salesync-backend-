@@ -2080,6 +2080,13 @@ async function drawDanfeSimplificadoOnly(doc, data, box, opts = {}) {
   kv('CNPJ/CPF:', info.destDoc);
   kv('Inscrição Estadual:', info.destIe, info.destUf);
 
+  // Assinatura discreta da plataforma no DANFE criado pelo SalesSync.
+  doc.font('Helvetica-Bold')
+    .fontSize(fs(6.5))
+    .fillColor('#444444')
+    .text('IMPRESSO POR SALES SYNC', x + pad, y + h - 38 * scale, { width:w - pad*2, align:'right' });
+  doc.fillColor('black');
+
   doc.font('Helvetica-Bold').fontSize(fs(10)).text('DANFE SIMPLIFICADO', x + pad, y + h - 24 * scale, { width:w - pad*2 });
 }
 
@@ -2165,14 +2172,14 @@ async function fetchMagaluOfficialLabelPdfBuffer(acc, deliveryId, opts = {}) {
   throw e;
 }
 
-async function appendPdfPagesFitted(outDoc, sourceBuffer, targetSize = [288, 432]) {
+async function appendPdfPagesFitted(outDoc, sourceBuffer, targetSize = [288, 432], opts = {}) {
   const src = await PDFLib.PDFDocument.load(sourceBuffer);
-  const indices = src.getPageIndices();
+  const indices = opts.onlyFirstPage ? [0] : src.getPageIndices();
   const embeddedPages = await outDoc.embedPdf(sourceBuffer, indices);
   for (const ep of embeddedPages) {
     const page = outDoc.addPage(targetSize);
     const pageW = targetSize[0], pageH = targetSize[1];
-    const margin = 0;
+    const margin = opts.margin ?? 0;
     const scale = Math.min((pageW - margin * 2) / ep.width, (pageH - margin * 2) / ep.height);
     const drawW = ep.width * scale;
     const drawH = ep.height * scale;
@@ -2185,6 +2192,47 @@ async function appendPdfPagesFitted(outDoc, sourceBuffer, targetSize = [288, 432
   }
 }
 
+// Recorta apenas a ETIQUETA oficial da Magalu e encaixa em 4x6/Zebra.
+// Importante: não redesenha a etiqueta; só usa a página oficial e remove a área de NF/DANFE que vem junto
+// em alguns PDFs da Magalu/Bling. Também ignora páginas seguintes de nota normal.
+async function appendMagaluOfficialLabelOnlyZebra(outDoc, sourceBuffer, targetSize = [288, 432]) {
+  const src = await PDFLib.PDFDocument.load(sourceBuffer);
+  const first = src.getPage(0);
+  const { width, height } = first.getSize();
+
+  let embedded;
+  const isLargeSheet = width > 420 || height > 620;
+
+  if (isLargeSheet) {
+    // PDFs de etiqueta + DANFE geralmente vêm em folha grande:
+    // esquerda = etiqueta, direita = DANFE, e às vezes 2 etiquetas por folha.
+    // Pegamos a etiqueta superior esquerda e ampliamos para o papel Zebra.
+    const crop = {
+      left: 0,
+      bottom: height * 0.50,
+      right: width * 0.52,
+      top: height
+    };
+    embedded = await outDoc.embedPage(first, crop);
+  } else {
+    // Se a Magalu já retornou a etiqueta em 4x6, mantém a página inteira.
+    embedded = await outDoc.embedPage(first);
+  }
+
+  const page = outDoc.addPage(targetSize);
+  const pageW = targetSize[0], pageH = targetSize[1];
+  const margin = 2;
+  const scale = Math.min((pageW - margin * 2) / embedded.width, (pageH - margin * 2) / embedded.height);
+  const drawW = embedded.width * scale;
+  const drawH = embedded.height * scale;
+  page.drawPage(embedded, {
+    x: (pageW - drawW) / 2,
+    y: (pageH - drawH) / 2,
+    width: drawW,
+    height: drawH
+  });
+}
+
 async function buildMagaluZebraLabelDanfePdfBuffer(acc, deliveryIds) {
   if (!PDFLib) throw new Error('Dependência pdf-lib não instalada. Rode: npm install pdf-lib');
   if (!PDFDocument) throw new Error('Dependência pdfkit não instalada. Rode: npm install pdfkit bwip-js');
@@ -2195,9 +2243,10 @@ async function buildMagaluZebraLabelDanfePdfBuffer(acc, deliveryIds) {
   for (const deliveryId of deliveryIds) {
     const data = await fetchMagaluDeliveryAndInvoice(acc, deliveryId);
 
-    // 1) Página da etiqueta oficial Magalu. Não redesenha, só encaixa no papel Zebra.
+    // 1) Página da etiqueta oficial Magalu: NÃO redesenha.
+    // Recorta somente a área da etiqueta oficial, ignora nota normal/páginas extras e amplia para Zebra.
     const label = await fetchMagaluOfficialLabelPdfBuffer(acc, deliveryId);
-    await appendPdfPagesFitted(out, label.pdf, pageSize);
+    await appendMagaluOfficialLabelOnlyZebra(out, label.pdf, pageSize);
 
     // 2) Página do DANFE simplificado criado pelo SalesSync, sempre em Zebra.
     const danfePdf = await buildMagaluDanfeOnlyPdfBuffer([data], { mode: 'zebra' });
