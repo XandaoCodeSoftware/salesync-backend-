@@ -6,6 +6,10 @@ const axios   = require('axios');
 const crypto  = require('crypto');
 const cors    = require('cors');
 const jwt     = require('jsonwebtoken');
+let PDFDocument = null;
+let bwipjs = null;
+try { PDFDocument = require('pdfkit'); } catch {}
+try { bwipjs = require('bwip-js'); } catch {}
 require('dotenv').config();
 
 const app = express();
@@ -1771,6 +1775,247 @@ app.get('/api/magalu/delivery/:id/official-label-debug', auth, async (req, res) 
   }
 });
 
+
+
+function xmlTag(xml, tag) {
+  const m = String(xml || '').match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, 'i'));
+  return m ? m[1].trim() : '';
+}
+function xmlBlock(xml, tag) {
+  const m = String(xml || '').match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i'));
+  return m ? m[1] : '';
+}
+function onlyDateBR(v) {
+  if (!v) return '—';
+  const d = new Date(v);
+  if (!Number.isFinite(d.getTime())) return String(v).slice(0, 10).split('-').reverse().join('/');
+  return d.toLocaleDateString('pt-BR');
+}
+function dateTimeBR(v) {
+  if (!v) return '—';
+  const d = new Date(v);
+  if (!Number.isFinite(d.getTime())) return String(v);
+  return d.toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit', second:'2-digit' });
+}
+function moneyFromCents(v, normalizer = 100) {
+  return (Number(v || 0) / Number(normalizer || 100)).toLocaleString('pt-BR', { style:'currency', currency:'BRL' });
+}
+function parseNFeXml(xml) {
+  const ide = xmlBlock(xml, 'ide');
+  const emit = xmlBlock(xml, 'emit');
+  const dest = xmlBlock(xml, 'dest');
+  const prot = xmlBlock(xml, 'infProt');
+  const total = xmlBlock(xml, 'ICMSTot');
+  return {
+    key: xmlTag(prot, 'chNFe') || (String(xml).match(/Id="NFe(\d{44})"/) || [])[1] || '',
+    number: xmlTag(ide, 'nNF'),
+    series: xmlTag(ide, 'serie'),
+    issuedAt: xmlTag(ide, 'dhEmi'),
+    protocol: xmlTag(prot, 'nProt'),
+    protocolAt: xmlTag(prot, 'dhRecbto'),
+    emitName: xmlTag(emit, 'xNome') || xmlTag(emit, 'xFant'),
+    emitCnpj: xmlTag(emit, 'CNPJ'),
+    emitIe: xmlTag(emit, 'IE'),
+    emitUf: xmlTag(xmlBlock(emit, 'enderEmit'), 'UF'),
+    destName: xmlTag(dest, 'xNome'),
+    destCpfCnpj: xmlTag(dest, 'CPF') || xmlTag(dest, 'CNPJ'),
+    destIe: xmlTag(dest, 'IE'),
+    destUf: xmlTag(xmlBlock(dest, 'enderDest'), 'UF'),
+    value: xmlTag(total, 'vNF')
+  };
+}
+async function fetchMagaluDeliveryAndInvoice(acc, deliveryId) {
+  const headers = { Authorization: `Bearer ${acc.access_token}` };
+  const [deliveryResp, invoicesResp] = await Promise.all([
+    axios.get(`https://api.magalu.com/seller/v1/deliveries/${encodeURIComponent(deliveryId)}`, { headers, validateStatus: () => true }),
+    axios.get(`https://api.magalu.com/seller/v1/deliveries/${encodeURIComponent(deliveryId)}/invoices`, { headers, validateStatus: () => true })
+  ]);
+  if (deliveryResp.status < 200 || deliveryResp.status >= 300) {
+    throw new Error(`Entrega ${deliveryId} não encontrada na Magalu: ${deliveryResp.status}`);
+  }
+  const inv = invoicesResp.data?.results?.[0] || deliveryResp.data?.invoices?.[0] || {};
+  const xml = inv.xml || '';
+  const nfe = xml ? parseNFeXml(xml) : {
+    key: inv.key || deliveryResp.data?.invoices?.[0]?.key || '',
+    number: '', series: '', issuedAt: inv.issued_at || deliveryResp.data?.invoices?.[0]?.issued_at || '',
+    protocol: '', protocolAt: '', emitName: '', emitCnpj: '', emitIe: '', emitUf: '',
+    destName: deliveryResp.data?.shipping?.recipient?.name || '',
+    destCpfCnpj: deliveryResp.data?.shipping?.recipient?.document_number || '',
+    destIe: '', destUf: deliveryResp.data?.shipping?.recipient?.address?.state || '', value: ''
+  };
+  return { delivery: deliveryResp.data, invoice: inv, nfe };
+}
+function shortText(v, max = 38) {
+  v = String(v || '').replace(/\s+/g, ' ').trim();
+  return v.length > max ? v.slice(0, max - 1) + '…' : v;
+}
+function drawBoxText(doc, text, x, y, w, h, opts={}) {
+  doc.rect(x, y, w, h).stroke();
+  doc.font(opts.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(opts.size || 10).text(String(text || ''), x + 4, y + 4, { width: w - 8, align: opts.align || 'center' });
+}
+function fauxBarcode(doc, text, x, y, w, h) {
+  const t = String(text || '1234567890');
+  let cx = x;
+  for (let i = 0; i < 90 && cx < x + w; i++) {
+    const n = (t.charCodeAt(i % t.length) || 47) % 5;
+    const lw = 1 + (n % 3);
+    if (i % 2 === 0) doc.rect(cx, y, lw, h).fill('black');
+    cx += lw + 1;
+  }
+  doc.fillColor('black');
+}
+async function drawBarcode(doc, text, x, y, w, h, rotate=false) {
+  try {
+    if (bwipjs) {
+      const png = await bwipjs.toBuffer({ bcid:'code128', text:String(text || '0'), scale:2, height:12, includetext:false, padding:0 });
+      if (rotate) {
+        doc.save().rotate(90, { origin:[x, y] }).image(png, x, y - w, { width:h, height:w }).restore();
+      } else {
+        doc.image(png, x, y, { width:w, height:h });
+      }
+      return;
+    }
+  } catch {}
+  if (rotate) {
+    doc.save().rotate(90, { origin:[x, y] });
+    fauxBarcode(doc, text, x, y - w, h, w);
+    doc.restore();
+  } else fauxBarcode(doc, text, x, y, w, h);
+}
+async function drawQr(doc, text, x, y, size) {
+  try {
+    if (bwipjs) {
+      const png = await bwipjs.toBuffer({ bcid:'qrcode', text:String(text || ''), scale:3, padding:0 });
+      doc.image(png, x, y, { width:size, height:size });
+      return;
+    }
+  } catch {}
+  doc.rect(x, y, size, size).stroke();
+  doc.fontSize(6).text('QR', x, y + size/2 - 4, { width:size, align:'center' });
+}
+function addressLine(addr = {}) {
+  return [addr.street, addr.number].filter(Boolean).join(', ');
+}
+function cityLine(addr = {}) {
+  return [addr.city, addr.state].filter(Boolean).join(', ');
+}
+async function drawMagaluEtiquetaDanfe(doc, data, y) {
+  const d = data.delivery || {};
+  const nfe = data.nfe || {};
+  const rec = d.shipping?.recipient || {};
+  const ra = rec.address || {};
+  const drop = d.shipping?.drop_details || {};
+  const da = drop.address || {};
+  const orderCode = d.order?.code || d.code || '';
+  const nfNumber = nfe.number || (d.invoices?.[0]?.key ? String(d.invoices[0].key).slice(25, 34).replace(/^0+/, '') : '');
+  const key = nfe.key || d.invoices?.[0]?.key || '';
+  const deadline = d.shipping?.deadline?.limit_date || '';
+  const emitName = nfe.emitName || 'KARAKA STORE';
+  const emitCnpj = nfe.emitCnpj || '55938975000157';
+  const emitIe = nfe.emitIe || '718285699111';
+  const emitUf = nfe.emitUf || da.state || 'SP';
+  const destName = nfe.destName || rec.name || '';
+  const destDoc = nfe.destCpfCnpj || rec.document_number || '';
+  const destUf = nfe.destUf || ra.state || '';
+
+  const leftX = 18, leftW = 260, rightX = 300, rightW = 276, h = 392;
+  doc.font('Helvetica-Bold').fontSize(15).text('magalu Entregas', leftX, y + 6);
+  doc.fontSize(9).fillColor('white').rect(leftX, y + 28, 78, 12).fill('black').fillColor('black').text('AGÊNCIA MAGALU', leftX + 3, y + 30);
+  doc.font('Helvetica-Bold').fontSize(10).text('MALHADIRET', leftX, y + 44).text('MALHA-DIRETA', leftX, y + 58);
+  await drawQr(doc, `Pedido:${orderCode}|Entrega:${d.id}|NF:${nfNumber}`, leftX + 170, y + 8, 75);
+
+  await drawBarcode(doc, d.code || d.id || orderCode, leftX + 14, y + 116, 56, 180, true);
+  doc.fontSize(10).rotate(90, { origin:[leftX + 2, y + 172] }).text(String(d.code || d.id || '').replace(/^LU-/, '').slice(-14), leftX + 2, y + 172).rotate(-90, { origin:[leftX + 2, y + 172] });
+
+  drawBoxText(doc, 'AG', leftX + 124, y + 96, 50, 24, { bold:true, size:16 });
+  drawBoxText(doc, '01', leftX + 176, y + 96, 50, 24, { bold:true, size:16 });
+  doc.rect(leftX + 124, y + 123, 50, 24).fill('black');
+  doc.rect(leftX + 176, y + 123, 50, 24).fill('black');
+  doc.fillColor('white').font('Helvetica-Bold').fontSize(16).text((ra.state || 'MG').slice(0,3).toUpperCase(), leftX + 124, y + 127, { width:50, align:'center' }).text((ra.zipcode || '').slice(0,3) || '000', leftX + 176, y + 127, { width:50, align:'center' });
+  doc.fillColor('black');
+
+  doc.font('Helvetica-Bold').fontSize(10).text(`Pedido: ${orderCode}`, leftX + 124, y + 164);
+  doc.font('Helvetica-Bold').fontSize(9).text(`Nota Fiscal: ${nfNumber || '—'}`, leftX + 124, y + 178);
+  doc.text(`Data estimada: ${onlyDateBR(deadline)}`, leftX + 124, y + 190);
+  doc.moveTo(leftX + 124, y + 206).lineTo(leftX + 250, y + 206).stroke();
+  doc.fontSize(7).text('DESTINATÁRIO', leftX + 124, y + 212);
+  doc.font('Helvetica-Bold').fontSize(8).text(shortText(destName, 30).toUpperCase(), leftX + 124, y + 225, { width:130 });
+  doc.font('Helvetica').fontSize(8).text(shortText(addressLine(ra), 32).toUpperCase(), leftX + 124, y + 244, { width:130 });
+  doc.font('Helvetica-Bold').text(`${shortText(ra.district, 22).toUpperCase()} - ${ra.zipcode || ''}`, leftX + 124, y + 264, { width:130 });
+  doc.text(cityLine(ra).toUpperCase(), leftX + 124, y + 282, { width:130 });
+  doc.moveTo(leftX + 124, y + 304).lineTo(leftX + 250, y + 304).stroke();
+  doc.font('Helvetica-Bold').fontSize(7).text('REMETENTE', leftX + 124, y + 310);
+  doc.font('Helvetica-Bold').fontSize(7).text(emitName, leftX + 124, y + 322, { width:130 });
+  doc.font('Helvetica').fontSize(7).text(shortText(addressLine(da).toUpperCase(), 38), leftX + 124, y + 336, { width:130 });
+  doc.text(`${shortText(da.district, 26).toUpperCase()} - ${da.zipcode || ''}`, leftX + 124, y + 356, { width:130 });
+  doc.text(cityLine(da).toUpperCase(), leftX + 124, y + 374, { width:130 });
+
+  // DANFE simplificado à direita
+  doc.rect(rightX, y + 6, rightW, h - 12).stroke();
+  await drawBarcode(doc, key || '00000000000000000000000000000000000000000000', rightX + 45, y + 18, rightW - 90, 46);
+  doc.font('Helvetica').fontSize(7).text(key, rightX + 38, y + 68, { width:rightW - 76, align:'center' });
+  doc.rect(rightX + 8, y + 90, 70, 50).stroke();
+  doc.font('Helvetica').fontSize(7).text('1 - SAÍDA', rightX + 12, y + 96);
+  doc.font('Helvetica-Bold').fontSize(7).text(`Nº ${nfNumber || '—'} / Série ${nfe.series || '1'}`, rightX + 12, y + 111);
+  doc.font('Helvetica').fontSize(7).text(`Emissão: ${onlyDateBR(nfe.issuedAt)}`, rightX + 12, y + 126);
+  doc.font('Helvetica-Bold').fontSize(8).text('Chave de acesso', rightX + 148, y + 96, { width:115, align:'center' });
+  doc.font('Helvetica').fontSize(5.5).text(key, rightX + 115, y + 109, { width:150, align:'center' });
+  doc.font('Helvetica-Bold').fontSize(8).text('Protocolo de autorização de uso', rightX + 112, y + 124, { width:155, align:'center' });
+  doc.font('Helvetica').fontSize(6).text(`${nfe.protocol || '—'} ${dateTimeBR(nfe.protocolAt || nfe.issuedAt)}`, rightX + 112, y + 136, { width:155, align:'center' });
+  doc.moveTo(rightX, y + 158).lineTo(rightX + rightW, y + 158).stroke();
+
+  let yy = y + 245;
+  doc.font('Helvetica-Bold').fontSize(8).text('Emitente:', rightX + 8, yy).font('Helvetica').text(emitName, rightX + 58, yy, { width:190 }); yy += 22;
+  doc.font('Helvetica-Bold').text('CNPJ:', rightX + 8, yy).font('Helvetica').text(emitCnpj, rightX + 58, yy); yy += 18;
+  doc.font('Helvetica-Bold').text('Inscrição Estadual:', rightX + 8, yy).font('Helvetica').text(emitIe || '', rightX + 88, yy).font('Helvetica-Bold').text('UF:', rightX + 240, yy).font('Helvetica').text(emitUf || '', rightX + 258, yy); yy += 32;
+  doc.font('Helvetica-Bold').text('Destinatário:', rightX + 8, yy).font('Helvetica').text(destName, rightX + 68, yy, { width:185 }); yy += 22;
+  doc.font('Helvetica-Bold').text('CNPJ/CPF:', rightX + 8, yy).font('Helvetica').text(destDoc, rightX + 68, yy); yy += 20;
+  doc.font('Helvetica-Bold').text('Inscrição Estadual:', rightX + 8, yy).font('Helvetica').text(nfe.destIe || '', rightX + 88, yy).font('Helvetica-Bold').text('UF:', rightX + 240, yy).font('Helvetica').text(destUf || '', rightX + 258, yy); yy += 22;
+  doc.font('Helvetica-Bold').fontSize(10).text('DANFE SIMPLIFICADO', rightX + 8, y + h - 24);
+}
+async function buildMagaluSimplifiedPdfBuffer(items) {
+  if (!PDFDocument) throw new Error('Dependência pdfkit não instalada. Rode: npm install pdfkit bwip-js');
+  return await new Promise(async (resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ size:'A4', margin:0, bufferPages:false });
+      const chunks = [];
+      doc.on('data', c => chunks.push(c));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+      for (let i = 0; i < items.length; i++) {
+        if (i > 0 && i % 2 === 0) doc.addPage({ size:'A4', margin:0 });
+        const y = (i % 2 === 0) ? 14 : 426;
+        await drawMagaluEtiquetaDanfe(doc, items[i], y);
+        if (i % 2 === 0) doc.moveTo(14, 414).lineTo(581, 414).dash(3, { space:4 }).stroke().undash();
+      }
+      doc.end();
+    } catch (e) { reject(e); }
+  });
+}
+
+app.get('/api/magalu/labels/salesync-pdf', auth, async (req, res) => {
+  try {
+    const rawIds = String(req.query.ids || req.query.id || '').split(',').map(x => x.trim()).filter(Boolean);
+    const deliveryIds = [...new Set(rawIds)].slice(0, 20);
+    if (!deliveryIds.length) return res.status(400).json({ error: 'Informe ao menos um delivery id em ?ids=' });
+
+    const acc = await getMagaluAccount(req.user.id);
+    if (!acc) return res.status(401).json({ error: 'Magalu não conectado' });
+
+    const items = [];
+    for (const id of deliveryIds) items.push(await fetchMagaluDeliveryAndInvoice(acc, id));
+    const pdf = await buildMagaluSimplifiedPdfBuffer(items);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="magalu-etiquetas-danfe-salesync-${deliveryIds.length}.pdf"`);
+    return res.send(pdf);
+  } catch (e) {
+    res.status(500).json({
+      error: 'Não foi possível gerar PDF SalesSync etiqueta + DANFE simplificado',
+      message: e.message,
+      install: 'Se faltar dependência, rode: npm install pdfkit bwip-js'
+    });
+  }
+});
 
 app.get('/api/magalu/labels/official', auth, async (req, res) => {
   try {
