@@ -1527,7 +1527,7 @@ async function postMagaluShippingLabel(acc, payload) {
     {
       headers: {
         Authorization: `Bearer ${acc.access_token}`,
-        Accept: 'application/pdf,application/json,*/*',
+        Accept: 'application/json,application/pdf,*/*',
         'Content-Type': 'application/json'
       },
       responseType: 'arraybuffer',
@@ -1583,44 +1583,66 @@ async function inspectMagaluDelivery(acc, deliveryId) {
   return probes;
 }
 
-function inferMagaluChannelsFromProbe(probes) {
-  const values = [];
-  for (const p of probes || []) {
-    const d = p?.data || {};
-    const c = p?.compact || {};
-    values.push(c.channel, d.channel, d.sales_channel, d.delivery?.channel, d.delivery?.sales_channel);
+function inferMagaluChannelObjectsFromProbe(probes) {
+  const channels = [];
+
+  function pushChannel(id, extras = {}) {
+    if (!id || String(id).trim() === '') return;
+    const cleanId = String(id).trim();
+    if (channels.some(c => c.id === cleanId)) return;
+    channels.push({ id: cleanId, extras: extras && typeof extras === 'object' ? extras : {} });
   }
-  return uniq(values);
+
+  for (const p of probes || []) {
+    const d = p?.data?.delivery || p?.data || {};
+
+    // FORMATO CORRETO da API de etiquetas Magalu:
+    // channel precisa ser OBJETO { id, extras }, não string.
+    // O id bom vem em delivery.order.channel.id, não em source_channel.id.
+    pushChannel(d?.order?.channel?.id, d?.order?.channel?.extras || {});
+    pushChannel(d?.channel?.id, d?.channel?.extras || {});
+    pushChannel(d?.sales_channel?.id, d?.sales_channel?.extras || {});
+
+    // Mantemos esses como fallback/debug, mas geralmente source_channel.id="MagazineLuiza"
+    // NÃO é o id esperado pelo endpoint de etiqueta.
+    pushChannel(d?.order?.source_channel?.id, { description: d?.order?.source_channel?.description || '' });
+  }
+
+  return channels;
 }
 
 function magaluLabelPayloads(deliveryId, options = {}) {
-  // A API valida obrigatoriamente: channel, label e deliveries.
-  // Quando channel/label estão presentes, o 500 vem do lado Magalu; por isso testamos
-  // channel inferido da entrega + variações comuns e devolvemos o diagnóstico completo.
   const idObj = { id: deliveryId };
-  const channels = uniq([
-    ...(options.channels || []),
-    options.channel,
-    'MagazineLuiza',
-    'MAGAZINELUIZA',
-    'magazineluiza',
-    'magazine_luiza',
-    'magalu',
-    'MAGALU'
-  ]);
 
+  const channelObjects = [];
+  const addChannel = (ch) => {
+    if (!ch) return;
+    if (typeof ch === 'string') ch = { id: ch, extras: {} };
+    if (!ch.id) return;
+    const id = String(ch.id).trim();
+    if (!id) return;
+    if (channelObjects.some(x => x.id === id)) return;
+    channelObjects.push({ id, extras: ch.extras && typeof ch.extras === 'object' ? ch.extras : {} });
+  };
+
+  (options.channels || []).forEach(addChannel);
+  addChannel(options.channel);
+
+  // fallback final apenas para expor validação se o parser não encontrou o UUID
+  addChannel({ id: 'MagazineLuiza', extras: {} });
+
+  // Conforme documentação oficial: format = pdf|zpl, type = summary|full.
+  // A4/ZEBRA era formato de docs antigas/legadas e aqui gera comportamento errado.
   const labels = [
-    { type: 'full', format: 'A4' },
-    { type: 'summary', format: 'A4' },
-    { type: 'full' },
-    { type: 'summary' },
-    { format: 'A4' },
-    { format: 'ZEBRA' }
+    { type: 'full', format: 'pdf' },
+    { type: 'summary', format: 'pdf' },
+    { type: 'full', format: 'zpl' },
+    { type: 'summary', format: 'zpl' }
   ];
 
   const payloads = [];
-  for (const channel of channels) {
-    for (const label of labels) payloads.push({ channel, label, deliveries: [idObj] });
+  for (const channel of channelObjects) {
+    for (const label of labels) payloads.push({ channel, deliveries: [idObj], label });
   }
   return payloads;
 }
@@ -1658,8 +1680,9 @@ app.get('/api/magalu/delivery/:id/official-label-debug', auth, async (req, res) 
     if (!acc) return res.status(401).json({ error: 'Magalu não conectado' });
 
     const delivery_probe = await inspectMagaluDelivery(acc, deliveryId);
-    const channels = uniq([req.query.channel, ...inferMagaluChannelsFromProbe(delivery_probe)]);
-    const payloads = magaluLabelPayloads(deliveryId, { channels }).slice(0, 24);
+    const channels = inferMagaluChannelObjectsFromProbe(delivery_probe);
+    if (req.query.channel) channels.unshift({ id: String(req.query.channel), extras: {} });
+    const payloads = magaluLabelPayloads(deliveryId, { channels }).slice(0, 16);
     const results = [];
 
     for (const payload of payloads) {
@@ -1708,10 +1731,11 @@ app.get('/api/magalu/delivery/:id/official-label', auth, async (req, res) => {
     if (!acc) return res.status(401).json({ error: 'Magalu não conectado' });
 
     const delivery_probe = await inspectMagaluDelivery(acc, deliveryId);
-    const channels = uniq([req.query.channel, ...inferMagaluChannelsFromProbe(delivery_probe)]);
+    const channels = inferMagaluChannelObjectsFromProbe(delivery_probe);
+    if (req.query.channel) channels.unshift({ id: String(req.query.channel), extras: {} });
     const attempts = [];
 
-    for (const payload of magaluLabelPayloads(deliveryId, { channels }).slice(0, 24)) {
+    for (const payload of magaluLabelPayloads(deliveryId, { channels }).slice(0, 16)) {
       const r = await postMagaluShippingLabel(acc, payload);
       const ct = r.headers?.['content-type'] || '';
       const buf = Buffer.from(r.data || '');
@@ -1732,7 +1756,7 @@ app.get('/api/magalu/delivery/:id/official-label', auth, async (req, res) => {
 
     res.status(422).json({
       error: 'Não foi possível gerar etiqueta Magalu',
-      hint: 'Entrega validada/faturada e NF-e aprovada, mas a API da Magalu retornou 500 na geração da etiqueta. Isso indica falha/instabilidade/inelegibilidade interna do serviço de etiquetas. Abra /official-label-debug e envie o relatório ao suporte Magalu.',
+      hint: 'A rota usa o formato oficial: channel como objeto {id, extras} vindo de order.channel.id e label.format como pdf/zpl. Se ainda retornar erro, abra /official-label-debug e veja o payload/retorno.',
       endpoint: 'POST /seller/v1/logistics/shipping-labels',
       delivery_id: deliveryId,
       delivery_probe,
