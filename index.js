@@ -2459,6 +2459,174 @@ app.get('/api/magalu/delivery/:id/official-label', auth, async (req, res) => {
     });
   }
 });
+function ssNum(v) {
+  const n = Number(v || 0);
+  return Number.isFinite(n) ? n : 0;
+}
+function ssFirstMonth(d = new Date()) { return new Date(d.getFullYear(), d.getMonth(), 1); }
+function ssDaysInMonth(d = new Date()) { return new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate(); }
+function ssElapsedDays(d = new Date()) { return Math.max(1, d.getDate()); }
+function ssAmount(o) { return ssNum(o.total_amount ?? o.paid_amount ?? o.amount ?? o.total ?? 0); }
+function ssProfit(o) { return ssNum(o.profit ?? o.net_profit ?? o.lucro ?? 0); }
+function ssProduct(o) { return String(o.item_title || o.product_name || o.name || o.item_sku || 'Produto sem nome'); }
+
+async function salesyncGetOrdersForAnalytics(userId, days = 30, dateFrom = null, dateTo = null) {
+  if (typeof fetchAllMarketplaces === 'function') {
+    return await fetchAllMarketplaces(userId, days, { date_from: dateFrom, date_to: dateTo });
+  }
+  if (typeof getAllOrders === 'function') {
+    return await getAllOrders(userId, { days, date_from: dateFrom, date_to: dateTo });
+  }
+  return [];
+}
+
+async function ssMagaluAccount(userId) {
+  const { rows } = await db.query(
+    `SELECT * FROM marketplace_accounts
+     WHERE user_id=$1 AND platform='magalu' AND is_active=true AND access_token IS NOT NULL
+     LIMIT 1`,
+    [userId]
+  );
+  return rows[0] || null;
+}
+function ssMagaluHeaders(acc) {
+  return { Authorization: `Bearer ${acc.access_token}`, Accept: 'application/json', 'Content-Type': 'application/json' };
+}
+function ssMondayLookbackDays() { return new Date().getDay() === 1 ? 4 : 3; }
+function ssPrintableDelivery(d) {
+  const status = String(d?.status || '').toLowerCase();
+  const provider = d?.shipping?.provider?.extras || {};
+  const invoice = Array.isArray(d?.invoices) ? d.invoices[0] : null;
+  const invoiceStatus = String(invoice?.status?.id || invoice?.status || '').toLowerCase();
+  const blocked = ['shipped','delivered','cancelled','canceled','finished','closed','dispatched','posted','sent'];
+  return !blocked.includes(status)
+    && ['invoiced','approved','ready_to_ship','ready'].includes(status)
+    && provider.is_mle === true
+    && provider.is_fulfillment !== true
+    && invoiceStatus === 'approved';
+}
+
+// METAS
+app.get('/api/user-goals', auth, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT revenue_goal_enabled, monthly_revenue_goal, updated_at FROM user_goals WHERE user_id=$1 LIMIT 1`,
+      [req.user.id]
+    );
+    res.json({ success: true, data: rows[0] || { revenue_goal_enabled: false, monthly_revenue_goal: 0, updated_at: null } });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/user-goals', auth, async (req, res) => {
+  try {
+    const enabled = Boolean(req.body.revenue_goal_enabled);
+    const goal = Math.max(0, Number(req.body.monthly_revenue_goal || 0));
+    const { rows } = await db.query(
+      `INSERT INTO user_goals (user_id, revenue_goal_enabled, monthly_revenue_goal, updated_at)
+       VALUES ($1,$2,$3,NOW())
+       ON CONFLICT (user_id) DO UPDATE SET
+         revenue_goal_enabled=EXCLUDED.revenue_goal_enabled,
+         monthly_revenue_goal=EXCLUDED.monthly_revenue_goal,
+         updated_at=NOW()
+       RETURNING revenue_goal_enabled, monthly_revenue_goal, updated_at`,
+      [req.user.id, enabled, goal]
+    );
+    res.json({ success: true, data: rows[0] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ANALYTICS + PREVISÃO
+app.get('/api/analytics/summary', auth, async (req, res) => {
+  try {
+    const now = new Date();
+    const from = ssFirstMonth(now).toISOString();
+    const to = now.toISOString();
+    const orders = await salesyncGetOrdersForAnalytics(req.user.id, 45, from, to);
+    const valid = (orders || []).filter(o => !['cancelled','canceled','invalid'].includes(String(o.status || '').toLowerCase()));
+    const gross = valid.reduce((s,o)=>s+ssAmount(o),0);
+    const profit = valid.reduce((s,o)=>s+ssProfit(o),0);
+    const count = valid.length;
+    const avg = count ? gross / count : 0;
+    const pc = {}, pp = {};
+    valid.forEach(o => { const p=ssProduct(o); pc[p]=(pc[p]||0)+Number(o.quantity||1); pp[p]=(pp[p]||0)+ssProfit(o); });
+    const best = Object.entries(pc).sort((a,b)=>b[1]-a[1])[0]?.[0] || null;
+    const most = Object.entries(pp).sort((a,b)=>b[1]-a[1])[0]?.[0] || null;
+    const { rows:gRows } = await db.query(`SELECT revenue_goal_enabled, monthly_revenue_goal FROM user_goals WHERE user_id=$1 LIMIT 1`, [req.user.id]);
+    const goal = gRows[0] || { revenue_goal_enabled:false, monthly_revenue_goal:0 };
+    const goalValue = ssNum(goal.monthly_revenue_goal);
+    const projected = (gross / ssElapsedDays(now)) * ssDaysInMonth(now);
+    const missing = Math.max(0, goalValue - gross);
+    const pct = goalValue > 0 ? Math.min(999, (gross / goalValue) * 100) : 0;
+    res.json({ success:true, data:{
+      month: ssFirstMonth(now).toISOString().slice(0,7),
+      gross_sales:+gross.toFixed(2), net_profit:+profit.toFixed(2), orders_count:count,
+      avg_ticket:+avg.toFixed(2), best_seller_product:best, most_profitable_product:most,
+      revenue_goal_enabled:!!goal.revenue_goal_enabled, monthly_revenue_goal:+goalValue.toFixed(2),
+      missing_to_goal:+missing.toFixed(2), goal_progress_pct:+pct.toFixed(1),
+      projected_revenue:+projected.toFixed(2), will_hit_goal: goalValue>0 ? projected>=goalValue : null
+    }});
+  } catch(e) { console.error('[analytics]', e); res.status(500).json({ error:e.message }); }
+});
+
+app.post('/api/analytics/monthly-snapshot', auth, async (req,res) => {
+  try {
+    const now = new Date();
+    const month = ssFirstMonth(now);
+    const orders = await salesyncGetOrdersForAnalytics(req.user.id, 45, month.toISOString(), now.toISOString());
+    const valid = (orders || []).filter(o => !['cancelled','canceled','invalid'].includes(String(o.status || '').toLowerCase()));
+    const gross = valid.reduce((s,o)=>s+ssAmount(o),0);
+    const profit = valid.reduce((s,o)=>s+ssProfit(o),0);
+    const count = valid.length;
+    const avg = count ? gross / count : 0;
+    const pc = {}, pp = {};
+    valid.forEach(o => { const p=ssProduct(o); pc[p]=(pc[p]||0)+Number(o.quantity||1); pp[p]=(pp[p]||0)+ssProfit(o); });
+    const best = Object.entries(pc).sort((a,b)=>b[1]-a[1])[0]?.[0] || null;
+    const most = Object.entries(pp).sort((a,b)=>b[1]-a[1])[0]?.[0] || null;
+    const { rows } = await db.query(
+      `INSERT INTO monthly_snapshots (user_id,snapshot_month,gross_sales,net_profit,orders_count,avg_ticket,best_seller_product,most_profitable_product)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (user_id, snapshot_month) DO UPDATE SET
+        gross_sales=EXCLUDED.gross_sales, net_profit=EXCLUDED.net_profit, orders_count=EXCLUDED.orders_count,
+        avg_ticket=EXCLUDED.avg_ticket, best_seller_product=EXCLUDED.best_seller_product,
+        most_profitable_product=EXCLUDED.most_profitable_product, created_at=NOW()
+       RETURNING *`,
+      [req.user.id, month.toISOString().slice(0,10), gross, profit, count, avg, best, most]
+    );
+    await db.query(`DELETE FROM monthly_snapshots WHERE user_id=$1 AND snapshot_month < (DATE_TRUNC('month', NOW()) - INTERVAL '12 months')`, [req.user.id]);
+    res.json({ success:true, data:rows[0] });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
+app.get('/api/analytics/monthly-snapshots', auth, async (req,res) => {
+  try {
+    const { rows } = await db.query(`SELECT * FROM monthly_snapshots WHERE user_id=$1 ORDER BY snapshot_month DESC LIMIT 12`, [req.user.id]);
+    res.json({ success:true, data:rows });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
+// IMPRESSÕES DISPONÍVEIS
+app.get('/api/magalu/printable-deliveries', auth, async (req,res) => {
+  try {
+    const acc = await ssMagaluAccount(req.user.id);
+    if (!acc) return res.status(404).json({ error:'Magalu não conectado' });
+    const days = Math.min(7, Math.max(1, Number(req.query.days || ssMondayLookbackDays())));
+    const since = new Date(Date.now() - days * 86400000).toISOString();
+    const { data } = await axios.get('https://api.magalu.com/seller/v1/deliveries', {
+      headers: ssMagaluHeaders(acc),
+      params: { purchased_at__gte: since, _limit: 50, _sort: 'purchased_at:desc' },
+      validateStatus: () => true
+    });
+    const results = data?.results || data?.deliveries || (Array.isArray(data) ? data : []);
+    const printable = results.filter(ssPrintableDelivery).map(d => ({
+      delivery_id:d.id, delivery_code:d.code, order_code:d.order?.code || '', channel_id:d.order?.channel?.id || '',
+      customer_name:d.shipping?.recipient?.name || '', customer_city:d.shipping?.recipient?.address?.city || '',
+      customer_state:d.shipping?.recipient?.address?.state || '', status:d.status, purchased_at:d.purchased_at,
+      invoiced_at:d.invoiced_at, invoice_key:d.invoices?.[0]?.key || '', provider:d.shipping?.provider?.description || d.shipping?.provider?.name || ''
+    }));
+    res.json({ success:true, days, count:printable.length, data:printable });
+  } catch(e) { console.error('[printable]', e.response?.data || e.message); res.status(500).json({ error:e.message, data:e.response?.data || null }); }
+});
+
 
 app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:'5.0' }));
 
