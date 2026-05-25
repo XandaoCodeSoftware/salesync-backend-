@@ -828,6 +828,176 @@ async function enrichWithCosts(orders, userId) {
     };
   });
 }
+function monthKeyFromDate(d) {
+  const dt = new Date(d);
+  if (Number.isNaN(dt.getTime())) return null;
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-01`;
+}
+
+function lastNMonthStarts(n = 5) {
+  const now = new Date();
+  const out = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+    out.push(d.toISOString().slice(0, 10));
+  }
+  return out;
+}
+
+function moneyNumber(v) {
+  const n = Number(v || 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function normalizeOrderMonthAndGross(o) {
+  const date =
+    o.order_date ||
+    o.created_at ||
+    o.purchased_at ||
+    o.date_created ||
+    o.approved_at ||
+    o.invoiced_at;
+
+  const month = monthKeyFromDate(date);
+
+  // ML usa total_amount já em reais; Magalu normalizado no fetch deve vir total_amount em reais.
+  const gross =
+    moneyNumber(o.total_amount) ||
+    moneyNumber(o.paid_amount) ||
+    moneyNumber(o.amount_total) ||
+    0;
+
+  return { month, gross };
+}
+
+async function savePlatformMonthlySnapshot(userId, platform, snapshotMonth, grossSales, ordersCount) {
+  await db.query(`
+    INSERT INTO platform_monthly_snapshots
+      (user_id, platform, snapshot_month, gross_sales, orders_count, updated_at)
+    VALUES ($1, $2, $3, $4, $5, NOW())
+    ON CONFLICT (user_id, platform, snapshot_month)
+    DO UPDATE SET
+      gross_sales = EXCLUDED.gross_sales,
+      orders_count = EXCLUDED.orders_count,
+      updated_at = NOW()
+  `, [userId, platform, snapshotMonth, grossSales, ordersCount]);
+}
+
+app.post('/api/debug/monthly-revenue-backfill', auth, async (req, res) => {
+  const months = Math.min(Math.max(parseInt(req.query.months || '5', 10), 1), 6);
+  const monthStarts = lastNMonthStarts(months);
+
+  // janela com folga: 31 dias * meses + 10 dias
+  const days = Math.min((months * 31) + 10, 200);
+
+  try {
+    const { rows: accounts } = await db.query(`
+      SELECT *
+      FROM marketplace_accounts
+      WHERE user_id=$1
+        AND is_active=true
+        AND access_token IS NOT NULL
+        AND platform IN ('mercadolivre', 'magalu')
+    `, [req.user.id]);
+
+    const result = {
+      ok: true,
+      months: monthStarts,
+      days_window: days,
+      platforms: {},
+      saved: []
+    };
+
+    for (const acc of accounts) {
+      const platform = String(acc.platform || '').toLowerCase();
+      let orders = [];
+
+      try {
+        if (platform === 'mercadolivre') {
+          orders = await fetchML(acc, days);
+        } else if (platform === 'magalu') {
+          orders = await fetchMagalu(acc, days);
+        }
+      } catch (e) {
+        result.platforms[platform] = {
+          error: e.response?.data || e.message,
+          orders_count: 0,
+          monthly: {}
+        };
+        continue;
+      }
+
+      const monthly = {};
+      for (const m of monthStarts) {
+        monthly[m] = { gross_sales: 0, orders_count: 0 };
+      }
+
+      for (const o of orders || []) {
+        const { month, gross } = normalizeOrderMonthAndGross(o);
+        if (!month || !monthly[month]) continue;
+
+        const status = String(o.status || '').toLowerCase();
+        if (['cancelled', 'canceled', 'cancelado', 'invalid'].includes(status)) continue;
+
+        monthly[month].gross_sales += gross;
+        monthly[month].orders_count += 1;
+      }
+
+      for (const m of monthStarts) {
+        monthly[m].gross_sales = Number(monthly[m].gross_sales.toFixed(2));
+        await savePlatformMonthlySnapshot(
+          req.user.id,
+          platform,
+          m,
+          monthly[m].gross_sales,
+          monthly[m].orders_count
+        );
+        result.saved.push({ platform, month: m, ...monthly[m] });
+      }
+
+      result.platforms[platform] = {
+        shop_name: acc.shop_name,
+        orders_scanned: (orders || []).length,
+        monthly
+      };
+    }
+
+    // retorno consolidado para gráfico
+    const { rows: snapshots } = await db.query(`
+      SELECT platform, snapshot_month::date AS month, gross_sales, orders_count
+      FROM platform_monthly_snapshots
+      WHERE user_id=$1
+        AND snapshot_month = ANY($2::date[])
+      ORDER BY snapshot_month ASC, platform ASC
+    `, [req.user.id, monthStarts]);
+
+    result.snapshots = snapshots;
+
+    res.json(result);
+  } catch (e) {
+    console.error('[monthly-revenue-backfill]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/analytics/monthly-platforms', auth, async (req, res) => {
+  try {
+    const months = Math.min(Math.max(parseInt(req.query.months || '5', 10), 1), 12);
+    const monthStarts = lastNMonthStarts(months);
+
+    const { rows } = await db.query(`
+      SELECT platform, snapshot_month::date AS month, gross_sales, orders_count
+      FROM platform_monthly_snapshots
+      WHERE user_id=$1
+        AND snapshot_month = ANY($2::date[])
+      ORDER BY snapshot_month ASC, platform ASC
+    `, [req.user.id, monthStarts]);
+
+    res.json({ success: true, months: monthStarts, data: rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // ── API PEDIDOS ──
 app.get('/api/orders', auth, async (req, res) => {
