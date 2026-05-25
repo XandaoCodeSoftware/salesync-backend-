@@ -71,14 +71,14 @@ async function ensureProductSchema() {
 // SalesSync v17 — schema de metas/snapshots com auto-correção de colunas antigas
 async function ensureSalesSyncSchema() {
   try {
-    await db.query(`CREATE TABLE IF NOT EXISTS user_goals (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL UNIQUE)`);
+    await db.query(`CREATE TABLE IF NOT EXISTS user_goals (id BIGSERIAL PRIMARY KEY, user_id UUID NOT NULL UNIQUE)`);
     await db.query(`ALTER TABLE user_goals ADD COLUMN IF NOT EXISTS revenue_goal_enabled BOOLEAN NOT NULL DEFAULT FALSE`);
     await db.query(`ALTER TABLE user_goals ADD COLUMN IF NOT EXISTS monthly_revenue_goal NUMERIC(14,2) NOT NULL DEFAULT 0`);
     await db.query(`ALTER TABLE user_goals ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()`);
 
     await db.query(`CREATE TABLE IF NOT EXISTS monthly_snapshots (
       id BIGSERIAL PRIMARY KEY,
-      user_id BIGINT NOT NULL,
+      user_id UUID NOT NULL,
       snapshot_month DATE NOT NULL,
       gross_sales NUMERIC(14,2) NOT NULL DEFAULT 0,
       net_profit NUMERIC(14,2) NOT NULL DEFAULT 0,
@@ -2507,6 +2507,38 @@ function ssOrderProfit(o) { return ssNum(o.profit ?? o.net_profit ?? o.lucro ?? 
 function ssOrderProduct(o) { return String(o.item_title || o.product_name || o.name || o.item_sku || 'Produto sem nome'); }
 function ssDateOnlyBR(v) { try { return new Date(v).toLocaleDateString('pt-BR'); } catch { return ''; } }
 
+
+function ssNormalizeAnalyticsResponse(summary, monthlyRows = []) {
+  const cm = summary || {};
+  return {
+    success: true,
+    data: cm,
+    current_month: {
+      gross_sales: ssMoneyNum(cm.gross_sales),
+      net_profit: ssMoneyNum(cm.net_profit),
+      orders_count: Number(cm.orders_count || 0),
+      avg_ticket: ssMoneyNum(cm.avg_ticket),
+      best_seller_product: cm.best_seller_product || null,
+      most_profitable_product: cm.most_profitable_product || null,
+      projected_revenue: ssMoneyNum(cm.projected_revenue),
+      revenue_goal_enabled: !!cm.revenue_goal_enabled,
+      monthly_revenue_goal: ssMoneyNum(cm.monthly_revenue_goal),
+      missing_to_goal: ssMoneyNum(cm.missing_to_goal ?? cm.remaining_to_goal),
+      remaining_to_goal: ssMoneyNum(cm.missing_to_goal ?? cm.remaining_to_goal),
+      goal_progress_pct: Number(cm.goal_progress_pct || 0),
+      will_hit_goal: !!cm.will_hit_goal,
+      cancelled_count: Number(cm.cancelled_count || 0)
+    },
+    monthly_revenue: (monthlyRows || []).map(r => ({
+      month: r.snapshot_month,
+      label: new Date(r.snapshot_month).toLocaleDateString('pt-BR', { month:'short', year:'2-digit', timeZone:'UTC' }),
+      gross_sales: Number(r.gross_sales || 0),
+      net_profit: Number(r.net_profit || 0),
+      orders_count: Number(r.orders_count || 0)
+    }))
+  };
+}
+
 async function ssGetAccounts(userId, platform = null) {
   const params = [userId];
   let sql = `SELECT * FROM marketplace_accounts WHERE user_id=$1 AND is_active=true AND access_token IS NOT NULL`;
@@ -2615,10 +2647,44 @@ app.get('/api/analytics/summary', auth, async (req, res) => {
     const now = new Date();
     const from = ssFirstMonth(now).toISOString().slice(0,10);
     const to = now.toISOString().slice(0,10);
+
     const orders = await ssFetchOrdersInternal(req.user.id, { days: 45, date_from: from, date_to: to });
     const goal = await ssGetGoal(req.user.id);
-    res.json({ success: true, data: ssSummarizeOrders(orders, goal) });
-  } catch (e) { console.error('[analytics summary]', e); res.status(500).json({ error: e.message }); }
+    const summary = ssSummarizeOrders(orders, goal);
+
+    // Mantém snapshot do mês atual atualizado sem depender do botão do frontend.
+    try {
+      const month = ssFirstMonth(now).toISOString().slice(0,10);
+      await db.query(
+        `INSERT INTO monthly_snapshots
+         (user_id, snapshot_month, gross_sales, net_profit, orders_count, avg_ticket, best_seller_product, most_profitable_product, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+         ON CONFLICT (user_id, snapshot_month) DO UPDATE SET
+           gross_sales=EXCLUDED.gross_sales,
+           net_profit=EXCLUDED.net_profit,
+           orders_count=EXCLUDED.orders_count,
+           avg_ticket=EXCLUDED.avg_ticket,
+           best_seller_product=EXCLUDED.best_seller_product,
+           most_profitable_product=EXCLUDED.most_profitable_product,
+           created_at=NOW()`,
+        [req.user.id, month, summary.gross_sales, summary.net_profit, summary.orders_count, summary.avg_ticket, summary.best_seller_product, summary.most_profitable_product]
+      );
+    } catch(e) { console.error('[analytics snapshot inline]', e.message); }
+
+    const { rows: monthlyRows } = await db.query(
+      `SELECT snapshot_month, gross_sales, net_profit, orders_count, avg_ticket, best_seller_product, most_profitable_product
+       FROM monthly_snapshots
+       WHERE user_id=$1
+         AND snapshot_month >= (DATE_TRUNC('month', NOW()) - INTERVAL '11 months')::date
+       ORDER BY snapshot_month ASC`,
+      [req.user.id]
+    );
+
+    res.json(ssNormalizeAnalyticsResponse(summary, monthlyRows));
+  } catch (e) {
+    console.error('[analytics summary]', e);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post('/api/analytics/monthly-snapshot', auth, async (req, res) => {
@@ -2702,39 +2768,6 @@ app.get('/api/magalu/labels/combo-zebra', auth, async (req, res) => {
   const qs = new URLSearchParams(req.query).toString();
   return res.redirect(302, '/api/magalu/labels/zebra-completo?' + qs);
 });
-
-
-async function ssSafeEnsureAnalyticsTables() {
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS user_goals (
-      id BIGSERIAL PRIMARY KEY,
-      user_id UUID NOT NULL UNIQUE,
-      revenue_goal_enabled BOOLEAN DEFAULT false,
-      monthly_revenue_goal NUMERIC(14,2) DEFAULT 0,
-      updated_at TIMESTAMP DEFAULT NOW()
-    )
-  `);
-
-  await db.query(`ALTER TABLE user_goals ADD COLUMN IF NOT EXISTS revenue_goal_enabled BOOLEAN DEFAULT false`);
-  await db.query(`ALTER TABLE user_goals ADD COLUMN IF NOT EXISTS monthly_revenue_goal NUMERIC(14,2) DEFAULT 0`);
-  await db.query(`ALTER TABLE user_goals ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()`);
-
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS monthly_snapshots (
-      id BIGSERIAL PRIMARY KEY,
-      user_id UUID NOT NULL,
-      snapshot_month DATE NOT NULL,
-      gross_sales NUMERIC(14,2) DEFAULT 0,
-      net_profit NUMERIC(14,2) DEFAULT 0,
-      orders_count INTEGER DEFAULT 0,
-      avg_ticket NUMERIC(14,2) DEFAULT 0,
-      best_seller_product TEXT,
-      most_profitable_product TEXT,
-      created_at TIMESTAMP DEFAULT NOW(),
-      UNIQUE(user_id, snapshot_month)
-    )
-  `);
-}
 
 
 app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:'5.0' }));
