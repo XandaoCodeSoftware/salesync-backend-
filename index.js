@@ -2704,6 +2704,39 @@ app.get('/api/magalu/labels/combo-zebra', auth, async (req, res) => {
 });
 
 
+async function ssSafeEnsureAnalyticsTables() {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS user_goals (
+      id BIGSERIAL PRIMARY KEY,
+      user_id UUID NOT NULL UNIQUE,
+      revenue_goal_enabled BOOLEAN DEFAULT false,
+      monthly_revenue_goal NUMERIC(14,2) DEFAULT 0,
+      updated_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+
+  await db.query(`ALTER TABLE user_goals ADD COLUMN IF NOT EXISTS revenue_goal_enabled BOOLEAN DEFAULT false`);
+  await db.query(`ALTER TABLE user_goals ADD COLUMN IF NOT EXISTS monthly_revenue_goal NUMERIC(14,2) DEFAULT 0`);
+  await db.query(`ALTER TABLE user_goals ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()`);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS monthly_snapshots (
+      id BIGSERIAL PRIMARY KEY,
+      user_id UUID NOT NULL,
+      snapshot_month DATE NOT NULL,
+      gross_sales NUMERIC(14,2) DEFAULT 0,
+      net_profit NUMERIC(14,2) DEFAULT 0,
+      orders_count INTEGER DEFAULT 0,
+      avg_ticket NUMERIC(14,2) DEFAULT 0,
+      best_seller_product TEXT,
+      most_profitable_product TEXT,
+      created_at TIMESTAMP DEFAULT NOW(),
+      UNIQUE(user_id, snapshot_month)
+    )
+  `);
+}
+
+
 app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:'5.0' }));
 
 const PORT = process.env.PORT || 3000;
