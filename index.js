@@ -1771,6 +1771,73 @@ app.get('/api/magalu/delivery/:id/official-label-debug', auth, async (req, res) 
   }
 });
 
+
+app.get('/api/magalu/labels/official', auth, async (req, res) => {
+  try {
+    const rawIds = String(req.query.ids || req.query.id || '').split(',').map(x => x.trim()).filter(Boolean);
+    const deliveryIds = [...new Set(rawIds)].slice(0, 30);
+    if (!deliveryIds.length) return res.status(400).json({ error: 'Informe ao menos um delivery id em ?ids=' });
+
+    const acc = await getMagaluAccount(req.user.id);
+    if (!acc) return res.status(401).json({ error: 'Magalu não conectado' });
+
+    const firstProbe = await inspectMagaluDelivery(acc, deliveryIds[0]);
+    const channels = inferMagaluChannelObjectsFromProbe(firstProbe);
+    if (req.query.channel) channels.unshift({ id: String(req.query.channel), extras: {} });
+    const channel = channels[0];
+    if (!channel?.id) {
+      return res.status(422).json({
+        error: 'Canal Magalu não encontrado para gerar etiqueta',
+        hint: 'A API exige channel como objeto { id, extras }. Verifique delivery.order.channel.id no debug.',
+        delivery_ids: deliveryIds,
+        delivery_probe: firstProbe
+      });
+    }
+
+    const opts = normalizeMagaluLabelOptions(req.query);
+    const payload = {
+      channel,
+      deliveries: deliveryIds.map(id => ({ id })),
+      label: { type: opts.type, format: opts.format }
+    };
+
+    const r = await postMagaluShippingLabel(acc, payload);
+    const ct = r.headers?.['content-type'] || '';
+    const buf = Buffer.from(r.data || '');
+
+    const pdf = extractPdfBufferFromLabelResponse(r.data, ct);
+    if (r.status >= 200 && r.status < 300 && pdf) {
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="magalu-etiquetas-${deliveryIds.length}-${opts.type}.pdf"`);
+      return res.send(pdf);
+    }
+
+    const parsed = parseMagaluLabelResponse(r.data);
+    const signedUrl = findMagaluSignedUrl(parsed);
+    if (r.status >= 200 && r.status < 300 && signedUrl) {
+      if (String(req.query.redirect || '1') !== '0') return res.redirect(302, signedUrl);
+      return res.json({ success: true, delivery_ids: deliveryIds, payload, ...parsed });
+    }
+
+    return res.status(r.status || 422).json({
+      error: 'Não foi possível gerar etiquetas Magalu em lote',
+      hint: 'Use type=full&format=pdf para etiqueta + DANFE simplificado. Use format=zpl para Zebra.',
+      endpoint: 'POST /seller/v1/logistics/shipping-labels',
+      delivery_ids: deliveryIds,
+      payload,
+      status: r.status,
+      content_type: ct,
+      response: parsed || buf.toString('utf8').slice(0, 2500),
+      first_delivery_probe: firstProbe
+    });
+  } catch (e) {
+    res.status(e.response?.status || 500).json({
+      error: e.message,
+      data: e.response?.data?.toString?.() || e.response?.data
+    });
+  }
+});
+
 app.get('/api/magalu/delivery/:id/official-label', auth, async (req, res) => {
   const deliveryId = req.params.id;
 
