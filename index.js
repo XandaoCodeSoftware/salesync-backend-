@@ -116,7 +116,28 @@ async function ensureSalesSyncSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_platform_monthly_snapshots_user_month ON platform_monthly_snapshots(user_id, snapshot_month)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_platform_monthly_snapshots_platform ON platform_monthly_snapshots(platform)`);
 
-    console.log('✅ SalesSync schema OK: metas + snapshots mensais + plataformas');
+
+
+    // Rendimentos extras que entram no faturamento bruto do resumo.
+    // recurring=true soma todo mês; recurring=false soma somente no mês de starts_at.
+    await db.query(`CREATE TABLE IF NOT EXISTS additional_revenues (
+      id BIGSERIAL PRIMARY KEY,
+      user_id UUID NOT NULL,
+      name TEXT NOT NULL,
+      amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+      recurring BOOLEAN NOT NULL DEFAULT FALSE,
+      starts_at DATE NOT NULL DEFAULT CURRENT_DATE,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+    )`);
+    await db.query(`ALTER TABLE additional_revenues ADD COLUMN IF NOT EXISTS recurring BOOLEAN NOT NULL DEFAULT FALSE`);
+    await db.query(`ALTER TABLE additional_revenues ADD COLUMN IF NOT EXISTS starts_at DATE NOT NULL DEFAULT CURRENT_DATE`);
+    await db.query(`ALTER TABLE additional_revenues ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE`);
+    await db.query(`ALTER TABLE additional_revenues ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_additional_revenues_user_active ON additional_revenues(user_id, is_active)`);
+
+    console.log('✅ SalesSync schema OK: metas + snapshots mensais + plataformas + rendimentos extras');
   } catch (e) {
     console.error('[SalesSync schema]', e.message);
   }
@@ -2751,6 +2772,31 @@ function ssOrderProduct(o) { return String(o.item_title || o.product_name || o.n
 function ssDateOnlyBR(v) { try { return new Date(v).toLocaleDateString('pt-BR'); } catch { return ''; } }
 
 
+
+async function ssGetAdditionalRevenues(userId, monthDate = new Date()) {
+  const monthStart = ssFirstMonth(monthDate).toISOString().slice(0, 10);
+  const { rows } = await db.query(
+    `SELECT id, name, amount, recurring, starts_at, created_at, updated_at
+     FROM additional_revenues
+     WHERE user_id=$1
+       AND is_active=true
+       AND (
+         recurring=true
+         OR DATE_TRUNC('month', starts_at)::date = DATE_TRUNC('month', $2::date)::date
+       )
+     ORDER BY created_at DESC, id DESC`,
+    [userId, monthStart]
+  );
+  return (rows || []).map(r => ({
+    ...r,
+    amount: ssMoneyNum(r.amount),
+    recurring: !!r.recurring
+  }));
+}
+function ssAdditionalRevenueTotal(items = []) {
+  return ssMoneyNum((items || []).reduce((s, r) => s + ssNum(r.amount), 0));
+}
+
 function ssNormalizeAnalyticsResponse(summary, monthlyRows = [], platformRows = []) {
   const cm = summary || {};
 
@@ -2837,6 +2883,9 @@ function ssNormalizeAnalyticsResponse(summary, monthlyRows = [], platformRows = 
     },
     current_month: {
       gross_sales: ssMoneyNum(cm.gross_sales),
+      gross_sales_orders: ssMoneyNum(cm.gross_sales_orders),
+      additional_revenue_total: ssMoneyNum(cm.additional_revenue_total),
+      additional_revenues: Array.isArray(cm.additional_revenues) ? cm.additional_revenues : [],
       net_profit: ssMoneyNum(cm.net_profit),
       orders_count: Number(cm.orders_count || 0),
       avg_ticket: ssMoneyNum(cm.avg_ticket),
@@ -2891,12 +2940,13 @@ async function ssFetchOrdersInternal(userId, opts = {}) {
   return await enrichWithCosts(allOrders, userId);
 }
 
-function ssSummarizeOrders(orders, goal = null) {
+function ssSummarizeOrders(orders, goal = null, additionalRevenue = 0, additionalItems = []) {
   const paid = (orders || []).filter(o => String(o.status || '').toLowerCase() !== 'cancelled');
-  const gross = paid.reduce((s,o)=>s + ssOrderAmount(o), 0);
+  const grossOrders = paid.reduce((s,o)=>s + ssOrderAmount(o), 0);
+  const gross = grossOrders + ssNum(additionalRevenue);
   const profit = paid.reduce((s,o)=>s + ssOrderProfit(o), 0);
   const qty = paid.length;
-  const avg = qty ? gross / qty : 0;
+  const avg = qty ? grossOrders / qty : 0;
   const byQty = {};
   const byProfit = {};
   for (const o of paid) {
@@ -2913,6 +2963,9 @@ function ssSummarizeOrders(orders, goal = null) {
   const progress = goalEnabled && goalValue > 0 ? Math.min(999, gross / goalValue * 100) : 0;
   return {
     gross_sales: ssMoneyNum(gross),
+    gross_sales_orders: ssMoneyNum(grossOrders),
+    additional_revenue_total: ssMoneyNum(additionalRevenue),
+    additional_revenues: additionalItems || [],
     net_profit: ssMoneyNum(profit),
     orders_count: qty,
     avg_ticket: ssMoneyNum(avg),
@@ -2959,6 +3012,47 @@ app.post('/api/user-goals', auth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+
+app.get('/api/additional-revenues', auth, async (req, res) => {
+  try {
+    const month = req.query.month ? new Date(String(req.query.month) + '-01T00:00:00-03:00') : new Date();
+    const items = await ssGetAdditionalRevenues(req.user.id, Number.isFinite(month.getTime()) ? month : new Date());
+    res.json({ success: true, total: ssAdditionalRevenueTotal(items), data: items });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/additional-revenues', auth, async (req, res) => {
+  try {
+    const name = String(req.body.name || '').trim();
+    const amount = Math.max(0, Number(String(req.body.amount || 0).replace(',', '.')) || 0);
+    const recurring = Boolean(req.body.recurring);
+    const startsAt = req.body.starts_at ? String(req.body.starts_at).slice(0, 10) : ssFirstMonth(new Date()).toISOString().slice(0, 10);
+    if (!name) return res.status(400).json({ error: 'Nome do rendimento é obrigatório' });
+    if (amount <= 0) return res.status(400).json({ error: 'Valor precisa ser maior que zero' });
+    const { rows } = await db.query(
+      `INSERT INTO additional_revenues (user_id, name, amount, recurring, starts_at, is_active, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,true,NOW(),NOW())
+       RETURNING id, name, amount, recurring, starts_at, created_at, updated_at`,
+      [req.user.id, name, amount, recurring, startsAt]
+    );
+    Object.keys(CACHE).forEach(k => { if (k.startsWith(req.user.id)) delete CACHE[k]; });
+    res.json({ success: true, data: rows[0] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/additional-revenues/:id', auth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'ID inválido' });
+    const { rowCount } = await db.query(
+      `UPDATE additional_revenues SET is_active=false, updated_at=NOW() WHERE id=$1 AND user_id=$2`,
+      [id, req.user.id]
+    );
+    Object.keys(CACHE).forEach(k => { if (k.startsWith(req.user.id)) delete CACHE[k]; });
+    res.json({ success: true, deleted: rowCount });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/analytics/summary', auth, async (req, res) => {
   try {
     const now = new Date();
@@ -2967,7 +3061,8 @@ app.get('/api/analytics/summary', auth, async (req, res) => {
 
     const orders = await ssFetchOrdersInternal(req.user.id, { days: 45, date_from: from, date_to: to });
     const goal = await ssGetGoal(req.user.id);
-    const summary = ssSummarizeOrders(orders, goal);
+    const additionalRevenues = await ssGetAdditionalRevenues(req.user.id, now);
+    const summary = ssSummarizeOrders(orders, goal, ssAdditionalRevenueTotal(additionalRevenues), additionalRevenues);
 
     // Mantém snapshot do mês atual atualizado sem depender do botão do frontend.
     try {
@@ -3018,7 +3113,8 @@ app.post('/api/analytics/monthly-snapshot', auth, async (req, res) => {
     const now = new Date();
     const month = ssFirstMonth(now).toISOString().slice(0,10);
     const orders = await ssFetchOrdersInternal(req.user.id, { days: 45, date_from: month, date_to: now.toISOString().slice(0,10) });
-    const d = ssSummarizeOrders(orders, await ssGetGoal(req.user.id));
+    const additionalRevenues = await ssGetAdditionalRevenues(req.user.id, now);
+    const d = ssSummarizeOrders(orders, await ssGetGoal(req.user.id), ssAdditionalRevenueTotal(additionalRevenues), additionalRevenues);
     const { rows } = await db.query(
       `INSERT INTO monthly_snapshots
        (user_id, snapshot_month, gross_sales, net_profit, orders_count, avg_ticket, best_seller_product, most_profitable_product, created_at)
