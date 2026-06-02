@@ -24,6 +24,7 @@ db.connect()
     console.log('✅ Supabase conectado!');
     await ensureProductSchema();
     await ensureSalesSyncSchema();
+    await ensureOrdersReturnsSchema();
   })
   .catch(e => console.error('❌ Erro DB:', e.message));
 
@@ -839,6 +840,10 @@ async function enrichWithCosts(orders, userId) {
     };
   });
 
+  const returnRows = await db.query(`SELECT platform, platform_order_id, SUM(return_total_cost) AS return_total_cost FROM marketplace_returns WHERE user_id=$1 GROUP BY platform, platform_order_id`, [userId]);
+  const returnMap = {};
+  for (const r of returnRows.rows) returnMap[`${normPlatform(r.platform)}:${String(r.platform_order_id||'')}`] = parseFloat(r.return_total_cost || 0);
+
   return orders.map(o => {
     const sku = normSku(o.item_sku);
     const platform = normPlatform(o.platform);
@@ -856,7 +861,8 @@ async function enrichWithCosts(orders, userId) {
     const shipping_fee = ship_fixed === null ? parseFloat(o.shipping_fee || 0) : (parseFloat(ship_fixed || 0) * (o.quantity || 1));
     const tax_amount = tax_pct === null ? parseFloat(o.tax_amount || 0) : (total_amount * tax_pct / 100);
     const net_revenue= total_amount - platform_fee - shipping_fee - tax_amount;
-    const profit     = o.status === 'cancelled' ? 0 : (net_revenue - total_cost);
+    const return_total_cost = returnMap[`${platform}:${String(o.platform_order_id || o.id || '')}`] || 0;
+    const profit     = o.status === 'cancelled' ? 0 : (net_revenue - total_cost - return_total_cost);
     const margin     = o.total_amount > 0 ? (profit / o.total_amount * 100) : 0;
 
     return {
@@ -868,6 +874,7 @@ async function enrichWithCosts(orders, userId) {
       shipping_fee,
       tax_amount,
       total_cost,
+      return_total_cost,
       net_revenue,
       profit,
       profit_margin_pct: margin
@@ -1093,76 +1100,264 @@ app.get('/api/analytics/monthly-platforms', auth, async (req, res) => {
   }
 });
 
+
+
+// ── SALES SYNC v21 — vendas em SQL + custos de devolução ──
+async function ensureOrdersReturnsSchema() {
+  try {
+    await db.query(`CREATE TABLE IF NOT EXISTS marketplace_orders (
+      id BIGSERIAL PRIMARY KEY,
+      user_id UUID NOT NULL,
+      platform TEXT NOT NULL,
+      account_id BIGINT,
+      platform_order_id TEXT NOT NULL,
+      shop_name TEXT,
+      status TEXT,
+      fulfillment_type TEXT,
+      buyer_name TEXT,
+      total_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+      paid_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+      platform_fee NUMERIC(14,2) NOT NULL DEFAULT 0,
+      shipping_fee NUMERIC(14,2) NOT NULL DEFAULT 0,
+      tax_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+      quantity NUMERIC(14,4) NOT NULL DEFAULT 1,
+      order_date TIMESTAMP,
+      item_title TEXT,
+      item_image TEXT,
+      item_sku TEXT,
+      raw_json JSONB,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      UNIQUE(user_id, platform, platform_order_id)
+    )`);
+    await db.query(`ALTER TABLE marketplace_orders ADD COLUMN IF NOT EXISTS account_id BIGINT`);
+    await db.query(`ALTER TABLE marketplace_orders ADD COLUMN IF NOT EXISTS raw_json JSONB`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_orders_user_date ON marketplace_orders(user_id, order_date DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_orders_platform ON marketplace_orders(user_id, platform)`);
+
+    await db.query(`CREATE TABLE IF NOT EXISTS marketplace_returns (
+      id BIGSERIAL PRIMARY KEY,
+      user_id UUID NOT NULL,
+      platform TEXT NOT NULL,
+      account_id BIGINT,
+      platform_order_id TEXT,
+      external_return_id TEXT NOT NULL,
+      external_ticket_id TEXT,
+      status TEXT,
+      reason TEXT,
+      type TEXT DEFAULT 'return',
+      buyer_message TEXT,
+      return_tracking_code TEXT,
+      return_shipping_cost NUMERIC(14,2) NOT NULL DEFAULT 0,
+      return_fee NUMERIC(14,2) NOT NULL DEFAULT 0,
+      refund_adjustment NUMERIC(14,2) NOT NULL DEFAULT 0,
+      lost_product_cost NUMERIC(14,2) NOT NULL DEFAULT 0,
+      return_total_cost NUMERIC(14,2) NOT NULL DEFAULT 0,
+      raw_json JSONB,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      UNIQUE(user_id, platform, external_return_id)
+    )`);
+    await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS return_shipping_cost NUMERIC(14,2) NOT NULL DEFAULT 0`);
+    await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS return_fee NUMERIC(14,2) NOT NULL DEFAULT 0`);
+    await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS refund_adjustment NUMERIC(14,2) NOT NULL DEFAULT 0`);
+    await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS lost_product_cost NUMERIC(14,2) NOT NULL DEFAULT 0`);
+    await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS return_total_cost NUMERIC(14,2) NOT NULL DEFAULT 0`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_returns_user_status ON marketplace_returns(user_id, status)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_returns_order ON marketplace_returns(user_id, platform, platform_order_id)`);
+    console.log('✅ Orders/Returns schema OK: vendas em SQL + custos de devolução');
+  } catch (e) { console.error('[Orders/Returns schema]', e.message); }
+}
+
+function ssNum2(v){ const n=Number(v||0); return Number.isFinite(n)?n:0; }
+function ssIso(v){ const d=new Date(v||Date.now()); return Number.isFinite(d.getTime())?d.toISOString():new Date().toISOString(); }
+
+async function ssUpsertOrders(userId, accountId, orders=[]) {
+  for (const o of orders || []) {
+    const platform = normPlatform(o.platform);
+    const oid = String(o.platform_order_id || o.id || '').trim();
+    if (!platform || !oid) continue;
+    await db.query(`INSERT INTO marketplace_orders
+      (user_id, platform, account_id, platform_order_id, shop_name, status, fulfillment_type, buyer_name,
+       total_amount, paid_amount, platform_fee, shipping_fee, tax_amount, quantity, order_date,
+       item_title, item_image, item_sku, raw_json, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,NOW())
+      ON CONFLICT (user_id, platform, platform_order_id) DO UPDATE SET
+        account_id=EXCLUDED.account_id, shop_name=EXCLUDED.shop_name, status=EXCLUDED.status,
+        fulfillment_type=EXCLUDED.fulfillment_type, buyer_name=EXCLUDED.buyer_name,
+        total_amount=EXCLUDED.total_amount, paid_amount=EXCLUDED.paid_amount, platform_fee=EXCLUDED.platform_fee,
+        shipping_fee=EXCLUDED.shipping_fee, tax_amount=EXCLUDED.tax_amount, quantity=EXCLUDED.quantity,
+        order_date=EXCLUDED.order_date, item_title=EXCLUDED.item_title, item_image=EXCLUDED.item_image,
+        item_sku=EXCLUDED.item_sku, raw_json=EXCLUDED.raw_json, updated_at=NOW()`,
+      [userId, platform, accountId || null, oid, o.shop_name || null, o.status || null, o.fulfillment_type || null, o.buyer_name || null,
+       ssNum2(o.total_amount), ssNum2(o.paid_amount || o.total_amount), ssNum2(o.platform_fee), ssNum2(o.shipping_fee), ssNum2(o.tax_amount), ssNum2(o.quantity || 1), ssIso(o.order_date),
+       o.item_title || null, o.item_image || null, o.item_sku || null, JSON.stringify(o)]);
+  }
+}
+
+async function ssLoadOrdersFromSql(userId, opts={}) {
+  const platform = opts.platform || null;
+  const from = opts.date_from ? new Date(String(opts.date_from)+'T00:00:00-03:00') : new Date(Date.now() - (Math.min(Math.max(parseInt(opts.period||7)||7,1),45) * 86400000));
+  const to = opts.date_to ? new Date(String(opts.date_to)+'T23:59:59-03:00') : new Date();
+  const params = [userId, from.toISOString(), to.toISOString()];
+  let sql = `SELECT COALESCE(raw_json,'{}'::jsonb) AS raw_json, platform_order_id, platform, shop_name, status, fulfillment_type, buyer_name,
+             total_amount, paid_amount, platform_fee, shipping_fee, tax_amount, quantity, order_date, item_title, item_image, item_sku
+             FROM marketplace_orders WHERE user_id=$1 AND order_date >= $2 AND order_date <= $3`;
+  if (platform) { params.push(platform); sql += ` AND platform=$${params.length}`; }
+  sql += ` ORDER BY order_date DESC LIMIT 3000`;
+  const { rows } = await db.query(sql, params);
+  return rows.map(r => ({
+    ...(r.raw_json || {}),
+    platform_order_id: String(r.platform_order_id), id: String(r.platform_order_id), platform: r.platform,
+    shop_name: r.shop_name, status: r.status, fulfillment_type: r.fulfillment_type, buyer_name: r.buyer_name,
+    total_amount: Number(r.total_amount||0), paid_amount: Number(r.paid_amount||0), platform_fee: Number(r.platform_fee||0),
+    shipping_fee: Number(r.shipping_fee||0), tax_amount: Number(r.tax_amount||0), quantity: Number(r.quantity||1),
+    order_date: r.order_date, item_title: r.item_title, item_image: r.item_image, item_sku: r.item_sku
+  }));
+}
+
+async function ssSyncOrdersForUser(userId, platform=null, days=45) {
+  const accounts = await ssGetAccounts(userId, platform);
+  let all = [];
+  for (const acc of accounts) {
+    try {
+      let orders=[];
+      if (acc.platform === 'mercadolivre') orders = await fetchML(acc, days);
+      else if (acc.platform === 'shopee') orders = await fetchShopee(acc, days);
+      else if (acc.platform === 'magalu') orders = await fetchMagalu(acc, days);
+      await ssUpsertOrders(userId, acc.id, orders);
+      all = all.concat(orders || []);
+      await db.query(`UPDATE marketplace_accounts SET last_sync_at=NOW() WHERE id=$1`, [acc.id]);
+    } catch(e) { console.error('[orders sync]', acc.platform, e.response?.data || e.message); }
+  }
+  return all;
+}
+
+async function ssUpsertReturn(userId, acc, r) {
+  const platform = normPlatform(r.platform || acc.platform);
+  const externalId = String(r.external_return_id || r.id || r.claim_id || r.ticket_return_id || '').trim();
+  if (!externalId) return;
+  const total = ssNum2(r.return_shipping_cost)+ssNum2(r.return_fee)+ssNum2(r.refund_adjustment)+ssNum2(r.lost_product_cost);
+  await db.query(`INSERT INTO marketplace_returns
+    (user_id, platform, account_id, platform_order_id, external_return_id, external_ticket_id, status, reason, type,
+     buyer_message, return_tracking_code, return_shipping_cost, return_fee, refund_adjustment, lost_product_cost, return_total_cost, raw_json, updated_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW())
+    ON CONFLICT (user_id, platform, external_return_id) DO UPDATE SET
+      account_id=EXCLUDED.account_id, platform_order_id=COALESCE(EXCLUDED.platform_order_id, marketplace_returns.platform_order_id),
+      external_ticket_id=EXCLUDED.external_ticket_id, status=EXCLUDED.status, reason=EXCLUDED.reason, type=EXCLUDED.type,
+      buyer_message=EXCLUDED.buyer_message, return_tracking_code=EXCLUDED.return_tracking_code,
+      return_shipping_cost=GREATEST(marketplace_returns.return_shipping_cost, EXCLUDED.return_shipping_cost),
+      return_fee=GREATEST(marketplace_returns.return_fee, EXCLUDED.return_fee),
+      refund_adjustment=GREATEST(marketplace_returns.refund_adjustment, EXCLUDED.refund_adjustment),
+      lost_product_cost=GREATEST(marketplace_returns.lost_product_cost, EXCLUDED.lost_product_cost),
+      return_total_cost=GREATEST(marketplace_returns.return_total_cost, EXCLUDED.return_total_cost),
+      raw_json=EXCLUDED.raw_json, updated_at=NOW()`,
+    [userId, platform, acc.id || null, r.platform_order_id || null, externalId, r.external_ticket_id || null, r.status || null, r.reason || null, r.type || 'return',
+     r.buyer_message || null, r.return_tracking_code || null, ssNum2(r.return_shipping_cost), ssNum2(r.return_fee), ssNum2(r.refund_adjustment), ssNum2(r.lost_product_cost), total, JSON.stringify(r.raw_json || r)]);
+}
+
+async function ssFetchMLReturns(acc) {
+  const headers = { Authorization: `Bearer ${acc.access_token}` };
+  try {
+    const { data } = await axios.get('https://api.mercadopago.com/post-purchase/v1/claims/search', {
+      params: { type: 'return', limit: 50, sort: 'last_updated:desc' }, headers
+    });
+    const arr = data?.data || data?.results || [];
+    return arr.map(c => ({ platform:'mercadolivre', external_return_id:String(c.id || c.claim_id), platform_order_id:String(c.resource_id || c.order_id || ''), status:c.status, reason:c.reason_id || c.reason || c.stage, type:c.type || 'return', raw_json:c }));
+  } catch(e) { console.error('[ML returns]', e.response?.status, e.response?.data || e.message); return []; }
+}
+
+async function ssFetchMagaluReturns(acc) {
+  const headers = { Authorization: `Bearer ${acc.access_token}` };
+  try {
+    const { data } = await axios.get('https://api.magalu.com/seller/v0/tickets', { params: { _limit: 50, _sort: 'updated_at:desc' }, headers });
+    const tickets = data?.results || data?.tickets || data?.data || [];
+    const out=[];
+    for (const t of tickets.slice(0,50)) {
+      const tid = t.id || t.uuid || t.code;
+      if (!tid) continue;
+      try {
+        const rr = await axios.get(`https://api.magalu.com/seller/v0/tickets/${tid}/returns`, { headers });
+        const returns = rr.data?.results || rr.data?.returns || rr.data?.data || [];
+        for (const r of returns) out.push({ platform:'magalu', external_return_id:String(r.id || r.uuid || r.code), external_ticket_id:String(tid), platform_order_id:String(t.order?.code || t.order_id || r.order?.code || ''), status:r.status?.id || r.status || t.status, reason:r.reason?.description || r.reason || t.reason, return_tracking_code:r.tracking_code || r.tracking?.code || '', raw_json:{ticket:t, return:r} });
+      } catch(e) {}
+    }
+    return out;
+  } catch(e) { console.error('[Magalu returns]', e.response?.status, e.response?.data || e.message); return []; }
+}
+
+async function ssLoadReturns(userId, platform=null) {
+  const params=[userId];
+  let sql=`SELECT r.*, o.item_title, o.item_sku, o.total_amount, o.order_date
+           FROM marketplace_returns r
+           LEFT JOIN marketplace_orders o ON o.user_id=r.user_id AND o.platform=r.platform AND o.platform_order_id=r.platform_order_id
+           WHERE r.user_id=$1`;
+  if(platform){params.push(platform); sql += ` AND r.platform=$${params.length}`;}
+  sql += ` ORDER BY r.updated_at DESC LIMIT 500`;
+  const { rows } = await db.query(sql, params);
+  return rows.map(x=>({ ...x, return_shipping_cost:Number(x.return_shipping_cost||0), return_fee:Number(x.return_fee||0), refund_adjustment:Number(x.refund_adjustment||0), lost_product_cost:Number(x.lost_product_cost||0), return_total_cost:Number(x.return_total_cost||0), total_amount:Number(x.total_amount||0) }));
+}
+
+app.get('/api/returns', auth, async (req, res) => {
+  try { res.json({ success:true, data: await ssLoadReturns(req.user.id, req.query.platform || null) }); }
+  catch(e){ res.status(500).json({ error:e.message }); }
+});
+
+app.post('/api/returns/:id/cost', auth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const shipping = ssNum2(req.body.return_shipping_cost);
+    const fee = ssNum2(req.body.return_fee);
+    const refund = ssNum2(req.body.refund_adjustment);
+    const lost = ssNum2(req.body.lost_product_cost);
+    const total = shipping + fee + refund + lost;
+    const { rows } = await db.query(`UPDATE marketplace_returns SET return_shipping_cost=$1, return_fee=$2, refund_adjustment=$3, lost_product_cost=$4, return_total_cost=$5, updated_at=NOW() WHERE id=$6 AND user_id=$7 RETURNING *`, [shipping, fee, refund, lost, total, id, req.user.id]);
+    if(!rows.length) return res.status(404).json({ error:'Devolução não encontrada' });
+    res.json({ success:true, data:rows[0] });
+  } catch(e){ res.status(500).json({ error:e.message }); }
+});
+
+app.post('/api/returns/sync/:platform', auth, async (req, res) => {
+  try {
+    const platform = String(req.params.platform || '').toLowerCase();
+    const accounts = await ssGetAccounts(req.user.id, platform);
+    let count=0;
+    for (const acc of accounts) {
+      const list = platform === 'mercadolivre' ? await ssFetchMLReturns(acc) : platform === 'magalu' ? await ssFetchMagaluReturns(acc) : [];
+      for (const r of list) { await ssUpsertReturn(req.user.id, acc, r); count++; }
+    }
+    res.json({ success:true, synced:count, data: await ssLoadReturns(req.user.id, platform) });
+  } catch(e){ res.status(500).json({ error:e.message }); }
+});
+
 // ── API PEDIDOS ──
 app.get('/api/orders', auth, async (req, res) => {
-  const { period = '7', platform, date_from, date_to } = req.query;
-
-  let days = Math.min(Math.max(parseInt(period) || 7, 1), 45);
-  let customFrom = null;
-  let customTo = null;
-
-  if (date_from && date_to) {
-    customFrom = new Date(String(date_from) + 'T00:00:00-03:00');
-    customTo = new Date(String(date_to) + 'T23:59:59-03:00');
-    if (Number.isFinite(customFrom.getTime()) && Number.isFinite(customTo.getTime())) {
-      const selectedRangeDays = Math.ceil((customTo.getTime() - customFrom.getTime()) / 86400000) + 1;
-      if (selectedRangeDays < 1) return res.status(400).json({ error: 'Data final precisa ser maior ou igual à inicial' });
-      if (selectedRangeDays > 45) return res.status(400).json({ error: 'Período personalizado limitado a 45 dias' });
-      const diffDays = Math.ceil((Date.now() - customFrom.getTime()) / 86400000);
-      days = Math.min(Math.max(diffDays || selectedRangeDays || 1, 1), 45);
-    } else {
-      customFrom = null;
-      customTo = null;
-    }
-  }
-
+  const { period = '7', platform, date_from, date_to, fresh } = req.query;
   try {
-    const { rows: accounts } = await db.query(
-      `SELECT * FROM marketplace_accounts WHERE user_id=$1 AND is_active=true AND access_token IS NOT NULL`,
-      [req.user.id]
-    );
-    if (!accounts.length) return res.json({ success: true, data: [] });
-
-    let allOrders = [];
-    const filtered = platform ? accounts.filter(a => a.platform === platform) : accounts;
-
-    for (const acc of filtered) {
-      const cacheKey = `${req.user.id}_${acc.platform}_${days}_${customFrom ? customFrom.toISOString().slice(0,10) : ''}_${customTo ? customTo.toISOString().slice(0,10) : ''}`;
-      const cached   = CACHE[cacheKey];
-      if (cached && (Date.now() - cached.ts) < CACHE_TTL) {
-        allOrders = allOrders.concat(cached.data); continue;
-      }
-      try {
-        let orders = [];
-        if (acc.platform === 'mercadolivre') orders = await fetchML(acc, days);
-        else if (acc.platform === 'shopee')  orders = await fetchShopee(acc, days);
-        else if (acc.platform === 'magalu')  orders = await fetchMagalu(acc, days);
-
-        if (customFrom && customTo) {
-          orders = orders.filter(o => {
-            const dt = new Date(o.order_date).getTime();
-            return Number.isFinite(dt) && dt >= customFrom.getTime() && dt <= customTo.getTime();
-          });
-        }
-
-        CACHE[cacheKey] = { data: orders, ts: Date.now() };
-        allOrders = allOrders.concat(orders);
-        await db.query(`UPDATE marketplace_accounts SET last_sync_at=NOW() WHERE id=$1`, [acc.id]);
-      } catch(e) {
-        console.error(`[FETCH ${acc.platform}]`, e.message);
-      }
+    let orders = [];
+    if (String(fresh || '') !== '1') {
+      orders = await ssLoadOrdersFromSql(req.user.id, { period, platform, date_from, date_to });
     }
-
-    const enriched = await enrichWithCosts(allOrders, req.user.id);
+    // Primeiro acesso ou botão de atualizar: busca API, salva no SQL e depois usa o SQL.
+    if (!orders.length || String(fresh || '') === '1') {
+      const days = date_from && date_to ? 45 : Math.min(Math.max(parseInt(period) || 7, 1), 45);
+      await ssSyncOrdersForUser(req.user.id, platform || null, days);
+      orders = await ssLoadOrdersFromSql(req.user.id, { period, platform, date_from, date_to });
+    }
+    const enriched = await enrichWithCosts(orders, req.user.id);
     enriched.sort((a, b) => new Date(b.order_date) - new Date(a.order_date));
-    res.json({ success: true, data: enriched, total: enriched.length });
+    res.json({ success: true, from_sql: true, data: enriched, total: enriched.length });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── SYNC ──
 app.get('/api/sync/:platform', auth, async (req, res) => {
-  Object.keys(CACHE).forEach(k => { if (k.startsWith(`${req.user.id}_${req.params.platform}`)) delete CACHE[k]; });
-  res.json({ success: true });
+  try {
+    Object.keys(CACHE).forEach(k => { if (k.startsWith(`${req.user.id}_${req.params.platform}`)) delete CACHE[k]; });
+    const platform = req.params.platform === 'all' ? null : req.params.platform;
+    const orders = await ssSyncOrdersForUser(req.user.id, platform, 45);
+    res.json({ success: true, stored: orders.length });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── MERCADO LIVRE: ETIQUETA DE ENVIO ──
@@ -2914,28 +3109,10 @@ async function ssGetAccounts(userId, platform = null) {
 }
 
 async function ssFetchOrdersInternal(userId, opts = {}) {
-  const days = Math.min(Math.max(parseInt(opts.days || 30) || 30, 1), 45);
-  const platform = opts.platform || null;
-  const dateFrom = opts.date_from ? new Date(String(opts.date_from) + 'T00:00:00-03:00') : null;
-  const dateTo = opts.date_to ? new Date(String(opts.date_to) + 'T23:59:59-03:00') : null;
-  const accounts = await ssGetAccounts(userId, platform);
-  let allOrders = [];
-  for (const acc of accounts) {
-    try {
-      let orders = [];
-      if (acc.platform === 'mercadolivre') orders = await fetchML(acc, days);
-      else if (acc.platform === 'shopee') orders = await fetchShopee(acc, days);
-      else if (acc.platform === 'magalu') orders = await fetchMagalu(acc, days);
-      allOrders = allOrders.concat(orders || []);
-    } catch (e) {
-      console.error('[analytics fetch]', acc.platform, e.response?.data || e.message);
-    }
-  }
-  if (dateFrom && dateTo && Number.isFinite(dateFrom.getTime()) && Number.isFinite(dateTo.getTime())) {
-    allOrders = allOrders.filter(o => {
-      const t = new Date(o.order_date || o.created_at || o.date_created || 0).getTime();
-      return Number.isFinite(t) && t >= dateFrom.getTime() && t <= dateTo.getTime();
-    });
+  let allOrders = await ssLoadOrdersFromSql(userId, { period: opts.days || 30, platform: opts.platform || null, date_from: opts.date_from, date_to: opts.date_to });
+  if (!allOrders.length) {
+    await ssSyncOrdersForUser(userId, opts.platform || null, opts.days || 45);
+    allOrders = await ssLoadOrdersFromSql(userId, { period: opts.days || 30, platform: opts.platform || null, date_from: opts.date_from, date_to: opts.date_to });
   }
   return await enrichWithCosts(allOrders, userId);
 }
