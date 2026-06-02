@@ -1802,7 +1802,150 @@ ${orders.map(o => {
     res.send(html);
   } catch(e) { res.send(`<pre style="padding:20px;color:red">${e.message}</pre>`); }
 });
+// ── DEBUG ML CLAIMS / DEVOLUÇÕES RAW ──
+app.get('/debug/ml-claims-raw', auth, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT *
+       FROM marketplace_accounts
+       WHERE user_id=$1
+         AND platform='mercadolivre'
+         AND is_active=true
+         AND access_token IS NOT NULL
+       LIMIT 1`,
+      [req.user.id]
+    );
 
+    if (!rows.length) {
+      return res.status(404).json({
+        success: false,
+        error: 'Conta Mercado Livre não conectada'
+      });
+    }
+
+    const acc = rows[0];
+    const token = acc.access_token;
+    const days = Number(req.query.days || 365);
+    const since = new Date(Date.now() - days * 86400000).toISOString();
+
+    const headers = {
+      Authorization: `Bearer ${token}`
+    };
+
+    const attempts = [];
+
+    async function tryCall(name, url, params) {
+      try {
+        const r = await axios.get(url, { headers, params });
+
+        attempts.push({
+          name,
+          ok: true,
+          status: r.status,
+          params,
+          total:
+            r.data?.paging?.total ??
+            r.data?.total ??
+            r.data?.claims?.length ??
+            r.data?.data?.length ??
+            r.data?.results?.length ??
+            null,
+          data: r.data
+        });
+      } catch (e) {
+        attempts.push({
+          name,
+          ok: false,
+          status: e.response?.status || null,
+          params,
+          error: e.response?.data || e.message
+        });
+      }
+    }
+
+    await tryCall(
+      '1 - Claims com seller_id + data',
+      'https://api.mercadopago.com/post-purchase/v1/claims/search',
+      {
+        seller_id: acc.platform_shop_id,
+        limit: 50,
+        offset: 0,
+        'claim.date_created.from': since
+      }
+    );
+
+    await tryCall(
+      '2 - Claims com seller_id sem data',
+      'https://api.mercadopago.com/post-purchase/v1/claims/search',
+      {
+        seller_id: acc.platform_shop_id,
+        limit: 50,
+        offset: 0
+      }
+    );
+
+    await tryCall(
+      '3 - Claims sem seller_id',
+      'https://api.mercadopago.com/post-purchase/v1/claims/search',
+      {
+        limit: 50,
+        offset: 0
+      }
+    );
+
+    await tryCall(
+      '4 - Claims type return',
+      'https://api.mercadopago.com/post-purchase/v1/claims/search',
+      {
+        seller_id: acc.platform_shop_id,
+        type: 'return',
+        limit: 50,
+        offset: 0
+      }
+    );
+
+    await tryCall(
+      '5 - Claims stage claim',
+      'https://api.mercadopago.com/post-purchase/v1/claims/search',
+      {
+        seller_id: acc.platform_shop_id,
+        stage: 'claim',
+        limit: 50,
+        offset: 0
+      }
+    );
+
+    await tryCall(
+      '6 - Claims stage dispute',
+      'https://api.mercadopago.com/post-purchase/v1/claims/search',
+      {
+        seller_id: acc.platform_shop_id,
+        stage: 'dispute',
+        limit: 50,
+        offset: 0
+      }
+    );
+
+    res.json({
+      success: true,
+      account: {
+        id: acc.id,
+        shop_name: acc.shop_name,
+        seller_id: acc.platform_shop_id
+      },
+      days,
+      since,
+      attempts
+    });
+
+  } catch (e) {
+    res.status(500).json({
+      success: false,
+      error: e.message,
+      stack: e.stack
+    });
+  }
+});
 
 
 
