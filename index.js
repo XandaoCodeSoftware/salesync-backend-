@@ -505,6 +505,61 @@ async function fetchMLShipmentDetails(token, shipmentId) {
   }
 }
 
+async function fetchMLItemDetails(token, itemId) {
+  if (!itemId) return null;
+  try {
+    const { data } = await axios.get(`https://api.mercadolibre.com/items/${itemId}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const image = data?.pictures?.[0]?.secure_url || data?.pictures?.[0]?.url || data?.secure_thumbnail || data?.thumbnail || null;
+    return {
+      item_id: String(itemId),
+      image_url: image,
+      title: data?.title || '',
+      seller_sku: data?.seller_custom_field || data?.seller_sku || ''
+    };
+  } catch (e) {
+    console.error('[ML item details]', itemId, e.response?.status || '', e.response?.data || e.message);
+    return null;
+  }
+}
+
+async function getMLItemDetailsCached(token, itemIds=[]) {
+  const ids = [...new Set((itemIds || []).map(x => String(x || '').trim()).filter(Boolean))];
+  if (!ids.length) return {};
+  const out = {};
+  try {
+    const { rows } = await db.query(
+      `SELECT item_id, image_url, title, seller_sku FROM marketplace_item_images WHERE platform='mercadolivre' AND item_id = ANY($1::text[])`,
+      [ids]
+    );
+    for (const r of rows) out[String(r.item_id)] = { image_url:r.image_url, title:r.title, seller_sku:r.seller_sku };
+  } catch(e) {
+    console.warn('[ML item cache read]', e.message);
+  }
+
+  const missing = ids.filter(id => !out[id]?.image_url);
+  // Limita para não deixar a sincronização pesada. O resto entra na próxima atualização.
+  await Promise.all(missing.slice(0, 120).map(async id => {
+    const det = await fetchMLItemDetails(token, id);
+    if (!det) return;
+    out[id] = { image_url:det.image_url, title:det.title, seller_sku:det.seller_sku };
+    try {
+      await db.query(
+        `INSERT INTO marketplace_item_images (platform, item_id, image_url, title, seller_sku, updated_at)
+         VALUES ('mercadolivre',$1,$2,$3,$4,NOW())
+         ON CONFLICT (platform, item_id) DO UPDATE SET
+           image_url=COALESCE(EXCLUDED.image_url, marketplace_item_images.image_url),
+           title=COALESCE(NULLIF(EXCLUDED.title,''), marketplace_item_images.title),
+           seller_sku=COALESCE(NULLIF(EXCLUDED.seller_sku,''), marketplace_item_images.seller_sku),
+           updated_at=NOW()`,
+        [id, det.image_url || null, det.title || null, det.seller_sku || null]
+      );
+    } catch(e) { console.warn('[ML item cache write]', e.message); }
+  }));
+  return out;
+}
+
 async function fetchML(acc, days) {
   let token = acc.access_token;
   if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 5*60*1000)) {
@@ -565,6 +620,11 @@ async function fetchML(acc, days) {
     if (det) shipmentMap[String(id)] = det;
   }));
 
+  // Foto do produto: orders/search não traz imagem. Busca /items/{item_id}, salva URL no SQL
+  // e nas próximas cargas usa o cache marketplace_item_images para não ficar lento.
+  const itemIdsForImages = [...new Set(uniqueResults.map(o => o.order_items?.[0]?.item?.id).filter(Boolean))];
+  const itemImageMap = await getMLItemDetailsCached(token, itemIdsForImages);
+
   const statusMap = {
     paid:'paid', payment_required:'pending', pending:'pending',
     confirmed:'paid', shipped:'shipped', delivered:'delivered',
@@ -573,6 +633,8 @@ async function fetchML(acc, days) {
 
   return uniqueResults.map(o => {
     const item = o.order_items?.[0] || {};
+    const mlItemId = item?.item?.id || null;
+    const itemDetails = mlItemId ? itemImageMap[String(mlItemId)] : null;
     const shipmentId = o.shipping?.id || null;
     const shipment = shipmentId ? shipmentMap[String(shipmentId)] : null;
     const qty = parseFloat(item?.quantity || 1);
@@ -615,10 +677,10 @@ async function fetchML(acc, days) {
       order_date:       o.date_created,
       date_closed:      o.date_closed || null,
       date_last_updated:o.date_last_updated || o.last_updated || null,
-      item_title:       item?.item?.title || payment.reason || '',
-      item_image:       null,
-      item_sku:         item?.item?.seller_sku || item?.item?.seller_custom_field || '',
-      item_id:          item?.item?.id || null,
+      item_title:       item?.item?.title || itemDetails?.title || payment.reason || '',
+      item_image:       itemDetails?.image_url || null,
+      item_sku:         item?.item?.seller_sku || item?.item?.seller_custom_field || itemDetails?.seller_sku || '',
+      item_id:          mlItemId,
       category_id:      item?.item?.category_id || null,
       unit_price:       parseFloat(item?.unit_price || 0),
       gross_price:      parseFloat(item?.gross_price || item?.unit_price || 0),
@@ -1134,6 +1196,21 @@ async function ensureOrdersReturnsSchema() {
     await db.query(`ALTER TABLE marketplace_orders ADD COLUMN IF NOT EXISTS raw_json JSONB`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_orders_user_date ON marketplace_orders(user_id, order_date DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_orders_platform ON marketplace_orders(user_id, platform)`);
+
+    // Cache de imagens dos anúncios. Guarda a URL da imagem, não o arquivo binário.
+    // Isso deixa a listagem rápida e evita chamar /items/{id} toda hora.
+    await db.query(`CREATE TABLE IF NOT EXISTS marketplace_item_images (
+      id BIGSERIAL PRIMARY KEY,
+      platform TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      image_url TEXT,
+      title TEXT,
+      seller_sku TEXT,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      UNIQUE(platform, item_id)
+    )`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_item_images_platform_item ON marketplace_item_images(platform, item_id)`);
 
     await db.query(`CREATE TABLE IF NOT EXISTS marketplace_returns (
       id BIGSERIAL PRIMARY KEY,
