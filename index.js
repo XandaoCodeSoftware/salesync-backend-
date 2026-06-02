@@ -507,10 +507,8 @@ async function fetchMLShipmentDetails(token, shipmentId) {
 
 async function fetchMLItemDetails(token, itemId) {
   if (!itemId) return null;
-  try {
-    const { data } = await axios.get(`https://api.mercadolibre.com/items/${itemId}`, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
+
+  async function normalize(data) {
     const image = data?.pictures?.[0]?.secure_url || data?.pictures?.[0]?.url || data?.secure_thumbnail || data?.thumbnail || null;
     return {
       item_id: String(itemId),
@@ -518,9 +516,25 @@ async function fetchMLItemDetails(token, itemId) {
       title: data?.title || '',
       seller_sku: data?.seller_custom_field || data?.seller_sku || ''
     };
-  } catch (e) {
-    console.error('[ML item details]', itemId, e.response?.status || '', e.response?.data || e.message);
-    return null;
+  }
+
+  // Alguns apps ML bloqueiam /items com Authorization por PolicyAgent.
+  // Primeiro tenta público SEM token. Se não der, tenta com token. Nenhuma falha de imagem deve quebrar pedidos.
+  try {
+    const { data } = await axios.get(`https://api.mercadolibre.com/items/${itemId}`);
+    return normalize(data);
+  } catch (publicErr) {
+    try {
+      const { data } = await axios.get(`https://api.mercadolibre.com/items/${itemId}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      return normalize(data);
+    } catch (authErr) {
+      const st = authErr.response?.status || publicErr.response?.status || '';
+      const code = authErr.response?.data?.code || publicErr.response?.data?.code || '';
+      console.warn('[ML item image skipped]', itemId, st, code || authErr.message || publicErr.message);
+      return null;
+    }
   }
 }
 
@@ -1171,7 +1185,7 @@ async function ensureOrdersReturnsSchema() {
       id BIGSERIAL PRIMARY KEY,
       user_id UUID NOT NULL,
       platform TEXT NOT NULL,
-      account_id BIGINT,
+      account_id UUID,
       platform_order_id TEXT NOT NULL,
       shop_name TEXT,
       status TEXT,
@@ -1192,7 +1206,23 @@ async function ensureOrdersReturnsSchema() {
       updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
       UNIQUE(user_id, platform, platform_order_id)
     )`);
-    await db.query(`ALTER TABLE marketplace_orders ADD COLUMN IF NOT EXISTS account_id BIGINT`);
+
+    // Correção para bases antigas: versões anteriores criaram account_id como BIGINT.
+    // O id da tabela marketplace_accounts é UUID, então converter BIGINT direto quebrava a sync.
+    // Se a coluna antiga existir como BIGINT/INTEGER, zera e converte para UUID.
+    await db.query(`DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='marketplace_orders' AND column_name='account_id'
+          AND data_type IN ('bigint','integer','numeric')
+      ) THEN
+        ALTER TABLE marketplace_orders ALTER COLUMN account_id DROP DEFAULT;
+        ALTER TABLE marketplace_orders ALTER COLUMN account_id TYPE UUID USING NULL;
+      END IF;
+    END $$;`);
+
+    await db.query(`ALTER TABLE marketplace_orders ADD COLUMN IF NOT EXISTS account_id UUID`);
     await db.query(`ALTER TABLE marketplace_orders ADD COLUMN IF NOT EXISTS raw_json JSONB`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_orders_user_date ON marketplace_orders(user_id, order_date DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_orders_platform ON marketplace_orders(user_id, platform)`);
@@ -1216,7 +1246,7 @@ async function ensureOrdersReturnsSchema() {
       id BIGSERIAL PRIMARY KEY,
       user_id UUID NOT NULL,
       platform TEXT NOT NULL,
-      account_id BIGINT,
+      account_id UUID,
       platform_order_id TEXT,
       external_return_id TEXT NOT NULL,
       external_ticket_id TEXT,
@@ -1235,6 +1265,20 @@ async function ensureOrdersReturnsSchema() {
       updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
       UNIQUE(user_id, platform, external_return_id)
     )`);
+
+    await db.query(`DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='marketplace_returns' AND column_name='account_id'
+          AND data_type IN ('bigint','integer','numeric')
+      ) THEN
+        ALTER TABLE marketplace_returns ALTER COLUMN account_id DROP DEFAULT;
+        ALTER TABLE marketplace_returns ALTER COLUMN account_id TYPE UUID USING NULL;
+      END IF;
+    END $$;`);
+    await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS account_id UUID`);
+
     await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS return_shipping_cost NUMERIC(14,2) NOT NULL DEFAULT 0`);
     await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS return_fee NUMERIC(14,2) NOT NULL DEFAULT 0`);
     await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS refund_adjustment NUMERIC(14,2) NOT NULL DEFAULT 0`);
