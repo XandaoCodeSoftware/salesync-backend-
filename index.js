@@ -1948,7 +1948,72 @@ app.get('/debug/ml-claims-raw', auth, async (req, res) => {
 });
 
 
+app.get('/debug/ml-orders-returns-signals', auth, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT *
+       FROM marketplace_accounts
+       WHERE user_id=$1
+         AND platform='mercadolivre'
+         AND is_active=true
+         AND access_token IS NOT NULL
+       LIMIT 1`,
+      [req.user.id]
+    );
 
+    if (!rows.length) return res.status(404).json({ success:false, error:'ML não conectado' });
+
+    const acc = rows[0];
+    const headers = { Authorization: `Bearer ${acc.access_token}` };
+
+    const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
+      headers,
+      params: {
+        seller: acc.platform_shop_id,
+        sort: 'date_desc',
+        limit: 50
+      }
+    });
+
+    const orders = data.results || [];
+
+    const mapped = orders.map(o => ({
+      id: o.id,
+      status: o.status,
+      tags: o.tags,
+      feedback: o.feedback,
+      fulfilled: o.fulfilled,
+      order_request: o.order_request,
+      mediations: o.mediations,
+      pack_id: o.pack_id,
+      shipping_id: o.shipping?.id,
+      payments: (o.payments || []).map(p => ({
+        id: p.id,
+        status: p.status,
+        status_detail: p.status_detail,
+        transaction_amount: p.transaction_amount,
+        total_paid_amount: p.total_paid_amount,
+        shipping_cost: p.shipping_cost,
+        coupon_amount: p.coupon_amount,
+        date_approved: p.date_approved,
+        date_last_modified: p.date_last_modified
+      }))
+    }));
+
+    res.json({
+      success: true,
+      total: mapped.length,
+      data: mapped
+    });
+
+  } catch (e) {
+    res.status(500).json({
+      success:false,
+      status:e.response?.status,
+      error:e.response?.data || e.message
+    });
+  }
+});
 // ══ ETIQUETA MERCADO LIVRE — v5.9 restaurada ══
 app.get('/api/ml/label/:shippingId', auth, async (req, res) => {
   const { shippingId } = req.params;
