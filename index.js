@@ -4007,3 +4007,87 @@ app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v5.2 rodando na porta ${PORT}`));  
+
+// ===== ETIQUETAS MERCADO LIVRE =====
+app.post('/api/ml/labels', auth, async (req,res)=>{
+  try{
+
+    const { order_ids=[] } = req.body;
+
+    const { rows } = await db.query(
+      `SELECT * FROM marketplace_accounts
+       WHERE user_id=$1
+       AND platform='mercadolivre'
+       AND is_active=true
+       LIMIT 1`,
+      [req.user.id]
+    );
+
+    if(!rows.length){
+      return res.status(404).json({
+        error:'Conta ML não conectada'
+      });
+    }
+
+    const acc = rows[0];
+
+    const headers = {
+      Authorization:`Bearer ${acc.access_token}`
+    };
+
+    const pdfs = [];
+
+    for(const orderId of order_ids){
+
+      try{
+
+        const { data:order } = await axios.get(
+          `https://api.mercadolibre.com/orders/${orderId}`,
+          { headers }
+        );
+
+        const shipmentId =
+          order?.shipping?.id;
+
+        if(!shipmentId) continue;
+
+        const { data:file } = await axios.get(
+          `https://api.mercadolibre.com/shipment_labels?shipment_ids=${shipmentId}&response_type=pdf`,
+          {
+            headers,
+            responseType:'arraybuffer'
+          }
+        );
+
+        pdfs.push(Buffer.from(file));
+
+      }catch(e){
+        console.log('[ML LABEL]', orderId, e.message);
+      }
+
+    }
+
+    if(!pdfs.length){
+      return res.status(400).json({
+        error:'Nenhuma etiqueta gerada'
+      });
+    }
+
+    res.setHeader('Content-Type','application/pdf');
+    res.send(Buffer.concat(pdfs));
+
+  }catch(e){
+
+    res.status(500).json({
+      error:e.message
+    });
+
+  }
+});
+
+
+
+// SKU DANFE MAGALU:
+// dentro do drawText da DANFE simplificada:
+// doc.text(`SKU: ${item.sku || item.seller_sku || '-'}`, x, y);
+
