@@ -505,6 +505,69 @@ async function fetchMLShipmentDetails(token, shipmentId) {
   }
 }
 
+async function fetchMLShipmentCosts(token, shipmentId) {
+  if (!shipmentId) return null;
+  const headers = { Authorization: `Bearer ${token}` };
+  const urls = [
+    `https://api.mercadolibre.com/shipments/${shipmentId}/costs`,
+    `https://api.mercadolibre.com/shipments/${shipmentId}/payments`,
+  ];
+  for (const url of urls) {
+    try {
+      const { data } = await axios.get(url, { headers });
+      return data || null;
+    } catch (e) {
+      const st = e.response?.status;
+      if (st && ![403, 404, 405].includes(Number(st))) {
+        console.warn('[ML shipment costs]', shipmentId, st, e.response?.data || e.message);
+      }
+    }
+  }
+  return null;
+}
+
+function pickNumberDeep(obj, paths=[]) {
+  for (const path of paths) {
+    const val = path.split('.').reduce((acc, key) => acc && acc[key], obj);
+    const n = Number(val);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return 0;
+}
+
+function resolveMLShippingFee({ order, shipment, shipmentCosts, totalAmount, paidAmount }) {
+  const payments = Array.isArray(order?.payments) ? order.payments : [];
+  const paymentShippingFee = payments.reduce((sum, p) => sum + Number(p?.shipping_cost || p?.shipping_amount || p?.shipment_cost || 0), 0);
+  const orderShippingFee = Number(order?.shipping_cost || order?.shipping?.cost || order?.shipping?.amount || 0);
+  const shipmentCost = pickNumberDeep(shipment || {}, [
+    'shipping_option.cost', 'shipping_option.list_cost', 'shipping_option.base_cost',
+    'cost', 'base_cost', 'list_cost', 'receiver_cost'
+  ]);
+  const costsEndpointFee = pickNumberDeep(shipmentCosts || {}, [
+    'receiver.cost', 'receiver.amount', 'receiver.user_cost',
+    'shipping_option.cost', 'gross_amount', 'amount', 'cost', 'list_cost', 'base_cost'
+  ]);
+  const paidDiff = Math.max(0, Number(paidAmount || 0) - Number(totalAmount || 0));
+
+  const candidates = [
+    ['payment_shipping_cost', paymentShippingFee],
+    ['order_shipping_cost', orderShippingFee],
+    ['shipment_costs_endpoint', costsEndpointFee],
+    ['shipment_shipping_option', shipmentCost],
+    ['paid_minus_total', paidDiff],
+  ];
+  const found = candidates.find(([, v]) => Number.isFinite(Number(v)) && Number(v) > 0);
+  return {
+    value: found ? Number(found[1]) : 0,
+    source: found ? found[0] : 'not_found',
+    payment_shipping_fee: Number(paymentShippingFee || 0),
+    order_shipping_fee: Number(orderShippingFee || 0),
+    shipment_cost: Number(shipmentCost || 0),
+    costs_endpoint_fee: Number(costsEndpointFee || 0),
+    paid_diff: Number(paidDiff || 0)
+  };
+}
+
 async function fetchMLItemDetails(token, itemId) {
   if (!itemId) return null;
 
@@ -634,6 +697,13 @@ async function fetchML(acc, days) {
     if (det) shipmentMap[String(id)] = det;
   }));
 
+  // Frete do ML pode vir em locais diferentes dependendo do tipo de envio/pagamento.
+  const shipmentCostMap = {};
+  await Promise.all(shipmentIds.slice(0, 50).map(async id => {
+    const det = await fetchMLShipmentCosts(token, id);
+    if (det) shipmentCostMap[String(id)] = det;
+  }));
+
   // Foto do produto: orders/search não traz imagem. Busca /items/{item_id}, salva URL no SQL
   // e nas próximas cargas usa o cache marketplace_item_images para não ficar lento.
   const itemIdsForImages = [...new Set(uniqueResults.map(o => o.order_items?.[0]?.item?.id).filter(Boolean))];
@@ -660,11 +730,15 @@ async function fetchML(acc, days) {
       return sum + (parseFloat(it.sale_fee || 0) * parseFloat(it.quantity || 1));
     }, 0);
 
-    // Frete exibido no pagamento do ML. Em muitos pedidos o o.shipping_cost vem null.
-    const paymentShippingFee = (o.payments || []).reduce((sum, p) => sum + parseFloat(p.shipping_cost || 0), 0);
-    const orderShippingFee = parseFloat(o.shipping_cost || 0);
-    const shipmentCost = parseFloat(shipment?.shipping_option?.cost || shipment?.cost || 0);
-    const shippingFee = paymentShippingFee || orderShippingFee || shipmentCost || Math.max(0, paidAmount - totalAmount);
+    const shippingInfo = resolveMLShippingFee({
+      order: o,
+      shipment,
+      shipmentCosts: shipmentId ? shipmentCostMap[String(shipmentId)] : null,
+      totalAmount,
+      paidAmount
+    });
+    const shippingFee = shippingInfo.value;
+    const paymentShippingFee = shippingInfo.payment_shipping_fee;
 
     const payment = o.payments?.[0] || {};
     const mlShipStatus = mlShippingStatus(o, shipment);
@@ -685,7 +759,12 @@ async function fetchML(acc, days) {
       paid_amount:      paidAmount,
       platform_fee:     platformFee,
       shipping_fee:     shippingFee,
+      shipping_fee_source: shippingInfo.source,
       payment_shipping_fee: paymentShippingFee,
+      order_shipping_fee: shippingInfo.order_shipping_fee,
+      shipment_shipping_fee: shippingInfo.shipment_cost,
+      shipment_costs_fee: shippingInfo.costs_endpoint_fee,
+      paid_minus_total_shipping: shippingInfo.paid_diff,
       tax_amount:       0,
       quantity:         qty,
       order_date:       o.date_created,
@@ -934,7 +1013,10 @@ async function enrichWithCosts(orders, userId) {
     const total_cost = unit_cost * (o.quantity || 1);
     const total_amount = parseFloat(o.total_amount || 0);
     const platform_fee = fee_pct === null ? parseFloat(o.platform_fee || 0) : (total_amount * fee_pct / 100);
-    const shipping_fee = ship_fixed === null ? parseFloat(o.shipping_fee || 0) : (parseFloat(ship_fixed || 0) * (o.quantity || 1));
+    // Mercado Livre: frete é por pedido/cliente. Não usa frete padrão do SKU.
+    const shipping_fee = platform === 'mercadolivre'
+      ? parseFloat(o.shipping_fee || 0)
+      : (ship_fixed === null ? parseFloat(o.shipping_fee || 0) : (parseFloat(ship_fixed || 0) * (o.quantity || 1)));
     const tax_amount = tax_pct === null ? parseFloat(o.tax_amount || 0) : (total_amount * tax_pct / 100);
     const net_revenue= total_amount - platform_fee - shipping_fee - tax_amount;
     const return_total_cost = returnMap[`${platform}:${String(o.platform_order_id || o.id || '')}`] || 0;
@@ -1224,6 +1306,8 @@ async function ensureOrdersReturnsSchema() {
 
     await db.query(`ALTER TABLE marketplace_orders ADD COLUMN IF NOT EXISTS account_id UUID`);
     await db.query(`ALTER TABLE marketplace_orders ADD COLUMN IF NOT EXISTS raw_json JSONB`);
+    await db.query(`ALTER TABLE marketplace_orders ADD COLUMN IF NOT EXISTS manual_shipping_fee NUMERIC(14,2)`);
+    await db.query(`ALTER TABLE marketplace_orders ADD COLUMN IF NOT EXISTS shipping_fee_source TEXT`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_orders_user_date ON marketplace_orders(user_id, order_date DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_orders_platform ON marketplace_orders(user_id, platform)`);
 
@@ -1307,7 +1391,9 @@ async function ssUpsertOrders(userId, accountId, orders=[]) {
         account_id=EXCLUDED.account_id, shop_name=EXCLUDED.shop_name, status=EXCLUDED.status,
         fulfillment_type=EXCLUDED.fulfillment_type, buyer_name=EXCLUDED.buyer_name,
         total_amount=EXCLUDED.total_amount, paid_amount=EXCLUDED.paid_amount, platform_fee=EXCLUDED.platform_fee,
-        shipping_fee=EXCLUDED.shipping_fee, tax_amount=EXCLUDED.tax_amount, quantity=EXCLUDED.quantity,
+        shipping_fee=EXCLUDED.shipping_fee,
+        shipping_fee_source=COALESCE((EXCLUDED.raw_json->>'shipping_fee_source'), marketplace_orders.shipping_fee_source, 'auto'),
+        tax_amount=EXCLUDED.tax_amount, quantity=EXCLUDED.quantity,
         order_date=EXCLUDED.order_date, item_title=EXCLUDED.item_title, item_image=EXCLUDED.item_image,
         item_sku=EXCLUDED.item_sku, raw_json=EXCLUDED.raw_json, updated_at=NOW()`,
       [userId, platform, accountId || null, oid, o.shop_name || null, o.status || null, o.fulfillment_type || null, o.buyer_name || null,
@@ -1322,7 +1408,7 @@ async function ssLoadOrdersFromSql(userId, opts={}) {
   const to = opts.date_to ? new Date(String(opts.date_to)+'T23:59:59-03:00') : new Date();
   const params = [userId, from.toISOString(), to.toISOString()];
   let sql = `SELECT COALESCE(raw_json,'{}'::jsonb) AS raw_json, platform_order_id, platform, shop_name, status, fulfillment_type, buyer_name,
-             total_amount, paid_amount, platform_fee, shipping_fee, tax_amount, quantity, order_date, item_title, item_image, item_sku
+             total_amount, paid_amount, platform_fee, shipping_fee, manual_shipping_fee, shipping_fee_source, tax_amount, quantity, order_date, item_title, item_image, item_sku
              FROM marketplace_orders WHERE user_id=$1 AND order_date >= $2 AND order_date <= $3`;
   if (platform) { params.push(platform); sql += ` AND platform=$${params.length}`; }
   sql += ` ORDER BY order_date DESC LIMIT 3000`;
@@ -1332,7 +1418,11 @@ async function ssLoadOrdersFromSql(userId, opts={}) {
     platform_order_id: String(r.platform_order_id), id: String(r.platform_order_id), platform: r.platform,
     shop_name: r.shop_name, status: r.status, fulfillment_type: r.fulfillment_type, buyer_name: r.buyer_name,
     total_amount: Number(r.total_amount||0), paid_amount: Number(r.paid_amount||0), platform_fee: Number(r.platform_fee||0),
-    shipping_fee: Number(r.shipping_fee||0), tax_amount: Number(r.tax_amount||0), quantity: Number(r.quantity||1),
+    shipping_fee: r.manual_shipping_fee === null || r.manual_shipping_fee === undefined ? Number(r.shipping_fee||0) : Number(r.manual_shipping_fee||0),
+    auto_shipping_fee: Number(r.shipping_fee||0),
+    manual_shipping_fee: r.manual_shipping_fee === null || r.manual_shipping_fee === undefined ? null : Number(r.manual_shipping_fee||0),
+    shipping_fee_source: r.manual_shipping_fee === null || r.manual_shipping_fee === undefined ? (r.shipping_fee_source || 'auto') : 'manual',
+    tax_amount: Number(r.tax_amount||0), quantity: Number(r.quantity||1),
     order_date: r.order_date, item_title: r.item_title, item_image: r.item_image, item_sku: r.item_sku
   }));
 }
@@ -1449,6 +1539,29 @@ app.post('/api/returns/sync/:platform', auth, async (req, res) => {
     }
     res.json({ success:true, synced:count, data: await ssLoadReturns(req.user.id, platform) });
   } catch(e){ res.status(500).json({ error:e.message }); }
+});
+
+// ── FRETE MANUAL POR PEDIDO ──
+app.put('/api/orders/:platform/:orderId/shipping', auth, async (req, res) => {
+  const platform = normPlatform(req.params.platform);
+  const orderId = String(req.params.orderId || '').trim();
+  const raw = req.body?.shipping_fee;
+  const manual = raw === '' || raw === null || raw === undefined ? null : Number(raw);
+  if (!platform || !orderId) return res.status(400).json({ error: 'Pedido inválido' });
+  if (manual !== null && (!Number.isFinite(manual) || manual < 0)) return res.status(400).json({ error: 'Frete inválido' });
+
+  try {
+    const { rowCount } = await db.query(
+      `UPDATE marketplace_orders
+       SET manual_shipping_fee=$1, updated_at=NOW()
+       WHERE user_id=$2 AND platform=$3 AND platform_order_id=$4`,
+      [manual, req.user.id, platform, orderId]
+    );
+    if (!rowCount) return res.status(404).json({ error: 'Pedido não encontrado' });
+    res.json({ success: true, manual_shipping_fee: manual });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ── API PEDIDOS ──
