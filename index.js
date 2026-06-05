@@ -4003,6 +4003,241 @@ app.get('/api/debug/returns-last-month', auth, async (req, res) => {
   }
 });
 
+
+
+// ── DEBUG DEVOLUÇÕES ALIAS: funciona em /debug/returns e /api/debug/returns ──
+// Mantém o mesmo padrão que você já usa em /debug/ml-claims-raw.
+async function debugReturnsHandler(req, res) {
+  try {
+    const { rows } = await db.query(
+      `SELECT * FROM marketplace_accounts
+       WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND access_token IS NOT NULL
+       LIMIT 1`,
+      [req.user.id]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({
+        success: false,
+        error: 'Conta Mercado Livre não conectada'
+      });
+    }
+
+    const acc = rows[0];
+    const headers = { Authorization: `Bearer ${acc.access_token}` };
+
+    const days = Math.max(1, Math.min(Number(req.query.days || 60), 365));
+    const since = new Date(Date.now() - days * 86400000).toISOString();
+
+    const orders = [];
+    const limit = 50;
+    for (let page = 0; page < 20; page++) {
+      const offset = page * limit;
+      const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
+        headers,
+        params: {
+          seller: acc.platform_shop_id,
+          sort: 'date_desc',
+          'order.date_created.from': since,
+          limit,
+          offset
+        }
+      });
+
+      const arr = Array.isArray(data.results) ? data.results : [];
+      orders.push(...arr);
+
+      if (!arr.length || arr.length < limit) break;
+      if (data.paging?.total && offset + limit >= Number(data.paging.total)) break;
+    }
+
+    const sinais = orders.map(o => {
+      const tags = Array.isArray(o.tags) ? o.tags : [];
+      const payments = Array.isArray(o.payments) ? o.payments : [];
+      const pStatus = payments.map(p => String(p.status || '')).filter(Boolean);
+      const pDetails = payments.map(p => String(p.status_detail || '')).filter(Boolean);
+      const shippingStatus = String(o.shipping?.status || '').toLowerCase();
+      const logisticType = String(o.shipping?.logistic_type || '').toLowerCase();
+      const texto = [
+        o.status,
+        o.status_detail,
+        shippingStatus,
+        logisticType,
+        ...tags,
+        ...pStatus,
+        ...pDetails
+      ].join(' ').toLowerCase();
+
+      const hasReturnSignal = /(return|returned|devol|refund|refunded|chargeback|reimburs|not_delivered|claim|dispute|mediated)/i.test(texto);
+
+      return {
+        id: String(o.id),
+        platform_order_id: String(o.id),
+        status: o.status,
+        status_detail: o.status_detail || null,
+        tags,
+        shipping_id: o.shipping?.id || null,
+        shipping_status: o.shipping?.status || null,
+        logistic_type: o.shipping?.logistic_type || null,
+        date_created: o.date_created,
+        date_closed: o.date_closed || null,
+        total_amount: o.total_amount,
+        paid_amount: o.paid_amount,
+        payments: payments.map(p => ({
+          id: p.id,
+          status: p.status,
+          status_detail: p.status_detail,
+          total_paid_amount: p.total_paid_amount,
+          shipping_cost: p.shipping_cost
+        })),
+        has_return_signal: hasReturnSignal
+      };
+    });
+
+    let claims = null;
+    let claims_error = null;
+    const claimsAttempts = [];
+
+    async function tryClaims(name, params) {
+      try {
+        const r = await axios.get('https://api.mercadopago.com/post-purchase/v1/claims/search', {
+          headers,
+          params
+        });
+        claimsAttempts.push({
+          name,
+          ok: true,
+          status: r.status,
+          total: r.data?.paging?.total ?? r.data?.total ?? r.data?.results?.length ?? null,
+          params,
+          data: r.data
+        });
+        if (!claims) claims = r.data;
+      } catch (e) {
+        claimsAttempts.push({
+          name,
+          ok: false,
+          status: e.response?.status || null,
+          params,
+          error: e.response?.data || e.message
+        });
+        claims_error = e.response?.data || e.message;
+      }
+    }
+
+    await tryClaims('claims seller_id + data', {
+      seller_id: acc.platform_shop_id,
+      limit: 50,
+      offset: 0,
+      'claim.date_created.from': since
+    });
+
+    await tryClaims('claims type return', {
+      seller_id: acc.platform_shop_id,
+      type: 'return',
+      limit: 50,
+      offset: 0
+    });
+
+    const devolucoes = sinais.filter(x => x.has_return_signal);
+
+    res.json({
+      success: true,
+      account: {
+        shop_name: acc.shop_name,
+        seller_id: acc.platform_shop_id
+      },
+      periodo: {
+        days,
+        from: since,
+        to: new Date().toISOString()
+      },
+      total_pedidos_consultados: orders.length,
+      total_devolucoes_detectadas: devolucoes.length,
+      devolucoes,
+      amostra_sinais_pedidos: sinais.slice(0, 50),
+      claims,
+      claims_error,
+      claims_attempts: claimsAttempts,
+      observacao: devolucoes.length
+        ? 'Foram encontrados sinais de devolução nos pedidos consultados.'
+        : 'Não encontrei sinal de devolução em orders/search. Se claims vier 403 PolicyAgent, seu app/token não tem permissão para a API de claims.'
+    });
+  } catch (e) {
+    res.status(500).json({
+      success: false,
+      error: e.response?.data || e.message
+    });
+  }
+}
+
+app.get('/debug/returns', auth, debugReturnsHandler);
+app.get('/api/debug/returns', auth, debugReturnsHandler);
+app.get('/debug/returns-last-month', auth, debugReturnsHandler);
+
+// Alias sem /api para o debug de pedido ML, seguindo o padrão /debug/...
+if (typeof debugMLOrderAliasRegistered === 'undefined') {
+  var debugMLOrderAliasRegistered = true;
+  app.get('/debug/ml-order/:id', auth, async (req, res) => {
+    try {
+      const orderId = req.params.id;
+      const { rows } = await db.query(
+        `SELECT * FROM marketplace_accounts
+         WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND access_token IS NOT NULL
+         LIMIT 1`,
+        [req.user.id]
+      );
+      if (!rows.length) return res.status(404).json({ success:false, error:'Conta Mercado Livre não conectada' });
+      const acc = rows[0];
+      let token = acc.access_token;
+      if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 5*60*1000)) {
+        const newToken = await refreshMLToken(acc);
+        if (newToken) token = newToken;
+      }
+      const headers = { Authorization: `Bearer ${token}` };
+      const { data: order } = await axios.get(`https://api.mercadolibre.com/orders/${orderId}`, { headers });
+      const shipmentId = order?.shipping?.id || order?.shipping?.shipment_id || null;
+      let shipment = null;
+      let costs = null;
+      if (shipmentId) {
+        try { shipment = (await axios.get(`https://api.mercadolibre.com/shipments/${shipmentId}`, { headers })).data; }
+        catch (e) { shipment = { error: e.response?.data || e.message }; }
+        try { costs = (await axios.get(`https://api.mercadolibre.com/shipments/${shipmentId}/costs`, { headers })).data; }
+        catch (e) { costs = { error: e.response?.data || e.message }; }
+      }
+      const totalAmount = Number(order?.total_amount || 0);
+      const paidAmount = Number(order?.paid_amount || order?.payments?.[0]?.total_paid_amount || 0);
+      const shipping = resolveMLShippingFee({ order, shipment, shipmentCosts: costs, totalAmount, paidAmount });
+      res.json({
+        success: true,
+        account: { shop_name: acc.shop_name, seller_id: acc.platform_shop_id },
+        order,
+        shipment,
+        costs,
+        resumo: {
+          order_id: orderId,
+          shipping_id: shipmentId,
+          order_total: totalAmount,
+          paid_amount: paidAmount,
+          frete_escolhido: shipping.value,
+          fonte_frete: shipping.source,
+          sender_cost: shipping.sender_cost,
+          shipment_costs_fee: shipping.costs_endpoint_fee,
+          payment_shipping_fee: shipping.payment_shipping_fee,
+          order_shipping_fee: shipping.order_shipping_fee,
+          shipment_shipping_fee: shipping.shipment_cost,
+          paid_minus_total: shipping.paid_diff,
+          senders: costs?.senders || null,
+          receivers: costs?.receivers || null,
+          marketplace: costs?.marketplace || null
+        }
+      });
+    } catch (e) {
+      res.status(500).json({ success:false, error: e.response?.data || e.message });
+    }
+  });
+}
+
 app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:'5.0' }));
 
 const PORT = process.env.PORT || 3000;
