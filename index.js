@@ -559,11 +559,13 @@ function resolveMLShippingFee({ order, shipment, shipmentCosts, totalAmount, pai
   ]);
   const paidDiff = Math.max(0, Number(paidAmount || 0) - Number(totalAmount || 0));
 
+  // SalesSync: no debug real o frete do ML apareceu em payments[].shipping_cost.
+  // Por isso a prioridade agora é pagamento > shipment/costs > diferença pago-total.
   const candidates = [
+    ['payment_shipping_cost', paymentShippingFee],
     ['shipment_costs_senders_cost', senderCost],
     ['shipment_costs_endpoint', costsEndpointFee],
     ['shipment_shipping_option', shipmentCost],
-    ['payment_shipping_cost', paymentShippingFee],
     ['order_shipping_cost', orderShippingFee],
     ['paid_minus_total', paidDiff],
   ];
@@ -1491,15 +1493,70 @@ async function ssUpsertReturn(userId, acc, r) {
      r.buyer_message || null, r.return_tracking_code || null, ssNum2(r.return_shipping_cost), ssNum2(r.return_fee), ssNum2(r.refund_adjustment), ssNum2(r.lost_product_cost), total, JSON.stringify(r.raw_json || r)]);
 }
 
-async function ssFetchMLReturns(acc) {
+function ssMLIsRealReturnFromOrder(o) {
+  const tags = Array.isArray(o?.tags) ? o.tags.map(String) : [];
+  const payments = Array.isArray(o?.payments) ? o.payments : [];
+  const payText = payments.map(p => `${p.status || ''} ${p.status_detail || ''}`).join(' ').toLowerCase();
+  const delivered = tags.includes('delivered');
+  const refunded = /(refunded|charged_back|chargeback|reimbursed|bpp_refunded|bpp_covered)/i.test(payText);
+  const cancelledAfterDelivery = String(o?.status || '').toLowerCase() === 'cancelled' && delivered;
+  // "not_delivered" sozinho NÃO é devolução real; aparece em pedido pago ainda não entregue.
+  return (delivered && refunded) || cancelledAfterDelivery || payments.some(p => String(p.status || '').toLowerCase() === 'charged_back');
+}
+
+async function ssFetchMLReturns(acc, days = 365) {
   const headers = { Authorization: `Bearer ${acc.access_token}` };
+  const out = [];
+
+  // Primeiro usa orders/search porque o endpoint de claims costuma retornar 403 PolicyAgent nessa conta.
+  try {
+    const since = new Date(Date.now() - Math.min(Math.max(Number(days) || 365, 1), 365) * 86400000).toISOString();
+    const limit = 50;
+    for (let page = 0; page < 20; page++) {
+      const offset = page * limit;
+      const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
+        headers,
+        params: {
+          seller: acc.platform_shop_id,
+          sort: 'date_desc',
+          'order.date_created.from': since,
+          limit,
+          offset
+        }
+      });
+      const arr = Array.isArray(data.results) ? data.results : [];
+      for (const o of arr) {
+        if (!ssMLIsRealReturnFromOrder(o)) continue;
+        const payments = Array.isArray(o.payments) ? o.payments : [];
+        const reason = payments.map(p => p.status_detail || p.status).filter(Boolean).join(', ');
+        out.push({
+          platform:'mercadolivre',
+          external_return_id:`ml-order-${o.id}`,
+          platform_order_id:String(o.id || ''),
+          status:o.status || 'returned',
+          reason:reason || 'Pedido entregue com reembolso/chargeback',
+          type:'return',
+          return_shipping_cost: payments.reduce((s,p)=>s+Number(p.shipping_cost||0),0),
+          raw_json:o
+        });
+      }
+      if (!arr.length || arr.length < limit) break;
+      if (data.paging?.total && offset + limit >= Number(data.paging.total)) break;
+    }
+  } catch(e) {
+    console.error('[ML returns orders/search]', e.response?.status, e.response?.data || e.message);
+  }
+
+  if (out.length) return out;
+
+  // Fallback: tenta claims, mas pode dar 403 dependendo das políticas do app.
   try {
     const { data } = await axios.get('https://api.mercadopago.com/post-purchase/v1/claims/search', {
       params: { type: 'return', limit: 50, sort: 'last_updated:desc' }, headers
     });
     const arr = data?.data || data?.results || [];
     return arr.map(c => ({ platform:'mercadolivre', external_return_id:String(c.id || c.claim_id), platform_order_id:String(c.resource_id || c.order_id || ''), status:c.status, reason:c.reason_id || c.reason || c.stage, type:c.type || 'return', raw_json:c }));
-  } catch(e) { console.error('[ML returns]', e.response?.status, e.response?.data || e.message); return []; }
+  } catch(e) { console.error('[ML returns claims]', e.response?.status, e.response?.data || e.message); return out; }
 }
 
 async function ssFetchMagaluReturns(acc) {
@@ -2875,6 +2932,9 @@ async function drawMagaluEtiquetaDanfe(doc, data, y) {
   const destName = nfe.destName || rec.name || '';
   const destDoc = nfe.destCpfCnpj || rec.document_number || '';
   const destUf = nfe.destUf || ra.state || '';
+  const firstItem = d.items?.[0] || d.products?.[0] || d.order?.items?.[0] || {};
+  const firstInfo = firstItem.info || firstItem.product || firstItem || {};
+  const skuDanfe = firstInfo.sku || firstInfo.seller_sku || firstInfo.sellerSku || firstInfo.id || d.sku || d.product_sku || '';
 
   const leftX = 18, leftW = 260, rightX = 300, rightW = 276, h = 392;
   doc.font('Helvetica-Bold').fontSize(15).text('magalu Entregas', leftX, y + 6);
@@ -2928,6 +2988,7 @@ async function drawMagaluEtiquetaDanfe(doc, data, y) {
   doc.font('Helvetica-Bold').text('Inscrição Estadual:', rightX + 8, yy).font('Helvetica').text(emitIe || '', rightX + 88, yy).font('Helvetica-Bold').text('UF:', rightX + 240, yy).font('Helvetica').text(emitUf || '', rightX + 258, yy); yy += 32;
   doc.font('Helvetica-Bold').text('Destinatário:', rightX + 8, yy).font('Helvetica').text(destName, rightX + 68, yy, { width:185 }); yy += 22;
   doc.font('Helvetica-Bold').text('CNPJ/CPF:', rightX + 8, yy).font('Helvetica').text(destDoc, rightX + 68, yy); yy += 20;
+  doc.font('Helvetica-Bold').text('SKU:', rightX + 8, yy).font('Helvetica').text(skuDanfe || '—', rightX + 68, yy); yy += 20;
   doc.font('Helvetica-Bold').text('Inscrição Estadual:', rightX + 8, yy).font('Helvetica').text(nfe.destIe || '', rightX + 88, yy).font('Helvetica-Bold').text('UF:', rightX + 240, yy).font('Helvetica').text(destUf || '', rightX + 258, yy); yy += 22;
   doc.font('Helvetica-Bold').fontSize(10).text('DANFE SIMPLIFICADO', rightX + 8, y + h - 24);
 }
@@ -2963,6 +3024,9 @@ function danfeDataFromDelivery(data) {
   const drop = d.shipping?.drop_details || {};
   const da = drop.address || {};
   const key = nfe.key || d.invoices?.[0]?.key || '';
+  const firstItem = d.items?.[0] || d.products?.[0] || d.order?.items?.[0] || {};
+  const firstInfo = firstItem.info || firstItem.product || firstItem || {};
+  const sku = firstInfo.sku || firstInfo.seller_sku || firstInfo.sellerSku || firstInfo.id || d.sku || d.product_sku || '';
   return {
     key,
     nfNumber: nfe.number || (key ? String(key).slice(25, 34).replace(/^0+/, '') : ''),
@@ -2981,6 +3045,7 @@ function danfeDataFromDelivery(data) {
     value: nfe.value || '',
     orderCode: d.order?.code || d.code || '',
     deliveryId: d.id || '',
+    sku,
   };
 }
 
@@ -3034,6 +3099,7 @@ async function drawDanfeSimplificadoOnly(doc, data, box, opts = {}) {
   yy += 10 * scale;
   kv('Destinatário:', info.destName);
   kv('CNPJ/CPF:', info.destDoc);
+  kv('SKU:', info.sku || '—');
   kv('Inscrição Estadual:', info.destIe, info.destUf);
 
   // Assinatura discreta da plataforma no DANFE criado pelo SalesSync.
@@ -3792,6 +3858,146 @@ function ssDeliveryPrintable(d) {
     && invStatus === 'approved';
 }
 
+
+async function ssGetMLTokenForUser(userId) {
+  const { rows } = await db.query(
+    `SELECT * FROM marketplace_accounts
+     WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND access_token IS NOT NULL
+     LIMIT 1`,
+    [userId]
+  );
+  if (!rows.length) return null;
+  const acc = rows[0];
+  let token = acc.access_token;
+  if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 5*60*1000)) {
+    const newToken = await refreshMLToken(acc);
+    if (newToken) token = newToken;
+  }
+  return { acc, token };
+}
+
+async function ssDownloadMLLabels(userId, shipmentIds = []) {
+  const clean = [...new Set((shipmentIds || []).map(x => String(x || '').trim()).filter(Boolean))];
+  if (!clean.length) throw new Error('Nenhum envio ML selecionado');
+  const authData = await ssGetMLTokenForUser(userId);
+  if (!authData) {
+    const err = new Error('Mercado Livre não conectado');
+    err.status = 404;
+    throw err;
+  }
+  const { token } = authData;
+  const { data } = await axios.get('https://api.mercadolibre.com/shipment_labels', {
+    params: { shipment_ids: clean.join(','), response_type: 'pdf' },
+    headers: { Authorization: `Bearer ${token}` },
+    responseType: 'arraybuffer'
+  });
+  return Buffer.from(data);
+}
+
+app.get('/api/ml/labels', auth, async (req, res) => {
+  try {
+    const ids = String(req.query.shipment_ids || req.query.ids || '').split(',');
+    const pdf = await ssDownloadMLLabels(req.user.id, ids);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="etiquetas-ml.pdf"`);
+    res.send(pdf);
+  } catch(e) {
+    res.status(e.status || e.response?.status || 500).json({ error: e.response?.data || e.message });
+  }
+});
+
+app.post('/api/ml/generate-labels', auth, async (req, res) => {
+  try {
+    const ids = req.body?.shipment_ids || req.body?.ids || [];
+    const pdf = await ssDownloadMLLabels(req.user.id, ids);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="etiquetas-ml.pdf"`);
+    res.send(pdf);
+  } catch(e) {
+    res.status(e.status || e.response?.status || 500).json({ error: e.response?.data || e.message });
+  }
+});
+
+app.get('/api/printable-labels', auth, async (req, res) => {
+  try {
+    const days = Math.min(Math.max(parseInt(req.query.days || ssLookbackDaysForPrint()) || 3, 1), 7);
+    const data = [];
+
+    // Magalu: reaproveita a regra de entrega imprimível, mas limita e não trava a tela.
+    try {
+      const accs = await ssGetAccounts(req.user.id, 'magalu');
+      const acc = accs[0];
+      if (acc) {
+        const orders = await fetchMagalu(acc, days);
+        const ids = [...new Set((orders || []).map(o => o.magalu_delivery_id || o.delivery_id).filter(Boolean))].slice(0, 60);
+        await ssMapLimit(ids, 6, async id => {
+          try {
+            const probe = await inspectMagaluDelivery(acc, id);
+            const d = probe?.[0]?.data || null;
+            if (!d || !ssDeliveryPrintable(d)) return;
+            const rec = d.shipping?.recipient || {};
+            const addr = rec.address || {};
+            const inv = d.invoices?.[0] || {};
+            const firstItem = d.items?.[0] || d.products?.[0] || d.order?.items?.[0] || {};
+            const firstInfo = firstItem.info || firstItem.product || firstItem || {};
+            data.push({
+              platform:'magalu',
+              id:String(d.id),
+              delivery_id:d.id,
+              delivery_code:d.code,
+              order_code:d.order?.code || d.code,
+              status:d.status,
+              customer_name:rec.name || '',
+              customer_city:addr.city || '',
+              customer_state:addr.state || '',
+              invoice_key:inv.key || '',
+              invoice_status:inv.status?.id || inv.status || '',
+              sku:firstInfo.sku || firstInfo.seller_sku || '',
+              deadline:d.shipping?.deadline?.limit_date || null
+            });
+          } catch(e) { console.error('[printable magalu]', id, e.message); }
+        });
+      }
+    } catch(e) { console.error('[printable magalu block]', e.message); }
+
+    // Mercado Livre: usa pedidos já sincronizados para ser rápido.
+    try {
+      let mlOrders = await ssLoadOrdersFromSql(req.user.id, { period: days, platform: 'mercadolivre' });
+      if (!mlOrders.length) {
+        await ssSyncOrdersForUser(req.user.id, 'mercadolivre', days);
+        mlOrders = await ssLoadOrdersFromSql(req.user.id, { period: days, platform: 'mercadolivre' });
+      }
+      for (const o of mlOrders) {
+        const sid = o.ml_shipping_id || o.shipping_id || o.ml_shipping?.id;
+        const st = String(o.ml_shipping_status || o.status || '').toLowerCase();
+        const tags = Array.isArray(o.tags) ? o.tags : [];
+        if (!sid) continue;
+        if (String(o.status || '').toLowerCase() === 'cancelled') continue;
+        if (tags.includes('not_paid')) continue;
+        if (['delivered','cancelled','canceled'].includes(st)) continue;
+        data.push({
+          platform:'mercadolivre',
+          id:String(sid),
+          shipment_id:String(sid),
+          order_code:o.platform_order_id || o.id,
+          status:o.ml_shipping_status_label || o.ml_shipping_status || o.status,
+          customer_name:o.buyer_name || '',
+          customer_city:o.ml_receiver_city || '',
+          customer_state:o.ml_receiver_state || '',
+          sku:o.item_sku || '',
+          product:o.item_title || '',
+          logistic_type:o.ml_logistic_type || o.fulfillment_type || ''
+        });
+      }
+    } catch(e) { console.error('[printable ml block]', e.message); }
+
+    data.sort((a,b) => String(a.platform).localeCompare(String(b.platform)) || String(a.order_code || '').localeCompare(String(b.order_code || '')));
+    res.json({ success:true, days, count:data.length, data });
+  } catch(e) {
+    res.status(500).json({ error:e.message });
+  }
+});
+
 app.get('/api/magalu/printable-deliveries', auth, async (req, res) => {
   try {
     const accs = await ssGetAccounts(req.user.id, 'magalu');
@@ -4004,239 +4210,77 @@ app.get('/api/debug/returns-last-month', auth, async (req, res) => {
 });
 
 
-
-// ── DEBUG DEVOLUÇÕES ALIAS: funciona em /debug/returns e /api/debug/returns ──
-// Mantém o mesmo padrão que você já usa em /debug/ml-claims-raw.
-async function debugReturnsHandler(req, res) {
+async function ssDebugReturnsHandler(req, res) {
   try {
-    const { rows } = await db.query(
-      `SELECT * FROM marketplace_accounts
-       WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND access_token IS NOT NULL
-       LIMIT 1`,
-      [req.user.id]
-    );
+    const days = Math.min(Math.max(parseInt(req.query.days || '365') || 365, 1), 365);
+    const accs = await ssGetAccounts(req.user.id, 'mercadolivre');
+    const acc = accs[0];
+    if (!acc) return res.status(404).json({ success:false, error:'Mercado Livre não conectado' });
 
-    if (!rows.length) {
-      return res.status(404).json({
-        success: false,
-        error: 'Conta Mercado Livre não conectada'
-      });
-    }
-
-    const acc = rows[0];
     const headers = { Authorization: `Bearer ${acc.access_token}` };
-
-    const days = Math.max(1, Math.min(Number(req.query.days || 60), 365));
     const since = new Date(Date.now() - days * 86400000).toISOString();
-
     const orders = [];
     const limit = 50;
     for (let page = 0; page < 20; page++) {
       const offset = page * limit;
       const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
         headers,
-        params: {
-          seller: acc.platform_shop_id,
-          sort: 'date_desc',
-          'order.date_created.from': since,
-          limit,
-          offset
-        }
+        params: { seller: acc.platform_shop_id, sort:'date_desc', 'order.date_created.from': since, limit, offset }
       });
-
       const arr = Array.isArray(data.results) ? data.results : [];
       orders.push(...arr);
-
       if (!arr.length || arr.length < limit) break;
       if (data.paging?.total && offset + limit >= Number(data.paging.total)) break;
     }
-
-    const sinais = orders.map(o => {
+    const seen = new Set();
+    const unique = orders.filter(o => { const id=String(o.id||''); if(!id || seen.has(id)) return false; seen.add(id); return true; });
+    const mapOrder = o => {
       const tags = Array.isArray(o.tags) ? o.tags : [];
       const payments = Array.isArray(o.payments) ? o.payments : [];
-      const pStatus = payments.map(p => String(p.status || '')).filter(Boolean);
-      const pDetails = payments.map(p => String(p.status_detail || '')).filter(Boolean);
-      const shippingStatus = String(o.shipping?.status || '').toLowerCase();
-      const logisticType = String(o.shipping?.logistic_type || '').toLowerCase();
-      const texto = [
-        o.status,
-        o.status_detail,
-        shippingStatus,
-        logisticType,
-        ...tags,
-        ...pStatus,
-        ...pDetails
-      ].join(' ').toLowerCase();
-
-      const hasReturnSignal = /(return|returned|devol|refund|refunded|chargeback|reimburs|not_delivered|claim|dispute|mediated)/i.test(texto);
-
+      const delivered = tags.includes('delivered');
+      const notDelivered = tags.includes('not_delivered');
+      const refunded = payments.some(p => /refunded|charged_back|chargeback|reimbursed|bpp_refunded|bpp_covered/i.test(`${p.status||''} ${p.status_detail||''}`));
+      const real_return = ssMLIsRealReturnFromOrder(o);
       return {
-        id: String(o.id),
-        platform_order_id: String(o.id),
-        status: o.status,
-        status_detail: o.status_detail || null,
+        id:String(o.id),
+        platform_order_id:String(o.id),
+        status:o.status,
+        status_detail:o.status_detail || null,
         tags,
-        shipping_id: o.shipping?.id || null,
-        shipping_status: o.shipping?.status || null,
-        logistic_type: o.shipping?.logistic_type || null,
-        date_created: o.date_created,
-        date_closed: o.date_closed || null,
-        total_amount: o.total_amount,
-        paid_amount: o.paid_amount,
-        payments: payments.map(p => ({
-          id: p.id,
-          status: p.status,
-          status_detail: p.status_detail,
-          total_paid_amount: p.total_paid_amount,
-          shipping_cost: p.shipping_cost
-        })),
-        has_return_signal: hasReturnSignal
+        shipping_id:o.shipping?.id || null,
+        date_created:o.date_created,
+        date_closed:o.date_closed || null,
+        total_amount:Number(o.total_amount || 0),
+        paid_amount:Number(o.paid_amount || 0),
+        payments:payments.map(p => ({ id:p.id, status:p.status, status_detail:p.status_detail, total_paid_amount:p.total_paid_amount, shipping_cost:p.shipping_cost })),
+        delivered,
+        not_delivered:notDelivered,
+        refunded,
+        real_return,
+        suspect_signal:notDelivered || refunded || String(o.status).toLowerCase()==='cancelled'
       };
-    });
-
-    let claims = null;
-    let claims_error = null;
-    const claimsAttempts = [];
-
-    async function tryClaims(name, params) {
-      try {
-        const r = await axios.get('https://api.mercadopago.com/post-purchase/v1/claims/search', {
-          headers,
-          params
-        });
-        claimsAttempts.push({
-          name,
-          ok: true,
-          status: r.status,
-          total: r.data?.paging?.total ?? r.data?.total ?? r.data?.results?.length ?? null,
-          params,
-          data: r.data
-        });
-        if (!claims) claims = r.data;
-      } catch (e) {
-        claimsAttempts.push({
-          name,
-          ok: false,
-          status: e.response?.status || null,
-          params,
-          error: e.response?.data || e.message
-        });
-        claims_error = e.response?.data || e.message;
-      }
-    }
-
-    await tryClaims('claims seller_id + data', {
-      seller_id: acc.platform_shop_id,
-      limit: 50,
-      offset: 0,
-      'claim.date_created.from': since
-    });
-
-    await tryClaims('claims type return', {
-      seller_id: acc.platform_shop_id,
-      type: 'return',
-      limit: 50,
-      offset: 0
-    });
-
-    const devolucoes = sinais.filter(x => x.has_return_signal);
-
+    };
+    const signals = unique.map(mapOrder);
+    const devolucoes_reais = signals.filter(x => x.real_return);
+    const suspeitas = signals.filter(x => x.suspect_signal && !x.real_return);
     res.json({
-      success: true,
-      account: {
-        shop_name: acc.shop_name,
-        seller_id: acc.platform_shop_id
-      },
-      periodo: {
-        days,
-        from: since,
-        to: new Date().toISOString()
-      },
-      total_pedidos_consultados: orders.length,
-      total_devolucoes_detectadas: devolucoes.length,
-      devolucoes,
-      amostra_sinais_pedidos: sinais.slice(0, 50),
-      claims,
-      claims_error,
-      claims_attempts: claimsAttempts,
-      observacao: devolucoes.length
-        ? 'Foram encontrados sinais de devolução nos pedidos consultados.'
-        : 'Não encontrei sinal de devolução em orders/search. Se claims vier 403 PolicyAgent, seu app/token não tem permissão para a API de claims.'
+      success:true,
+      account:{ shop_name:acc.shop_name, seller_id:acc.platform_shop_id },
+      periodo:{ days, from:since, to:new Date().toISOString() },
+      total_pedidos_consultados:unique.length,
+      total_devolucoes_reais:devolucoes_reais.length,
+      total_sinais_suspeitos:suspeitas.length,
+      devolucoes:devolucoes_reais,
+      suspeitos:suspeitas.slice(0,200),
+      observacao:'Devolução real = entregue + reembolso/chargeback, ou cancelado após entregue. not_delivered sozinho é só sinal suspeito e não entra como devolução real.'
     });
-  } catch (e) {
-    res.status(500).json({
-      success: false,
-      error: e.response?.data || e.message
-    });
+  } catch(e) {
+    res.status(500).json({ success:false, error:e.response?.data || e.message });
   }
 }
 
-app.get('/debug/returns', auth, debugReturnsHandler);
-app.get('/api/debug/returns', auth, debugReturnsHandler);
-app.get('/debug/returns-last-month', auth, debugReturnsHandler);
-
-// Alias sem /api para o debug de pedido ML, seguindo o padrão /debug/...
-if (typeof debugMLOrderAliasRegistered === 'undefined') {
-  var debugMLOrderAliasRegistered = true;
-  app.get('/debug/ml-order/:id', auth, async (req, res) => {
-    try {
-      const orderId = req.params.id;
-      const { rows } = await db.query(
-        `SELECT * FROM marketplace_accounts
-         WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND access_token IS NOT NULL
-         LIMIT 1`,
-        [req.user.id]
-      );
-      if (!rows.length) return res.status(404).json({ success:false, error:'Conta Mercado Livre não conectada' });
-      const acc = rows[0];
-      let token = acc.access_token;
-      if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 5*60*1000)) {
-        const newToken = await refreshMLToken(acc);
-        if (newToken) token = newToken;
-      }
-      const headers = { Authorization: `Bearer ${token}` };
-      const { data: order } = await axios.get(`https://api.mercadolibre.com/orders/${orderId}`, { headers });
-      const shipmentId = order?.shipping?.id || order?.shipping?.shipment_id || null;
-      let shipment = null;
-      let costs = null;
-      if (shipmentId) {
-        try { shipment = (await axios.get(`https://api.mercadolibre.com/shipments/${shipmentId}`, { headers })).data; }
-        catch (e) { shipment = { error: e.response?.data || e.message }; }
-        try { costs = (await axios.get(`https://api.mercadolibre.com/shipments/${shipmentId}/costs`, { headers })).data; }
-        catch (e) { costs = { error: e.response?.data || e.message }; }
-      }
-      const totalAmount = Number(order?.total_amount || 0);
-      const paidAmount = Number(order?.paid_amount || order?.payments?.[0]?.total_paid_amount || 0);
-      const shipping = resolveMLShippingFee({ order, shipment, shipmentCosts: costs, totalAmount, paidAmount });
-      res.json({
-        success: true,
-        account: { shop_name: acc.shop_name, seller_id: acc.platform_shop_id },
-        order,
-        shipment,
-        costs,
-        resumo: {
-          order_id: orderId,
-          shipping_id: shipmentId,
-          order_total: totalAmount,
-          paid_amount: paidAmount,
-          frete_escolhido: shipping.value,
-          fonte_frete: shipping.source,
-          sender_cost: shipping.sender_cost,
-          shipment_costs_fee: shipping.costs_endpoint_fee,
-          payment_shipping_fee: shipping.payment_shipping_fee,
-          order_shipping_fee: shipping.order_shipping_fee,
-          shipment_shipping_fee: shipping.shipment_cost,
-          paid_minus_total: shipping.paid_diff,
-          senders: costs?.senders || null,
-          receivers: costs?.receivers || null,
-          marketplace: costs?.marketplace || null
-        }
-      });
-    } catch (e) {
-      res.status(500).json({ success:false, error: e.response?.data || e.message });
-    }
-  });
-}
+app.get('/debug/returns', auth, ssDebugReturnsHandler);
+app.get('/api/debug/returns', auth, ssDebugReturnsHandler);
 
 app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:'5.0' }));
 
