@@ -4043,7 +4043,7 @@ app.get('/api/magalu/labels/combo-zebra', auth, async (req, res) => {
 
 
 // ── DEBUG ML: pedido + shipment + costs via backend (evita CORS no navegador) ──
-app.get('/api/debug/ml-order/:id', auth, async (req, res) => {
+const ssDebugMlOrderHandler = async (req, res) => {
   try {
     const orderId = String(req.params.id || '').trim();
     if (!orderId) return res.status(400).json({ error: 'ID do pedido obrigatório' });
@@ -4286,69 +4286,3 @@ app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v5.2 rodando na porta ${PORT}`));  
-
-window.ALL_RETURNS = window.ALL_RETURNS || [];
-
-function filterReturns(){
-
-  const el =
-    document.getElementById('returns-search');
-
-  const value =
-    (el?.value || '')
-    .toLowerCase()
-    .trim();
-
-  document
-    .querySelectorAll('#returns-body tr')
-    .forEach(tr=>{
-
-      const txt =
-        (
-          tr.getAttribute('data-search')
-          || ''
-        ).toLowerCase();
-
-      tr.style.display =
-        txt.includes(value)
-        ? ''
-        : 'none';
-
-    });
-
-}
-
-function openReturnDetails(item){
-
-  const body =
-    document.getElementById('od-body');
-
-  if(!body) return;
-
-  openMo('mo-order');
-
-  body.innerHTML = `
-    <div class="od-block">
-
-      <div class="od-block-title">
-        <i class="ti ti-package"></i>
-        Detalhes completos da devolução
-      </div>
-
-      <pre style="
-        white-space:pre-wrap;
-        overflow:auto;
-        max-height:70vh;
-        font-size:11px;
-        background:var(--bg2);
-        padding:14px;
-        border-radius:12px;
-        border:1px solid var(--border);
-        color:var(--txt);
-      ">${JSON.stringify(item,null,2)}</pre>
-
-    </div>
-  `;
-
-}
-
