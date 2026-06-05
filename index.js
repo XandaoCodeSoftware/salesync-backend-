@@ -4008,18 +4008,39 @@ app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v5.2 rodando na porta ${PORT}`));  
 
-// ===== ETIQUETAS MERCADO LIVRE =====
-app.post('/api/ml/labels', auth, async (req,res)=>{
+// ===== SKU NA DANFE SIMPLIFICADA MAGALU =====
+// PROCURE NO PDFKIT:
+// doc.text(produtoNome ...
+// E ADICIONE LOGO ABAIXO:
+
+doc.fontSize(8);
+doc.fillColor('#444');
+doc.text(`SKU: ${item?.sku || item?.seller_sku || order?.sku || '-'}`, 50, currentY + 12);
+
+
+
+// ===== GERAR ETIQUETAS ML EM MASSA =====
+app.post('/api/ml/generate-labels', auth, async (req,res)=>{
+
   try{
 
-    const { order_ids=[] } = req.body;
+    const { shipment_ids=[] } = req.body;
+
+    if(!shipment_ids.length){
+      return res.status(400).json({
+        error:'shipment_ids vazio'
+      });
+    }
 
     const { rows } = await db.query(
-      `SELECT * FROM marketplace_accounts
-       WHERE user_id=$1
-       AND platform='mercadolivre'
-       AND is_active=true
-       LIMIT 1`,
+      `
+      SELECT *
+      FROM marketplace_accounts
+      WHERE user_id=$1
+      AND platform='mercadolivre'
+      AND is_active=true
+      LIMIT 1
+      `,
       [req.user.id]
     );
 
@@ -4031,63 +4052,56 @@ app.post('/api/ml/labels', auth, async (req,res)=>{
 
     const acc = rows[0];
 
-    const headers = {
-      Authorization:`Bearer ${acc.access_token}`
-    };
-
-    const pdfs = [];
-
-    for(const orderId of order_ids){
-
-      try{
-
-        const { data:order } = await axios.get(
-          `https://api.mercadolibre.com/orders/${orderId}`,
-          { headers }
-        );
-
-        const shipmentId =
-          order?.shipping?.id;
-
-        if(!shipmentId) continue;
-
-        const { data:file } = await axios.get(
-          `https://api.mercadolibre.com/shipment_labels?shipment_ids=${shipmentId}&response_type=pdf`,
-          {
-            headers,
-            responseType:'arraybuffer'
-          }
-        );
-
-        pdfs.push(Buffer.from(file));
-
-      }catch(e){
-        console.log('[ML LABEL]', orderId, e.message);
+    const { data } = await axios.get(
+      `https://api.mercadolibre.com/shipment_labels`,
+      {
+        params:{
+          shipment_ids:shipment_ids.join(','),
+          response_type:'pdf'
+        },
+        responseType:'arraybuffer',
+        headers:{
+          Authorization:`Bearer ${acc.access_token}`
+        }
       }
-
-    }
-
-    if(!pdfs.length){
-      return res.status(400).json({
-        error:'Nenhuma etiqueta gerada'
-      });
-    }
+    );
 
     res.setHeader('Content-Type','application/pdf');
-    res.send(Buffer.concat(pdfs));
+    res.setHeader(
+      'Content-Disposition',
+      'inline; filename="etiquetas-ml.pdf"'
+    );
+
+    res.send(Buffer.from(data));
 
   }catch(e){
 
+    console.log('[ML LABELS]',e.response?.data || e.message);
+
     res.status(500).json({
-      error:e.message
+      error:e.response?.data || e.message
     });
 
   }
+
 });
 
 
 
-// SKU DANFE MAGALU:
-// dentro do drawText da DANFE simplificada:
-// doc.text(`SKU: ${item.sku || item.seller_sku || '-'}`, x, y);
+// ===== POSSIVEIS IMPRESSÕES =====
+// TROCAR:
+// await Promise.all(shipmentIds.map(...))
+
+// POR:
+await ssMapLimit(shipmentIds, 15, async (id)=>{
+
+  // processamento
+
+});
+
+// ISSO EVITA:
+// - timeout
+// - travamento render
+// - demora extrema
+// - rate limit ML
 
