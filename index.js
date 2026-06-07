@@ -4610,16 +4610,41 @@ PREVISÃO DO MÊS ATUAL:
 
 Seja conciso, use números reais quando relevante, e foque em ações práticas que o vendedor pode tomar.`;
 
+    // Se o frontend mandou dados da página (pedidos), anexa ao prompt
+    let userContent = message;
+    if (req.body.page_data && Array.isArray(req.body.page_data) && req.body.page_data.length) {
+      const rows = req.body.page_data.slice(0, 300); // limite de segurança
+      const csvHeader = 'ID,Plataforma,Conta,Produto,SKU,Data,Status,Tipo,Qtde,Valor,Tarifa,Frete,Imposto,Custo,Lucro';
+      const csvRows = rows.map(o => [
+        o.platform_order_id||'',
+        o.platform||'',
+        o.shop_name||'',
+        (o.item_title||'').replace(/,/g,' '),
+        o.item_sku||'',
+        o.order_date?new Date(o.order_date).toLocaleDateString('pt-BR'):'',
+        o.status||'',
+        o.fulfillment_type||'',
+        o.quantity||1,
+        Number(o.total_amount||0).toFixed(2),
+        Number(o.platform_fee||0).toFixed(2),
+        Number(o.shipping_fee||0).toFixed(2),
+        Number(o.tax_amount||0).toFixed(2),
+        Number(o.total_cost||0).toFixed(2),
+        Number(o.profit||0).toFixed(2)
+      ].join(',')).join('\n');
+      userContent = `${message}\n\n[DADOS DOS PEDIDOS DA TELA - ${rows.length} registros]\n\`\`\`csv\n${csvHeader}\n${csvRows}\n\`\`\`\n\nUse esses dados para responder. Se pedir planilha, gere o CSV completo em um bloco \`\`\`csv ... \`\`\`.`;
+    }
+
     const messages = [
       { role: 'system', content: systemPrompt },
       ...history.slice(-10).map(h => ({ role: h.role, content: h.content })),
-      { role: 'user', content: message }
+      { role: 'user', content: userContent }
     ];
 
     const { data } = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: 'gpt-4o-mini',
       messages,
-      max_tokens: 600,
+      max_tokens: req.body.page_data?.length ? 3000 : 600,
       temperature: 0.7
     }, {
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }
