@@ -4777,32 +4777,75 @@ ${ctx.produtos_sem_custo_cadastrado?.length ? ctx.produtos_sem_custo_cadastrado.
 📦 PRODUTOS: ${ctx.produtos_ativos} ativos de ${ctx.produtos_cadastrados_total} cadastrados
 =======================================================
 
-IMPORTANTE: Se algum produto tem margem negativa ou próxima de zero, mencione proativamente.
-Se pedirem planilha/CSV, gere em bloco \`\`\`csv ... \`\`\`.`;
+REGRAS IMPORTANTES:
+1. Use SEMPRE os números reais acima — NUNCA invente ou estime valores que não estão aqui.
+2. Se algum produto tem margem negativa ou muito baixa (<10%), mencione proativamente.
+3. Se pedirem planilha, exportação, CSV ou tabela: OBRIGATORIAMENTE gere o CSV completo com os dados reais fornecidos em bloco \`\`\`csv\n...\`\`\`. Não recuse, não dê template — use os dados reais.
+4. Responda sempre em português brasileiro, de forma direta e prática.
+5. Quando falar de lucro, deixe claro que é lucro REAL (após custo do produto). Se produto não tem custo cadastrado, avise que o lucro pode estar incorreto.`;
 
-    // Se o frontend mandou dados da página (pedidos), anexa ao prompt
+    // Detecta intenção de planilha/exportação para buscar dados completos do banco
+    const wantsCsv = /planilha|excel|csv|exportar|exporta|listar.*pedidos|todos.*pedidos|gera.*pedidos|tabela.*pedidos/i.test(message);
     let userContent = message;
-    if (req.body.page_data && Array.isArray(req.body.page_data) && req.body.page_data.length) {
-      const rows = req.body.page_data.slice(0, 300); // limite de segurança
-      const csvHeader = 'ID,Plataforma,Conta,Produto,SKU,Data,Status,Tipo,Qtde,Valor,Tarifa,Frete,Imposto,Custo,Lucro';
-      const csvRows = rows.map(o => [
-        o.platform_order_id||'',
-        o.platform||'',
+
+    if (wantsCsv) {
+      // Busca pedidos reais do banco com custo e lucro calculados
+      const period = req.body.period_days || 30;
+      const { rows: pedidos } = await db.query(`
+        SELECT
+          o.platform_order_id, o.platform, o.shop_name, o.item_title, o.item_sku,
+          o.order_date, o.status, o.fulfillment_type, o.quantity,
+          o.total_amount, o.platform_fee, o.shipping_fee, o.tax_amount,
+          COALESCE(p.cost, 0) AS custo_unitario,
+          COALESCE(p.cost, 0) * o.quantity AS custo_total,
+          ROUND(o.total_amount - o.platform_fee - o.shipping_fee - o.tax_amount - COALESCE(p.cost,0)*o.quantity, 2) AS lucro_real,
+          CASE WHEN o.total_amount > 0 THEN
+            ROUND((o.total_amount - o.platform_fee - o.shipping_fee - o.tax_amount - COALESCE(p.cost,0)*o.quantity) / o.total_amount * 100, 1)
+          ELSE 0 END AS margem_pct
+        FROM marketplace_orders o
+        LEFT JOIN products p ON p.user_id=o.user_id
+          AND LOWER(TRIM(p.sku))=LOWER(TRIM(o.item_sku))
+          AND (LOWER(p.platform)=LOWER(o.platform) OR LOWER(p.platform)='geral')
+        WHERE o.user_id=$1 AND o.order_date >= NOW() - INTERVAL '${Math.min(period,90)} days'
+        ORDER BY o.order_date DESC
+        LIMIT 500`, [req.user.id]);
+
+      const csvHeader = 'ID Pedido,Plataforma,Conta,Produto,SKU,Data,Status,Tipo,Qtde,Valor (R$),Tarifa (R$),Frete (R$),Imposto (R$),Custo Unit. (R$),Custo Total (R$),Lucro Real (R$),Margem (%)';
+      const csvRows = pedidos.map(o => [
+        o.platform_order_id,
+        o.platform,
         o.shop_name||'',
-        (o.item_title||'').replace(/,/g,' '),
+        `"${(o.item_title||'').replace(/"/g,"'")}"`,
         o.item_sku||'',
-        o.order_date?new Date(o.order_date).toLocaleDateString('pt-BR'):'',
+        o.order_date ? new Date(o.order_date).toLocaleDateString('pt-BR') : '',
         o.status||'',
-        o.fulfillment_type||'',
+        o.fulfillment_type||'normal',
         o.quantity||1,
         Number(o.total_amount||0).toFixed(2),
         Number(o.platform_fee||0).toFixed(2),
         Number(o.shipping_fee||0).toFixed(2),
         Number(o.tax_amount||0).toFixed(2),
-        Number(o.total_cost||0).toFixed(2),
-        Number(o.profit||0).toFixed(2)
+        Number(o.custo_unitario||0).toFixed(2),
+        Number(o.custo_total||0).toFixed(2),
+        Number(o.lucro_real||0).toFixed(2),
+        Number(o.margem_pct||0).toFixed(1)
       ].join(',')).join('\n');
-      userContent = `${message}\n\n[DADOS DOS PEDIDOS DA TELA - ${rows.length} registros]\n\`\`\`csv\n${csvHeader}\n${csvRows}\n\`\`\`\n\nUse esses dados para responder. Se pedir planilha, gere o CSV completo em um bloco \`\`\`csv ... \`\`\`.`;
+
+      userContent = `${message}\n\n[PEDIDOS REAIS DO BANCO — últimos ${period} dias — ${pedidos.length} registros]\n\`\`\`csv\n${csvHeader}\n${csvRows}\n\`\`\`\n\nGere o CSV completo acima exatamente como está (ou filtre/reordene conforme o pedido do usuário). Não substitua por template — esses são os dados REAIS.`;
+    } else if (req.body.page_data && Array.isArray(req.body.page_data) && req.body.page_data.length) {
+      // Fallback: frontend mandou dados da tela
+      const rows = req.body.page_data.slice(0, 300);
+      const csvHeader = 'ID,Plataforma,Conta,Produto,SKU,Data,Status,Tipo,Qtde,Valor,Tarifa,Frete,Imposto,Custo,Lucro';
+      const csvRows = rows.map(o => [
+        o.platform_order_id||'', o.platform||'', o.shop_name||'',
+        `"${(o.item_title||'').replace(/"/g,"'")}"`, o.item_sku||'',
+        o.order_date?new Date(o.order_date).toLocaleDateString('pt-BR'):'',
+        o.status||'', o.fulfillment_type||'', o.quantity||1,
+        Number(o.total_amount||0).toFixed(2), Number(o.platform_fee||0).toFixed(2),
+        Number(o.shipping_fee||0).toFixed(2), Number(o.tax_amount||0).toFixed(2),
+        Number(o.total_cost||0).toFixed(2), Number(o.profit||0).toFixed(2)
+      ].join(',')).join('\n');
+      userContent = `${message}\n\n[DADOS DA TELA — ${rows.length} registros]\n\`\`\`csv\n${csvHeader}\n${csvRows}\n\`\`\``;
     }
 
     const messages = [
@@ -4814,7 +4857,7 @@ Se pedirem planilha/CSV, gere em bloco \`\`\`csv ... \`\`\`.`;
     const { data } = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: 'gpt-4o-mini',
       messages,
-      max_tokens: req.body.page_data?.length ? 3000 : 600,
+      max_tokens: wantsCsv ? 4000 : 700,
       temperature: 0.7
     }, {
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }
