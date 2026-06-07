@@ -1470,6 +1470,54 @@ async function ssSyncOrdersForUser(userId, platform=null, days=45) {
   return all;
 }
 
+// Sync rápido: só últimas 48h, sem buscar shipment details pesados.
+// Usado pelo auto-refresh do frontend pra detectar pedidos novos sem travar.
+async function ssQuickSyncOrdersForUser(userId, platform=null) {
+  const accounts = await ssGetAccounts(userId, platform);
+  let count = 0;
+  for (const acc of accounts) {
+    try {
+      let orders = [];
+      if (acc.platform === 'mercadolivre') {
+        let token = acc.access_token;
+        if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 5*60*1000)) {
+          const nt = await refreshMLToken(acc);
+          if (nt) token = nt;
+        }
+        const since = new Date(Date.now() - 2 * 86400000).toISOString();
+        const headers = { Authorization: `Bearer ${token}` };
+        const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
+          params: { seller: acc.platform_shop_id, sort: 'date_desc', 'order.date_created.from': since, limit: 50, offset: 0 },
+          headers
+        });
+        const raw = Array.isArray(data.results) ? data.results : [];
+        const statusMap = { paid:'paid', payment_required:'pending', pending:'pending', confirmed:'paid', shipped:'shipped', delivered:'delivered', cancelled:'cancelled', invalid:'cancelled' };
+        orders = raw.map(o => {
+          const item = o.order_items?.[0] || {};
+          return {
+            id: String(o.id), platform: 'mercadolivre', platform_order_id: String(o.id),
+            shipping_id: o.shipping?.id || null, tags: Array.isArray(o.tags) ? o.tags : [],
+            shop_name: acc.shop_name, status: statusMap[o.status] || o.status,
+            buyer_name: o.buyer?.nickname || '', buyer_id: o.buyer?.id || null,
+            seller_id: o.seller?.id || acc.platform_shop_id,
+            total_amount: parseFloat(o.total_amount || 0), paid_amount: parseFloat(o.paid_amount || 0),
+            platform_fee: (o.order_items||[]).reduce((s,it)=>s+parseFloat(it.sale_fee||0)*parseFloat(it.quantity||1),0),
+            shipping_fee: 0, item_title: item?.item?.title || '', item_sku: item?.item?.seller_sku || '',
+            item_image: null, quantity: parseFloat(item?.quantity || 1), order_date: o.date_created
+          };
+        });
+      } else if (acc.platform === 'shopee') {
+        orders = await fetchShopee(acc, 2);
+      } else if (acc.platform === 'magalu') {
+        orders = await fetchMagalu(acc, 2);
+      }
+      if (orders.length) { await ssUpsertOrders(userId, acc.id, orders); count += orders.length; }
+      await db.query(`UPDATE marketplace_accounts SET last_sync_at=NOW() WHERE id=$1`, [acc.id]);
+    } catch(e) { console.error('[quick sync]', acc.platform, e.response?.data || e.message); }
+  }
+  return count;
+}
+
 async function ssUpsertReturn(userId, acc, r) {
   const platform = normPlatform(r.platform || acc.platform);
   const externalId = String(r.external_return_id || r.id || r.claim_id || r.ticket_return_id || '').trim();
@@ -1672,6 +1720,15 @@ app.get('/api/sync/:platform', auth, async (req, res) => {
     const platform = req.params.platform === 'all' ? null : req.params.platform;
     const orders = await ssSyncOrdersForUser(req.user.id, platform, 45);
     res.json({ success: true, stored: orders.length });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Sync rápido: só últimas 48h, resposta em ~1s. Usado pelo auto-refresh do frontend.
+app.get('/api/sync/quick', auth, async (req, res) => {
+  try {
+    const platform = req.query.platform || null;
+    const count = await ssQuickSyncOrdersForUser(req.user.id, platform);
+    res.json({ success: true, upserted: count });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -4217,62 +4274,113 @@ async function ssDebugReturnsHandler(req, res) {
     const acc = accs[0];
     if (!acc) return res.status(404).json({ success:false, error:'Mercado Livre não conectado' });
 
-    const headers = { Authorization: `Bearer ${acc.access_token}` };
-    const since = new Date(Date.now() - days * 86400000).toISOString();
-    const orders = [];
-    const limit = 50;
-    for (let page = 0; page < 20; page++) {
-      const offset = page * limit;
-      const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
-        headers,
-        params: { seller: acc.platform_shop_id, sort:'date_desc', 'order.date_created.from': since, limit, offset }
-      });
-      const arr = Array.isArray(data.results) ? data.results : [];
-      orders.push(...arr);
-      if (!arr.length || arr.length < limit) break;
-      if (data.paging?.total && offset + limit >= Number(data.paging.total)) break;
+    let token = acc.access_token;
+    if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 5*60*1000)) {
+      const nt = await refreshMLToken(acc);
+      if (nt) token = nt;
     }
-    const seen = new Set();
-    const unique = orders.filter(o => { const id=String(o.id||''); if(!id || seen.has(id)) return false; seen.add(id); return true; });
-    const mapOrder = o => {
-      const tags = Array.isArray(o.tags) ? o.tags : [];
-      const payments = Array.isArray(o.payments) ? o.payments : [];
-      const delivered = tags.includes('delivered');
-      const notDelivered = tags.includes('not_delivered');
-      const refunded = payments.some(p => /refunded|charged_back|chargeback|reimbursed|bpp_refunded|bpp_covered/i.test(`${p.status||''} ${p.status_detail||''}`));
-      const real_return = ssMLIsRealReturnFromOrder(o);
-      return {
-        id:String(o.id),
-        platform_order_id:String(o.id),
-        status:o.status,
-        status_detail:o.status_detail || null,
-        tags,
-        shipping_id:o.shipping?.id || null,
-        date_created:o.date_created,
-        date_closed:o.date_closed || null,
-        total_amount:Number(o.total_amount || 0),
-        paid_amount:Number(o.paid_amount || 0),
-        payments:payments.map(p => ({ id:p.id, status:p.status, status_detail:p.status_detail, total_paid_amount:p.total_paid_amount, shipping_cost:p.shipping_cost })),
-        delivered,
-        not_delivered:notDelivered,
-        refunded,
-        real_return,
-        suspect_signal:notDelivered || refunded || String(o.status).toLowerCase()==='cancelled'
+
+    const headers = { Authorization: `Bearer ${token}` };
+    const since = new Date(Date.now() - days * 86400000).toISOString();
+
+    // Tenta primeiro o endpoint de claims/post-purchase que retorna só pedidos com disputa/devolução real.
+    // Muito mais rápido e preciso que varrer orders/search inteiro.
+    let claimsOk = false;
+    let claimsList = [];
+    try {
+      const claimsRes = await axios.get('https://api.mercadolibre.com/post-purchase/v1/claims/search', {
+        headers,
+        params: { seller_id: acc.platform_shop_id, limit: 50, sort: 'date_created:desc' }
+      });
+      const raw = claimsRes.data?.data || claimsRes.data?.results || [];
+      if (Array.isArray(raw)) {
+        claimsList = raw;
+        claimsOk = true;
+      }
+    } catch(e) {
+      console.log('[debug/returns] claims endpoint status:', e.response?.status, '— fallback para orders/search');
+    }
+
+    let devolucoes_reais = [];
+    let suspeitas = [];
+    let total_pedidos_consultados = 0;
+
+    if (claimsOk && claimsList.length >= 0) {
+      // Mapeia claims do ML para o formato esperado pelo frontend
+      devolucoes_reais = claimsList.map(c => {
+        const payments = Array.isArray(c.resolution?.parties) ? [] : [];
+        return {
+          id: String(c.id || c.claim_id),
+          platform_order_id: String(c.resource_id || c.order_id || ''),
+          status: c.status || 'unknown',
+          status_detail: c.stage || null,
+          tags: [],
+          date_created: c.date_created,
+          date_closed: c.date_last_updated || null,
+          total_amount: Number(c.resolution?.amount || 0),
+          paid_amount: Number(c.resolution?.amount || 0),
+          payments,
+          delivered: false,
+          refunded: true,
+          real_return: true,
+          claim_type: c.type || 'claim',
+          claim_reason: c.reason_id || c.reason || c.stage || '—',
+          item_title: c.item?.title || c.items?.[0]?.title || '—',
+          buyer: { nickname: c.players?.find(p=>p.role==='complainant')?.user_id || '—' },
+          suspect_signal: false
+        };
+      });
+      total_pedidos_consultados = claimsList.length;
+    } else {
+      // Fallback: varre orders/search e filtra localmente (lento mas funcional)
+      const orders = [];
+      const limit = 50;
+      for (let page = 0; page < 20; page++) {
+        const offset = page * limit;
+        const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
+          headers,
+          params: { seller: acc.platform_shop_id, sort:'date_desc', 'order.date_created.from': since, limit, offset }
+        });
+        const arr = Array.isArray(data.results) ? data.results : [];
+        orders.push(...arr);
+        if (!arr.length || arr.length < limit) break;
+        if (data.paging?.total && offset + limit >= Number(data.paging.total)) break;
+      }
+      const seen = new Set();
+      const unique = orders.filter(o => { const id=String(o.id||''); if(!id || seen.has(id)) return false; seen.add(id); return true; });
+      total_pedidos_consultados = unique.length;
+      const mapOrder = o => {
+        const tags = Array.isArray(o.tags) ? o.tags : [];
+        const payments = Array.isArray(o.payments) ? o.payments : [];
+        const delivered = tags.includes('delivered');
+        const notDelivered = tags.includes('not_delivered');
+        const refunded = payments.some(p => /refunded|charged_back|chargeback|reimbursed|bpp_refunded|bpp_covered/i.test(`${p.status||''} ${p.status_detail||''}`));
+        const real_return = ssMLIsRealReturnFromOrder(o);
+        return {
+          id:String(o.id), platform_order_id:String(o.id), status:o.status, status_detail:o.status_detail || null,
+          tags, shipping_id:o.shipping?.id || null, date_created:o.date_created, date_closed:o.date_closed || null,
+          total_amount:Number(o.total_amount || 0), paid_amount:Number(o.paid_amount || 0),
+          payments:payments.map(p => ({ id:p.id, status:p.status, status_detail:p.status_detail, total_paid_amount:p.total_paid_amount, shipping_cost:p.shipping_cost })),
+          delivered, not_delivered:notDelivered, refunded, real_return,
+          suspect_signal:notDelivered || refunded || String(o.status).toLowerCase()==='cancelled'
+        };
       };
-    };
-    const signals = unique.map(mapOrder);
-    const devolucoes_reais = signals.filter(x => x.real_return);
-    const suspeitas = signals.filter(x => x.suspect_signal && !x.real_return);
+      const signals = unique.map(mapOrder);
+      devolucoes_reais = signals.filter(x => x.real_return);
+      suspeitas = signals.filter(x => x.suspect_signal && !x.real_return);
+    }
+
     res.json({
       success:true,
+      source: claimsOk ? 'claims_api' : 'orders_search_fallback',
       account:{ shop_name:acc.shop_name, seller_id:acc.platform_shop_id },
       periodo:{ days, from:since, to:new Date().toISOString() },
-      total_pedidos_consultados:unique.length,
+      total_pedidos_consultados,
       total_devolucoes_reais:devolucoes_reais.length,
       total_sinais_suspeitos:suspeitas.length,
       devolucoes:devolucoes_reais,
       suspeitos:suspeitas.slice(0,200),
-      observacao:'Devolução real = entregue + reembolso/chargeback, ou cancelado após entregue. not_delivered sozinho é só sinal suspeito e não entra como devolução real.'
+      observacao:'Devolução real = claims/disputas abertas no ML (via post-purchase API), ou entregue + reembolso/chargeback nos pedidos.'
     });
   } catch(e) {
     res.status(500).json({ success:false, error:e.response?.data || e.message });
