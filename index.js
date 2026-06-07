@@ -559,13 +559,13 @@ function resolveMLShippingFee({ order, shipment, shipmentCosts, totalAmount, pai
   ]);
   const paidDiff = Math.max(0, Number(paidAmount || 0) - Number(totalAmount || 0));
 
-  // SalesSync: no debug real o frete do ML apareceu em payments[].shipping_cost.
-  // Por isso a prioridade agora é pagamento > shipment/costs > diferença pago-total.
+  // Prioridade: custo real do vendedor (senders.cost da API /shipments/{id}/costs) primeiro.
+  // payment_shipping_cost = o que o comprador pagou, pode ser subsidiado ou diferente do custo do vendedor.
   const candidates = [
-    ['payment_shipping_cost', paymentShippingFee],
     ['shipment_costs_senders_cost', senderCost],
     ['shipment_costs_endpoint', costsEndpointFee],
     ['shipment_shipping_option', shipmentCost],
+    ['payment_shipping_cost', paymentShippingFee],
     ['order_shipping_cost', orderShippingFee],
     ['paid_minus_total', paidDiff],
   ];
