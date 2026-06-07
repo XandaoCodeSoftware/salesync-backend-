@@ -3905,6 +3905,31 @@ app.post('/api/additional-revenues', auth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+app.patch('/api/additional-revenues/:id', auth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'ID inválido' });
+    const name = req.body.name ? String(req.body.name).trim() : null;
+    const amount = req.body.amount != null ? Math.max(0, Number(String(req.body.amount).replace(',', '.')) || 0) : null;
+    const recurring = req.body.recurring != null ? Boolean(req.body.recurring) : null;
+    const starts_at = req.body.starts_at ? String(req.body.starts_at) : null;
+    const sets = [], vals = [id, req.user.id];
+    if (name) { sets.push(`name=$${vals.length+1}`); vals.push(name); }
+    if (amount != null) { sets.push(`amount=$${vals.length+1}`); vals.push(amount); }
+    if (recurring != null) { sets.push(`recurring=$${vals.length+1}`); vals.push(recurring); }
+    if (starts_at) { sets.push(`starts_at=$${vals.length+1}`); vals.push(starts_at); }
+    if (!sets.length) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+    sets.push(`updated_at=NOW()`);
+    const { rows } = await db.query(
+      `UPDATE additional_revenues SET ${sets.join(',')} WHERE id=$1 AND user_id=$2 AND is_active=true RETURNING id, name, amount, recurring, starts_at`,
+      vals
+    );
+    Object.keys(CACHE).forEach(k => { if (k.startsWith(req.user.id)) delete CACHE[k]; });
+    if (!rows.length) return res.status(404).json({ error: 'Rendimento não encontrado' });
+    res.json({ success: true, item: rows[0] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.delete('/api/additional-revenues/:id', auth, async (req, res) => {
   try {
     const id = Number(req.params.id);
