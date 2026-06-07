@@ -4494,81 +4494,218 @@ app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:
 // ── AI ASSISTANT ──
 async function ssGetAiContext(userId) {
   try {
-    const [ordersRes, returnsRes, productsRes] = await Promise.all([
+    const hoje = new Date();
+    const inicioMes = new Date(hoje.getFullYear(), hoje.getMonth(), 1).toISOString();
+    const inicio30 = new Date(Date.now() - 30 * 86400000).toISOString();
+    const inicio90 = new Date(Date.now() - 90 * 86400000).toISOString();
+
+    const [ordersRes, returnsRes, productsRes, mesPassadoRes, goalRes] = await Promise.all([
+      // Pedidos dos últimos 90 dias com JOIN nos custos de produto
       db.query(`
-        SELECT platform, status, total_amount, platform_fee, shipping_fee, tax_amount,
-               item_title, item_sku, order_date, quantity,
-               COALESCE(total_amount - platform_fee - shipping_fee - tax_amount, 0) as estimated_profit
-        FROM marketplace_orders
-        WHERE user_id=$1 AND order_date >= NOW() - INTERVAL '30 days'
-        ORDER BY order_date DESC LIMIT 500`, [userId]),
+        SELECT
+          o.platform, o.platform_order_id, o.status, o.shop_name,
+          o.total_amount, o.paid_amount, o.platform_fee, o.shipping_fee, o.tax_amount,
+          o.item_title, o.item_sku, o.order_date, o.quantity, o.fulfillment_type,
+          COALESCE(p.cost, 0) AS product_cost,
+          COALESCE(p.cost, 0) * o.quantity AS total_product_cost,
+          ROUND(
+            o.total_amount
+            - o.platform_fee
+            - o.shipping_fee
+            - o.tax_amount
+            - COALESCE(p.cost, 0) * o.quantity
+          , 2) AS lucro_real
+        FROM marketplace_orders o
+        LEFT JOIN products p
+          ON p.user_id = o.user_id
+          AND LOWER(TRIM(p.sku)) = LOWER(TRIM(o.item_sku))
+          AND (LOWER(p.platform) = LOWER(o.platform) OR LOWER(p.platform) = 'geral')
+        WHERE o.user_id = $1
+          AND o.order_date >= $2
+        ORDER BY o.order_date DESC
+        LIMIT 1000`, [userId, inicio90]),
+
+      // Devoluções dos últimos 90 dias
       db.query(`
-        SELECT platform, resolution_type, ml_protected, return_shipping_cost, return_fee,
-               lost_product_cost, return_total_cost, reason, status
+        SELECT platform, resolution_type, ml_protected, return_shipping_cost,
+               return_fee, lost_product_cost, return_total_cost, reason, status,
+               platform_order_id, updated_at
         FROM marketplace_returns
-        WHERE user_id=$1 AND updated_at >= NOW() - INTERVAL '30 days'`, [userId]),
+        WHERE user_id=$1 AND updated_at >= $2`, [userId, inicio90]),
+
+      // Produtos cadastrados
       db.query(`
-        SELECT sku, platform, cost, fee_pct, tax_pct, shipping_fee
-        FROM products WHERE user_id=$1 AND is_active=true`, [userId])
+        SELECT sku, platform, cost, fee_pct, tax_pct, shipping_fee, is_active
+        FROM products WHERE user_id=$1`, [userId]),
+
+      // Mês passado para comparação
+      db.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE status != 'cancelled') AS pedidos,
+          COALESCE(SUM(total_amount) FILTER (WHERE status != 'cancelled'), 0) AS faturamento,
+          COALESCE(SUM(platform_fee + shipping_fee + tax_amount) FILTER (WHERE status != 'cancelled'), 0) AS custos_fixos
+        FROM marketplace_orders
+        WHERE user_id=$1
+          AND order_date >= date_trunc('month', NOW() - INTERVAL '1 month')
+          AND order_date < date_trunc('month', NOW())`, [userId]),
+
+      // Meta do mês
+      db.query(`SELECT monthly_revenue_goal, revenue_goal_enabled FROM user_goals WHERE user_id=$1`, [userId])
     ]);
 
     const orders = ordersRes.rows;
     const returns = returnsRes.rows;
     const products = productsRes.rows;
+    const mesPassado = mesPassadoRes.rows[0] || {};
+    const goal = goalRes.rows[0] || {};
+
+    const n = v => Number(v || 0);
+    const brl = v => `R$ ${n(v).toFixed(2)}`;
+    const pct = (a, b) => b > 0 ? ((a / b) * 100).toFixed(1) + '%' : '0%';
 
     const paid = orders.filter(o => o.status !== 'cancelled');
     const cancelled = orders.filter(o => o.status === 'cancelled');
+    const shipped = paid.filter(o => ['shipped','delivered'].includes(o.status));
 
-    const sum = (arr, k) => arr.reduce((s, o) => s + Number(o[k] || 0), 0);
-    const fat = sum(paid, 'total_amount');
-    const lucro = sum(paid, 'estimated_profit');
-    const tarifas = sum(paid, 'platform_fee');
-    const frete = sum(paid, 'shipping_fee');
-    const impostos = sum(paid, 'tax_amount');
-    const prejDevol = sum(returns.filter(r => !r.ml_protected), 'return_total_cost');
+    // Totais 30 dias
+    const paid30 = paid.filter(o => new Date(o.order_date) >= new Date(inicio30));
+    const fat30 = paid30.reduce((s, o) => s + n(o.total_amount), 0);
+    const lucro30 = paid30.reduce((s, o) => s + n(o.lucro_real), 0);
+    const tarifa30 = paid30.reduce((s, o) => s + n(o.platform_fee), 0);
+    const frete30 = paid30.reduce((s, o) => s + n(o.shipping_fee), 0);
+    const imposto30 = paid30.reduce((s, o) => s + n(o.tax_amount), 0);
+    const custo30 = paid30.reduce((s, o) => s + n(o.total_product_cost), 0);
 
-    // Ranking de produtos
-    const prodMap = {};
-    paid.forEach(o => {
-      const k = o.item_sku || o.item_title || '?';
-      if (!prodMap[k]) prodMap[k] = { title: o.item_title, sku: k, fat: 0, qtd: 0 };
-      prodMap[k].fat += Number(o.total_amount || 0);
-      prodMap[k].qtd += Number(o.quantity || 1);
-    });
-    const topProds = Object.values(prodMap).sort((a, b) => b.fat - a.fat).slice(0, 5);
+    // Totais mês atual
+    const paidMes = paid.filter(o => new Date(o.order_date) >= new Date(inicioMes));
+    const fatMes = paidMes.reduce((s, o) => s + n(o.total_amount), 0);
+    const lucroMes = paidMes.reduce((s, o) => s + n(o.lucro_real), 0);
 
-    // Previsão do mês
-    const hoje = new Date();
+    // Previsão do mês — baseada no ritmo REAL de dias com vendas
     const diaAtual = hoje.getDate();
     const diasNoMes = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0).getDate();
-    const ordensHojeMes = paid.filter(o => new Date(o.order_date).getMonth() === hoje.getMonth());
-    const fatMesAtual = sum(ordensHojeMes, 'total_amount');
-    const previsaoMes = diaAtual > 0 ? (fatMesAtual / diaAtual) * diasNoMes : 0;
-    const lucroMesAtual = sum(ordensHojeMes, 'estimated_profit');
-    const previsaoLucro = diaAtual > 0 ? (lucroMesAtual / diaAtual) * diasNoMes : 0;
+    const diasRestantes = diasNoMes - diaAtual;
+    // Ritmo diário médio (só dias que tiveram venda para ser mais realista)
+    const diasComVenda = new Set(paidMes.map(o => new Date(o.order_date).toDateString())).size || 1;
+    const ritmoDiario = fatMes / Math.max(diaAtual, 1);
+    const previsaoFat = ritmoDiario * diasNoMes;
+    const previsaoLucro = lucroMes / Math.max(diaAtual, 1) * diasNoMes;
+
+    // Por plataforma (30 dias)
+    const byPlat = {};
+    paid30.forEach(o => {
+      if (!byPlat[o.platform]) byPlat[o.platform] = { fat: 0, lucro: 0, qtd: 0 };
+      byPlat[o.platform].fat += n(o.total_amount);
+      byPlat[o.platform].lucro += n(o.lucro_real);
+      byPlat[o.platform].qtd++;
+    });
+
+    // Top produtos (30 dias) com lucro real
+    const prodMap = {};
+    paid30.forEach(o => {
+      const k = o.item_sku || o.item_title || '?';
+      if (!prodMap[k]) prodMap[k] = { title: o.item_title, sku: k, fat: 0, lucro: 0, qtd: 0, custo: n(o.product_cost) };
+      prodMap[k].fat += n(o.total_amount);
+      prodMap[k].lucro += n(o.lucro_real);
+      prodMap[k].qtd += n(o.quantity || 1);
+    });
+    const topProds = Object.values(prodMap).sort((a, b) => b.fat - a.fat).slice(0, 10);
+    const topLucro = Object.values(prodMap).sort((a, b) => b.lucro - a.lucro).slice(0, 5);
+    const piorMargem = Object.values(prodMap)
+      .filter(p => p.fat > 0)
+      .map(p => ({ ...p, margem: p.lucro / p.fat * 100 }))
+      .sort((a, b) => a.margem - b.margem).slice(0, 5);
+
+    // Devoluções (90 dias)
+    const devolReais = returns.filter(r => !r.ml_protected);
+    const devolCobertas = returns.filter(r => r.ml_protected);
+    const prejDevol = devolReais.reduce((s, r) => s + n(r.return_total_cost), 0);
+
+    // Vendas por dia da semana (30 dias)
+    const diaSemana = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
+    const byDia = Array(7).fill(0).map((_, i) => ({ dia: diaSemana[i], fat: 0, qtd: 0 }));
+    paid30.forEach(o => {
+      const d = new Date(o.order_date).getDay();
+      byDia[d].fat += n(o.total_amount);
+      byDia[d].qtd++;
+    });
+    const melhorDia = [...byDia].sort((a, b) => b.fat - a.fat)[0];
 
     return {
-      periodo: 'últimos 30 dias',
-      faturamento_total: fat.toFixed(2),
-      lucro_estimado: lucro.toFixed(2),
-      margem: fat > 0 ? ((lucro / fat) * 100).toFixed(1) + '%' : '0%',
-      total_pedidos: paid.length,
-      pedidos_cancelados: cancelled.length,
-      tarifas_total: tarifas.toFixed(2),
-      frete_total: frete.toFixed(2),
-      impostos_total: impostos.toFixed(2),
-      devolucoes_prejuizo: prejDevol.toFixed(2),
-      devolucoes_qtd: returns.filter(r => !r.ml_protected).length,
-      devolucoes_ml_cobertas: returns.filter(r => r.ml_protected).length,
-      top_produtos: topProds,
-      produtos_cadastrados: products.length,
-      previsao_mes: {
+      data_hoje: hoje.toLocaleDateString('pt-BR'),
+      // === MÊS ATUAL ===
+      mes_atual: {
+        nome: hoje.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' }),
         dia_atual: diaAtual,
         dias_no_mes: diasNoMes,
-        faturamento_mes_ate_agora: fatMesAtual.toFixed(2),
-        previsao_faturamento_mes: previsaoMes.toFixed(2),
-        previsao_lucro_mes: previsaoLucro.toFixed(2),
-      }
+        dias_restantes: diasRestantes,
+        pedidos: paidMes.length,
+        faturamento: brl(fatMes),
+        lucro_real: brl(lucroMes),
+        margem: pct(lucroMes, fatMes),
+        ritmo_diario: brl(ritmoDiario),
+        previsao_faturamento_mes_completo: brl(previsaoFat),
+        previsao_lucro_mes_completo: brl(previsaoLucro),
+        meta_configurada: goal.revenue_goal_enabled ? brl(goal.monthly_revenue_goal) : 'Não configurada',
+        percentual_meta: goal.revenue_goal_enabled && n(goal.monthly_revenue_goal) > 0
+          ? pct(fatMes, n(goal.monthly_revenue_goal)) : 'N/A',
+      },
+      // === 30 DIAS ===
+      ultimos_30_dias: {
+        pedidos_pagos: paid30.length,
+        pedidos_cancelados: cancelled.filter(o => new Date(o.order_date) >= new Date(inicio30)).length,
+        faturamento: brl(fat30),
+        lucro_real: brl(lucro30),
+        margem_media: pct(lucro30, fat30),
+        tarifas_marketplace: brl(tarifa30),
+        frete_pago: brl(frete30),
+        impostos: brl(imposto30),
+        custo_produtos: brl(custo30),
+        ticket_medio: brl(paid30.length ? fat30 / paid30.length : 0),
+      },
+      // === MÊS PASSADO (comparação) ===
+      mes_passado: {
+        pedidos: n(mesPassado.pedidos),
+        faturamento: brl(mesPassado.faturamento),
+        variacao_faturamento: mesPassado.faturamento > 0
+          ? ((fatMes / n(mesPassado.faturamento) - 1) * 100).toFixed(1) + '%' : 'N/A',
+      },
+      // === POR PLATAFORMA ===
+      por_plataforma: Object.entries(byPlat).map(([plat, v]) => ({
+        plataforma: plat,
+        faturamento: brl(v.fat),
+        lucro: brl(v.lucro),
+        pedidos: v.qtd,
+        margem: pct(v.lucro, v.fat),
+      })),
+      // === PRODUTOS ===
+      top_10_faturamento: topProds.map(p => ({
+        produto: p.title, sku: p.sku,
+        faturamento: brl(p.fat), lucro: brl(p.lucro),
+        margem: pct(p.lucro, p.fat), qtd_vendida: p.qtd,
+        custo_unitario: brl(p.custo),
+      })),
+      top_5_lucro: topLucro.map(p => ({
+        produto: p.title, sku: p.sku,
+        lucro: brl(p.lucro), margem: pct(p.lucro, p.fat),
+      })),
+      produtos_pior_margem: piorMargem.map(p => ({
+        produto: p.title, sku: p.sku,
+        margem: p.margem.toFixed(1) + '%', lucro: brl(p.lucro), faturamento: brl(p.fat),
+      })),
+      produtos_sem_custo_cadastrado: topProds.filter(p => p.custo === 0).map(p => p.sku || p.title),
+      // === DEVOLUÇÕES ===
+      devolucoes_90_dias: {
+        total_com_prejuizo: devolReais.length,
+        prejuizo_total: brl(prejDevol),
+        ml_absorveu: devolCobertas.length,
+        frete_reverso_total: brl(devolReais.reduce((s, r) => s + n(r.return_shipping_cost), 0)),
+        taxas_total: brl(devolReais.reduce((s, r) => s + n(r.return_fee), 0)),
+      },
+      // === PADRÕES ===
+      melhor_dia_semana: melhorDia ? `${melhorDia.dia} (${brl(melhorDia.fat)}, ${melhorDia.qtd} pedidos)` : 'N/A',
+      produtos_cadastrados_total: products.length,
+      produtos_ativos: products.filter(p => p.is_active).length,
     };
   } catch(e) {
     console.error('[AI context]', e.message);
@@ -4585,30 +4722,63 @@ app.post('/api/ai/chat', auth, async (req, res) => {
 
   try {
     const ctx = await ssGetAiContext(req.user.id);
-    const systemPrompt = `Você é o assistente de vendas do SalesSync, uma plataforma de gestão para vendedores de marketplace (Mercado Livre, Magalu, Shopee).
-Você tem acesso aos dados reais do vendedor e deve dar dicas práticas, diretas e objetivas em português.
+    const systemPrompt = `Você é o assistente de vendas do SalesSync — uma plataforma de gestão para vendedores de marketplace (Mercado Livre, Magalu, Shopee).
+Você tem acesso COMPLETO e em TEMPO REAL aos dados financeiros e operacionais do vendedor.
+Responda SEMPRE em português, seja direto, use os números reais abaixo, e dê dicas práticas e acionáveis.
+NUNCA invente valores — use apenas os dados fornecidos aqui.
 
-DADOS DO VENDEDOR (${ctx.periodo}):
-- Faturamento: R$ ${ctx.faturamento_total}
-- Lucro estimado: R$ ${ctx.lucro_estimado} (margem ${ctx.margem})
-- Total de pedidos: ${ctx.total_pedidos} | Cancelados: ${ctx.pedidos_cancelados}
-- Tarifas pagas: R$ ${ctx.tarifas_total}
-- Frete total: R$ ${ctx.frete_total}
-- Impostos: R$ ${ctx.impostos_total}
-- Devoluções (prejuízo): ${ctx.devolucoes_qtd} devoluções = R$ ${ctx.devolucoes_prejuizo}
-- Devoluções cobertas pelo ML: ${ctx.devolucoes_ml_cobertas}
-- Produtos cadastrados: ${ctx.produtos_cadastrados}
+======= DADOS REAIS DO VENDEDOR (hoje: ${ctx.data_hoje}) =======
 
-TOP 5 PRODUTOS (30 dias):
-${ctx.top_produtos?.map((p, i) => `${i+1}. ${p.title} (SKU: ${p.sku}) — R$ ${p.fat.toFixed(2)} — ${p.qtd} unidades`).join('\n') || 'Sem dados'}
+📅 MÊS ATUAL (${ctx.mes_atual?.nome}):
+- Dia ${ctx.mes_atual?.dia_atual} de ${ctx.mes_atual?.dias_no_mes} (restam ${ctx.mes_atual?.dias_restantes} dias)
+- Pedidos pagos: ${ctx.mes_atual?.pedidos}
+- Faturamento até agora: ${ctx.mes_atual?.faturamento}
+- Lucro REAL (após custos de produto): ${ctx.mes_atual?.lucro_real}
+- Margem: ${ctx.mes_atual?.margem}
+- Ritmo diário atual: ${ctx.mes_atual?.ritmo_diario}/dia
+- Previsão de faturamento até fim do mês: ${ctx.mes_atual?.previsao_faturamento_mes_completo}
+- Previsão de lucro até fim do mês: ${ctx.mes_atual?.previsao_lucro_mes_completo}
+- Meta do mês: ${ctx.mes_atual?.meta_configurada} | Atingido: ${ctx.mes_atual?.percentual_meta}
 
-PREVISÃO DO MÊS ATUAL:
-- Hoje é dia ${ctx.previsao_mes?.dia_atual} de ${ctx.previsao_mes?.dias_no_mes}
-- Faturamento mês até agora: R$ ${ctx.previsao_mes?.faturamento_mes_ate_agora}
-- Previsão de faturamento do mês: R$ ${ctx.previsao_mes?.previsao_faturamento_mes}
-- Previsão de lucro do mês: R$ ${ctx.previsao_mes?.previsao_lucro_mes}
+📊 ÚLTIMOS 30 DIAS:
+- Pedidos pagos: ${ctx.ultimos_30_dias?.pedidos_pagos} | Cancelados: ${ctx.ultimos_30_dias?.pedidos_cancelados}
+- Faturamento: ${ctx.ultimos_30_dias?.faturamento}
+- Lucro REAL: ${ctx.ultimos_30_dias?.lucro_real} (margem ${ctx.ultimos_30_dias?.margem_media})
+- Ticket médio: ${ctx.ultimos_30_dias?.ticket_medio}
+- Tarifas marketplace: ${ctx.ultimos_30_dias?.tarifas_marketplace}
+- Frete pago: ${ctx.ultimos_30_dias?.frete_pago}
+- Impostos: ${ctx.ultimos_30_dias?.impostos}
+- Custo dos produtos vendidos: ${ctx.ultimos_30_dias?.custo_produtos}
 
-Seja conciso, use números reais quando relevante, e foque em ações práticas que o vendedor pode tomar.`;
+📅 MÊS PASSADO (comparação):
+- Pedidos: ${ctx.mes_passado?.pedidos} | Faturamento: ${ctx.mes_passado?.faturamento}
+- Variação de faturamento vs mês atual: ${ctx.mes_passado?.variacao_faturamento}
+
+🏪 POR PLATAFORMA (30 dias):
+${JSON.stringify(ctx.por_plataforma, null, 2)}
+
+🏆 TOP 10 PRODUTOS POR FATURAMENTO (30 dias):
+${ctx.top_10_faturamento?.map((p, i) => `${i+1}. ${p.produto} (SKU: ${p.sku}) — Faturamento: ${p.faturamento} | Lucro: ${p.lucro} | Margem: ${p.margem} | Qtd: ${p.qtd_vendida} | Custo unit.: ${p.custo_unitario}`).join('\n') || 'Sem dados'}
+
+⚠️ PRODUTOS COM PIOR MARGEM (foco de atenção):
+${ctx.produtos_pior_margem?.map((p, i) => `${i+1}. ${p.produto} (SKU: ${p.sku}) — Margem: ${p.margem} | Lucro: ${p.lucro} | Fat.: ${p.faturamento}`).join('\n') || 'Nenhum'}
+
+⚠️ PRODUTOS SEM CUSTO CADASTRADO (lucro pode estar errado):
+${ctx.produtos_sem_custo_cadastrado?.length ? ctx.produtos_sem_custo_cadastrado.join(', ') : 'Todos os produtos têm custo cadastrado ✓'}
+
+↩️ DEVOLUÇÕES (90 dias):
+- Com prejuízo para o vendedor: ${ctx.devolucoes_90_dias?.total_com_prejuizo} devoluções = ${ctx.devolucoes_90_dias?.prejuizo_total}
+- ML absorveu o custo: ${ctx.devolucoes_90_dias?.ml_absorveu} casos (sem prejuízo)
+- Frete reverso total: ${ctx.devolucoes_90_dias?.frete_reverso_total}
+- Taxas de devolução: ${ctx.devolucoes_90_dias?.taxas_total}
+
+📆 MELHOR DIA DA SEMANA PARA VENDER: ${ctx.melhor_dia_semana}
+
+📦 PRODUTOS: ${ctx.produtos_ativos} ativos de ${ctx.produtos_cadastrados_total} cadastrados
+=======================================================
+
+IMPORTANTE: Se algum produto tem margem negativa ou próxima de zero, mencione proativamente.
+Se pedirem planilha/CSV, gere em bloco \`\`\`csv ... \`\`\`.`;
 
     // Se o frontend mandou dados da página (pedidos), anexa ao prompt
     let userContent = message;
