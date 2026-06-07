@@ -3878,6 +3878,25 @@ app.post('/api/user-goals', auth, async (req, res) => {
 });
 
 
+/* Endpoint para a IA: lista TODOS os rendimentos ativos sem filtro de mês */
+app.get('/api/additional-revenues/all', auth, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, name, amount, recurring, starts_at, created_at
+       FROM additional_revenues
+       WHERE user_id=$1 AND is_active=true
+       ORDER BY created_at DESC, id DESC`,
+      [req.user.id]
+    );
+    const items = (rows || []).map(r => ({
+      ...r,
+      amount: parseFloat(r.amount || 0),
+      recurring: !!r.recurring
+    }));
+    res.json({ items });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/additional-revenues', auth, async (req, res) => {
   try {
     const month = req.query.month ? new Date(String(req.query.month) + '-01T00:00:00-03:00') : new Date();
