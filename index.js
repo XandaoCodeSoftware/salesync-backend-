@@ -1536,11 +1536,11 @@ async function ssUpsertReturn(userId, acc, r) {
       account_id=EXCLUDED.account_id, platform_order_id=COALESCE(EXCLUDED.platform_order_id, marketplace_returns.platform_order_id),
       external_ticket_id=EXCLUDED.external_ticket_id, status=EXCLUDED.status, reason=EXCLUDED.reason, type=EXCLUDED.type,
       buyer_message=EXCLUDED.buyer_message, return_tracking_code=EXCLUDED.return_tracking_code,
-      return_shipping_cost=GREATEST(marketplace_returns.return_shipping_cost, EXCLUDED.return_shipping_cost),
-      return_fee=GREATEST(marketplace_returns.return_fee, EXCLUDED.return_fee),
-      refund_adjustment=GREATEST(marketplace_returns.refund_adjustment, EXCLUDED.refund_adjustment),
-      lost_product_cost=GREATEST(marketplace_returns.lost_product_cost, EXCLUDED.lost_product_cost),
-      return_total_cost=GREATEST(marketplace_returns.return_total_cost, EXCLUDED.return_total_cost),
+      return_shipping_cost=CASE WHEN EXCLUDED.ml_protected THEN 0 ELSE GREATEST(marketplace_returns.return_shipping_cost, EXCLUDED.return_shipping_cost) END,
+      return_fee=CASE WHEN EXCLUDED.ml_protected THEN 0 ELSE GREATEST(marketplace_returns.return_fee, EXCLUDED.return_fee) END,
+      refund_adjustment=CASE WHEN EXCLUDED.ml_protected THEN 0 ELSE GREATEST(marketplace_returns.refund_adjustment, EXCLUDED.refund_adjustment) END,
+      lost_product_cost=CASE WHEN EXCLUDED.ml_protected THEN 0 ELSE GREATEST(marketplace_returns.lost_product_cost, EXCLUDED.lost_product_cost) END,
+      return_total_cost=CASE WHEN EXCLUDED.ml_protected THEN 0 ELSE GREATEST(marketplace_returns.return_total_cost, EXCLUDED.return_total_cost) END,
       resolution_type=EXCLUDED.resolution_type, ml_protected=EXCLUDED.ml_protected,
       raw_json=EXCLUDED.raw_json, updated_at=NOW()`,
     [userId, platform, acc.id || null, r.platform_order_id || null, externalId, r.external_ticket_id || null, r.status || null, r.reason || null, r.type || 'return',
@@ -1564,12 +1564,13 @@ function ssMLIsRealReturnFromOrder(o) {
 function ssResolveMLClaimCosts(claim) {
   const resolution = claim?.resolution || {};
   const resType = String(resolution.type || resolution.resolution_type || '').toLowerCase();
+  const reasonField = String(claim?.reason_id || claim?.reason || '').toLowerCase();
   const parties = Array.isArray(resolution.parties) ? resolution.parties : [];
 
   // ml_protected: ML absorveu o custo — vendedor não perde nada financeiramente.
-  // Acontece em "seller_protection", "bpp_covered", "no_action_required".
+  // Checar tanto resolution.type quanto reason (bpp_covered vem no reason nas orders/search).
   const protectedTypes = ['seller_protection', 'bpp_covered', 'no_action_required', 'no_action', 'rejected'];
-  const mlProtected = protectedTypes.some(t => resType.includes(t));
+  const mlProtected = protectedTypes.some(t => resType.includes(t) || reasonField.includes(t));
 
   if (mlProtected) {
     return { return_shipping_cost: 0, return_fee: 0, refund_adjustment: 0, resolution_type: resType || 'seller_protection', ml_protected: true };
@@ -1678,7 +1679,8 @@ async function ssFetchMLReturns(acc, days = 365) {
         if (!ssMLIsRealReturnFromOrder(o)) continue;
         const payments = Array.isArray(o.payments) ? o.payments : [];
         const reason = payments.map(p => p.status_detail || p.status).filter(Boolean).join(', ');
-        const bppCovered = payments.some(p => /bpp_covered|bpp_refunded/i.test(`${p.status||''} ${p.status_detail||''}`));
+        // bpp_covered = ML absorveu, vendedor não perde. bpp_refunded = ML reembolsou comprador, vendedor pode perder.
+        const bppCovered = payments.some(p => /bpp_covered/i.test(`${p.status||''} ${p.status_detail||''}`));
         out.push({
           platform: 'mercadolivre',
           external_return_id: `ml-order-${o.id}`,
