@@ -1394,6 +1394,8 @@ async function ensureOrdersReturnsSchema() {
     await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS refund_adjustment NUMERIC(14,2) NOT NULL DEFAULT 0`);
     await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS lost_product_cost NUMERIC(14,2) NOT NULL DEFAULT 0`);
     await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS return_total_cost NUMERIC(14,2) NOT NULL DEFAULT 0`);
+    await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS resolution_type TEXT`);
+    await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS ml_protected BOOLEAN NOT NULL DEFAULT FALSE`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_returns_user_status ON marketplace_returns(user_id, status)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_returns_order ON marketplace_returns(user_id, platform, platform_order_id)`);
     console.log('✅ Orders/Returns schema OK: vendas em SQL + custos de devolução');
@@ -1522,11 +1524,14 @@ async function ssUpsertReturn(userId, acc, r) {
   const platform = normPlatform(r.platform || acc.platform);
   const externalId = String(r.external_return_id || r.id || r.claim_id || r.ticket_return_id || '').trim();
   if (!externalId) return;
-  const total = ssNum2(r.return_shipping_cost)+ssNum2(r.return_fee)+ssNum2(r.refund_adjustment)+ssNum2(r.lost_product_cost);
+  const mlProtected = r.ml_protected === true;
+  // Se ML absorveu o custo (seller protection), não soma como prejuízo do vendedor
+  const total = mlProtected ? 0 : ssNum2(r.return_shipping_cost)+ssNum2(r.return_fee)+ssNum2(r.refund_adjustment)+ssNum2(r.lost_product_cost);
   await db.query(`INSERT INTO marketplace_returns
     (user_id, platform, account_id, platform_order_id, external_return_id, external_ticket_id, status, reason, type,
-     buyer_message, return_tracking_code, return_shipping_cost, return_fee, refund_adjustment, lost_product_cost, return_total_cost, raw_json, updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW())
+     buyer_message, return_tracking_code, return_shipping_cost, return_fee, refund_adjustment, lost_product_cost, return_total_cost,
+     resolution_type, ml_protected, raw_json, updated_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,NOW())
     ON CONFLICT (user_id, platform, external_return_id) DO UPDATE SET
       account_id=EXCLUDED.account_id, platform_order_id=COALESCE(EXCLUDED.platform_order_id, marketplace_returns.platform_order_id),
       external_ticket_id=EXCLUDED.external_ticket_id, status=EXCLUDED.status, reason=EXCLUDED.reason, type=EXCLUDED.type,
@@ -1536,9 +1541,11 @@ async function ssUpsertReturn(userId, acc, r) {
       refund_adjustment=GREATEST(marketplace_returns.refund_adjustment, EXCLUDED.refund_adjustment),
       lost_product_cost=GREATEST(marketplace_returns.lost_product_cost, EXCLUDED.lost_product_cost),
       return_total_cost=GREATEST(marketplace_returns.return_total_cost, EXCLUDED.return_total_cost),
+      resolution_type=EXCLUDED.resolution_type, ml_protected=EXCLUDED.ml_protected,
       raw_json=EXCLUDED.raw_json, updated_at=NOW()`,
     [userId, platform, acc.id || null, r.platform_order_id || null, externalId, r.external_ticket_id || null, r.status || null, r.reason || null, r.type || 'return',
-     r.buyer_message || null, r.return_tracking_code || null, ssNum2(r.return_shipping_cost), ssNum2(r.return_fee), ssNum2(r.refund_adjustment), ssNum2(r.lost_product_cost), total, JSON.stringify(r.raw_json || r)]);
+     r.buyer_message || null, r.return_tracking_code || null, ssNum2(r.return_shipping_cost), ssNum2(r.return_fee), ssNum2(r.refund_adjustment), ssNum2(r.lost_product_cost), total,
+     r.resolution_type || null, mlProtected, JSON.stringify(r.raw_json || r)]);
 }
 
 function ssMLIsRealReturnFromOrder(o) {
@@ -1552,40 +1559,140 @@ function ssMLIsRealReturnFromOrder(o) {
   return (delivered && refunded) || cancelledAfterDelivery || payments.some(p => String(p.status || '').toLowerCase() === 'charged_back');
 }
 
+// Resolve os custos reais de um claim ML a partir da resolução.
+// Retorna { return_shipping_cost, return_fee, refund_adjustment, resolution_type, ml_protected }
+function ssResolveMLClaimCosts(claim) {
+  const resolution = claim?.resolution || {};
+  const resType = String(resolution.type || resolution.resolution_type || '').toLowerCase();
+  const parties = Array.isArray(resolution.parties) ? resolution.parties : [];
+
+  // ml_protected: ML absorveu o custo — vendedor não perde nada financeiramente.
+  // Acontece em "seller_protection", "bpp_covered", "no_action_required".
+  const protectedTypes = ['seller_protection', 'bpp_covered', 'no_action_required', 'no_action', 'rejected'];
+  const mlProtected = protectedTypes.some(t => resType.includes(t));
+
+  if (mlProtected) {
+    return { return_shipping_cost: 0, return_fee: 0, refund_adjustment: 0, resolution_type: resType || 'seller_protection', ml_protected: true };
+  }
+
+  // Monta custos a partir de resolution.parties — cada entry tem { role, type, amount }
+  // role: "seller" | "buyer" | "marketplace" | "shipping"
+  let returnShippingCost = 0;
+  let returnFee = 0;
+  let refundAdjustment = 0;
+
+  for (const p of parties) {
+    const role = String(p.role || p.type || '').toLowerCase();
+    const amount = Number(p.amount || p.value || p.cost || 0);
+    if (!amount) continue;
+
+    if (role === 'shipping' || role === 'return_shipping' || /frete|shipping/i.test(role)) {
+      returnShippingCost += amount;
+    } else if (role === 'seller') {
+      // Quando o vendedor é debitado, pode ser taxa ou reembolso ao comprador
+      if (/fee|commission|taxa/i.test(String(p.description || p.reason || ''))) {
+        returnFee += amount;
+      } else {
+        refundAdjustment += amount;
+      }
+    }
+  }
+
+  // Fallback: se não tem parties mas tem valor total na resolution, trata como refund_adjustment
+  if (!parties.length) {
+    const total = Number(resolution.total_amount || resolution.amount || resolution.refund_amount || 0);
+    if (total > 0) refundAdjustment = total;
+  }
+
+  return { return_shipping_cost: returnShippingCost, return_fee: returnFee, refund_adjustment: refundAdjustment, resolution_type: resType || 'refund', ml_protected: false };
+}
+
 async function ssFetchMLReturns(acc, days = 365) {
   const headers = { Authorization: `Bearer ${acc.access_token}` };
-  const out = [];
+  const claimsDomain = 'https://api.mercadolibre.com';
+  const since = new Date(Date.now() - Math.min(Math.max(Number(days) || 365, 1), 365) * 86400000).toISOString();
 
-  // Primeiro usa orders/search porque o endpoint de claims costuma retornar 403 PolicyAgent nessa conta.
+  // Tenta claims API primeiro — mais preciso, já filtra só disputas/devoluções reais.
   try {
-    const since = new Date(Date.now() - Math.min(Math.max(Number(days) || 365, 1), 365) * 86400000).toISOString();
+    const allClaims = [];
+    for (let offset = 0; offset < 500; offset += 50) {
+      const { data } = await axios.get(`${claimsDomain}/post-purchase/v1/claims/search`, {
+        headers,
+        params: { seller_id: acc.platform_shop_id, limit: 50, offset, sort: 'date_created:desc', date_created_from: since }
+      });
+      const page = data?.data || data?.results || [];
+      allClaims.push(...page);
+      if (!page.length || page.length < 50) break;
+      if (data?.paging?.total && offset + 50 >= Number(data.paging.total)) break;
+    }
+
+    if (allClaims.length > 0) {
+      console.log(`[ML returns] claims API: ${allClaims.length} claims encontrados`);
+      // Busca detalhes de cada claim para pegar resolution e custos reais
+      const detailed = await ssMapLimit(allClaims, 5, async (c) => {
+        try {
+          const { data } = await axios.get(`${claimsDomain}/post-purchase/v1/claims/${c.id}`, { headers });
+          return data;
+        } catch(e) {
+          return c; // fallback: usa dados básicos da lista
+        }
+      });
+
+      return detailed.map(c => {
+        const costs = ssResolveMLClaimCosts(c);
+        return {
+          platform: 'mercadolivre',
+          external_return_id: `ml-claim-${c.id}`,
+          platform_order_id: String(c.resource_id || c.order_id || ''),
+          status: c.status || 'open',
+          reason: c.reason_id || c.reason || c.stage || '—',
+          type: c.type || 'claim',
+          buyer_message: c.players?.find(p => p.role === 'complainant')?.user?.nickname || null,
+          return_tracking_code: c.resolution?.return?.tracking_id || null,
+          resolution_type: costs.resolution_type,
+          ml_protected: costs.ml_protected,
+          return_shipping_cost: costs.return_shipping_cost,
+          return_fee: costs.return_fee,
+          refund_adjustment: costs.refund_adjustment,
+          lost_product_cost: 0,
+          raw_json: c
+        };
+      });
+    }
+  } catch(e) {
+    console.error('[ML returns] claims API status:', e.response?.status, e.response?.data || e.message, '— usando orders/search fallback');
+  }
+
+  // Fallback: varre orders/search e detecta devolução por sinais nos pagamentos.
+  const out = [];
+  try {
     const limit = 50;
     for (let page = 0; page < 20; page++) {
       const offset = page * limit;
       const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
         headers,
-        params: {
-          seller: acc.platform_shop_id,
-          sort: 'date_desc',
-          'order.date_created.from': since,
-          limit,
-          offset
-        }
+        params: { seller: acc.platform_shop_id, sort: 'date_desc', 'order.date_created.from': since, limit, offset }
       });
       const arr = Array.isArray(data.results) ? data.results : [];
       for (const o of arr) {
         if (!ssMLIsRealReturnFromOrder(o)) continue;
         const payments = Array.isArray(o.payments) ? o.payments : [];
         const reason = payments.map(p => p.status_detail || p.status).filter(Boolean).join(', ');
+        const bppCovered = payments.some(p => /bpp_covered|bpp_refunded/i.test(`${p.status||''} ${p.status_detail||''}`));
         out.push({
-          platform:'mercadolivre',
-          external_return_id:`ml-order-${o.id}`,
-          platform_order_id:String(o.id || ''),
-          status:o.status || 'returned',
-          reason:reason || 'Pedido entregue com reembolso/chargeback',
-          type:'return',
-          return_shipping_cost: payments.reduce((s,p)=>s+Number(p.shipping_cost||0),0),
-          raw_json:o
+          platform: 'mercadolivre',
+          external_return_id: `ml-order-${o.id}`,
+          platform_order_id: String(o.id || ''),
+          status: o.status || 'returned',
+          reason: reason || 'Pedido entregue com reembolso/chargeback',
+          type: 'return',
+          resolution_type: bppCovered ? 'seller_protection' : 'refund',
+          ml_protected: bppCovered,
+          return_shipping_cost: bppCovered ? 0 : payments.reduce((s, p) => s + Number(p.shipping_cost || 0), 0),
+          return_fee: 0,
+          refund_adjustment: 0,
+          lost_product_cost: 0,
+          raw_json: o
         });
       }
       if (!arr.length || arr.length < limit) break;
@@ -1594,17 +1701,7 @@ async function ssFetchMLReturns(acc, days = 365) {
   } catch(e) {
     console.error('[ML returns orders/search]', e.response?.status, e.response?.data || e.message);
   }
-
-  if (out.length) return out;
-
-  // Fallback: tenta claims, mas pode dar 403 dependendo das políticas do app.
-  try {
-    const { data } = await axios.get('https://api.mercadopago.com/post-purchase/v1/claims/search', {
-      params: { type: 'return', limit: 50, sort: 'last_updated:desc' }, headers
-    });
-    const arr = data?.data || data?.results || [];
-    return arr.map(c => ({ platform:'mercadolivre', external_return_id:String(c.id || c.claim_id), platform_order_id:String(c.resource_id || c.order_id || ''), status:c.status, reason:c.reason_id || c.reason || c.stage, type:c.type || 'return', raw_json:c }));
-  } catch(e) { console.error('[ML returns claims]', e.response?.status, e.response?.data || e.message); return out; }
+  return out;
 }
 
 async function ssFetchMagaluReturns(acc) {
