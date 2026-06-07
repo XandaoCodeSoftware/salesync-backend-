@@ -4491,5 +4491,147 @@ app.get('/api/debug/returns', auth, ssDebugReturnsHandler);
 
 app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:'5.0' }));
 
+// ── AI ASSISTANT ──
+async function ssGetAiContext(userId) {
+  try {
+    const [ordersRes, returnsRes, productsRes] = await Promise.all([
+      db.query(`
+        SELECT platform, status, total_amount, platform_fee, shipping_fee, tax_amount,
+               item_title, item_sku, order_date, quantity,
+               COALESCE(total_amount - platform_fee - shipping_fee - tax_amount, 0) as estimated_profit
+        FROM marketplace_orders
+        WHERE user_id=$1 AND order_date >= NOW() - INTERVAL '30 days'
+        ORDER BY order_date DESC LIMIT 500`, [userId]),
+      db.query(`
+        SELECT platform, resolution_type, ml_protected, return_shipping_cost, return_fee,
+               lost_product_cost, return_total_cost, reason, status
+        FROM marketplace_returns
+        WHERE user_id=$1 AND updated_at >= NOW() - INTERVAL '30 days'`, [userId]),
+      db.query(`
+        SELECT sku, platform, cost, fee_pct, tax_pct, shipping_fee
+        FROM products WHERE user_id=$1 AND is_active=true`, [userId])
+    ]);
+
+    const orders = ordersRes.rows;
+    const returns = returnsRes.rows;
+    const products = productsRes.rows;
+
+    const paid = orders.filter(o => o.status !== 'cancelled');
+    const cancelled = orders.filter(o => o.status === 'cancelled');
+
+    const sum = (arr, k) => arr.reduce((s, o) => s + Number(o[k] || 0), 0);
+    const fat = sum(paid, 'total_amount');
+    const lucro = sum(paid, 'estimated_profit');
+    const tarifas = sum(paid, 'platform_fee');
+    const frete = sum(paid, 'shipping_fee');
+    const impostos = sum(paid, 'tax_amount');
+    const prejDevol = sum(returns.filter(r => !r.ml_protected), 'return_total_cost');
+
+    // Ranking de produtos
+    const prodMap = {};
+    paid.forEach(o => {
+      const k = o.item_sku || o.item_title || '?';
+      if (!prodMap[k]) prodMap[k] = { title: o.item_title, sku: k, fat: 0, qtd: 0 };
+      prodMap[k].fat += Number(o.total_amount || 0);
+      prodMap[k].qtd += Number(o.quantity || 1);
+    });
+    const topProds = Object.values(prodMap).sort((a, b) => b.fat - a.fat).slice(0, 5);
+
+    // Previsão do mês
+    const hoje = new Date();
+    const diaAtual = hoje.getDate();
+    const diasNoMes = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0).getDate();
+    const ordensHojeMes = paid.filter(o => new Date(o.order_date).getMonth() === hoje.getMonth());
+    const fatMesAtual = sum(ordensHojeMes, 'total_amount');
+    const previsaoMes = diaAtual > 0 ? (fatMesAtual / diaAtual) * diasNoMes : 0;
+    const lucroMesAtual = sum(ordensHojeMes, 'estimated_profit');
+    const previsaoLucro = diaAtual > 0 ? (lucroMesAtual / diaAtual) * diasNoMes : 0;
+
+    return {
+      periodo: 'últimos 30 dias',
+      faturamento_total: fat.toFixed(2),
+      lucro_estimado: lucro.toFixed(2),
+      margem: fat > 0 ? ((lucro / fat) * 100).toFixed(1) + '%' : '0%',
+      total_pedidos: paid.length,
+      pedidos_cancelados: cancelled.length,
+      tarifas_total: tarifas.toFixed(2),
+      frete_total: frete.toFixed(2),
+      impostos_total: impostos.toFixed(2),
+      devolucoes_prejuizo: prejDevol.toFixed(2),
+      devolucoes_qtd: returns.filter(r => !r.ml_protected).length,
+      devolucoes_ml_cobertas: returns.filter(r => r.ml_protected).length,
+      top_produtos: topProds,
+      produtos_cadastrados: products.length,
+      previsao_mes: {
+        dia_atual: diaAtual,
+        dias_no_mes: diasNoMes,
+        faturamento_mes_ate_agora: fatMesAtual.toFixed(2),
+        previsao_faturamento_mes: previsaoMes.toFixed(2),
+        previsao_lucro_mes: previsaoLucro.toFixed(2),
+      }
+    };
+  } catch(e) {
+    console.error('[AI context]', e.message);
+    return {};
+  }
+}
+
+app.post('/api/ai/chat', auth, async (req, res) => {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return res.status(503).json({ error: 'OPENAI_API_KEY não configurada no servidor.' });
+
+  const { message, history = [] } = req.body;
+  if (!message) return res.status(400).json({ error: 'message obrigatório' });
+
+  try {
+    const ctx = await ssGetAiContext(req.user.id);
+    const systemPrompt = `Você é o assistente de vendas do SalesSync, uma plataforma de gestão para vendedores de marketplace (Mercado Livre, Magalu, Shopee).
+Você tem acesso aos dados reais do vendedor e deve dar dicas práticas, diretas e objetivas em português.
+
+DADOS DO VENDEDOR (${ctx.periodo}):
+- Faturamento: R$ ${ctx.faturamento_total}
+- Lucro estimado: R$ ${ctx.lucro_estimado} (margem ${ctx.margem})
+- Total de pedidos: ${ctx.total_pedidos} | Cancelados: ${ctx.pedidos_cancelados}
+- Tarifas pagas: R$ ${ctx.tarifas_total}
+- Frete total: R$ ${ctx.frete_total}
+- Impostos: R$ ${ctx.impostos_total}
+- Devoluções (prejuízo): ${ctx.devolucoes_qtd} devoluções = R$ ${ctx.devolucoes_prejuizo}
+- Devoluções cobertas pelo ML: ${ctx.devolucoes_ml_cobertas}
+- Produtos cadastrados: ${ctx.produtos_cadastrados}
+
+TOP 5 PRODUTOS (30 dias):
+${ctx.top_produtos?.map((p, i) => `${i+1}. ${p.title} (SKU: ${p.sku}) — R$ ${p.fat.toFixed(2)} — ${p.qtd} unidades`).join('\n') || 'Sem dados'}
+
+PREVISÃO DO MÊS ATUAL:
+- Hoje é dia ${ctx.previsao_mes?.dia_atual} de ${ctx.previsao_mes?.dias_no_mes}
+- Faturamento mês até agora: R$ ${ctx.previsao_mes?.faturamento_mes_ate_agora}
+- Previsão de faturamento do mês: R$ ${ctx.previsao_mes?.previsao_faturamento_mes}
+- Previsão de lucro do mês: R$ ${ctx.previsao_mes?.previsao_lucro_mes}
+
+Seja conciso, use números reais quando relevante, e foque em ações práticas que o vendedor pode tomar.`;
+
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      ...history.slice(-10).map(h => ({ role: h.role, content: h.content })),
+      { role: 'user', content: message }
+    ];
+
+    const { data } = await axios.post('https://api.openai.com/v1/chat/completions', {
+      model: 'gpt-4o-mini',
+      messages,
+      max_tokens: 600,
+      temperature: 0.7
+    }, {
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }
+    });
+
+    const reply = data.choices?.[0]?.message?.content || 'Sem resposta.';
+    res.json({ reply, tokens_used: data.usage?.total_tokens || 0 });
+  } catch(e) {
+    const msg = e.response?.data?.error?.message || e.message;
+    res.status(500).json({ error: msg });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v5.2 rodando na porta ${PORT}`));  
