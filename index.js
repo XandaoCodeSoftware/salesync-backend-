@@ -5130,4 +5130,27 @@ REGRAS IMPORTANTES:
     }
 
     const messages = [
-      { role: 'system', con
+      { role: 'system', content: systemPrompt },
+      ...history.slice(-10).map(h => ({ role: h.role, content: h.content })),
+      { role: 'user', content: userContent }
+    ];
+
+    const { data } = await axios.post('https://api.openai.com/v1/chat/completions', {
+      model: 'gpt-4o-mini',
+      messages,
+      max_tokens: wantsCsv ? 4000 : 700,
+      temperature: 0.7
+    }, {
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }
+    });
+
+    const reply = data.choices?.[0]?.message?.content || 'Sem resposta.';
+    res.json({ reply, tokens_used: data.usage?.total_tokens || 0 });
+  } catch(e) {
+    const msg = e.response?.data?.error?.message || e.message;
+    res.status(500).json({ error: msg });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v5.2 rodando na porta ${PORT}`));  
