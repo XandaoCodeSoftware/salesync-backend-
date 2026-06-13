@@ -370,7 +370,7 @@ app.get('/debug/magalu', auth, async (req, res) => {
     let rawData = null, endpoint = '', error = '';
     try {
       const { data } = await axios.get('https://api.magalu.com/seller/v1/orders', {
-        params: { created_at__gte: since, _limit: 50, _sort: "created_at:desc" },
+        params: { created_at__gte: since, _limit: 10, _sort: "created_at:desc" },
         headers: { Authorization: `Bearer ${acc.access_token}` }
       });
       rawData = data; endpoint = 'https://api.magalu.com/seller/v1/orders';
@@ -428,7 +428,34 @@ ${orders.map(o => {
   </div>`;
 }).join('')}
 </div>
-<div class="section"><h2>JSON do primeiro pedido</h2><pre>${JSON.stringify(orders[0], null, 2)}</pre></div>
+<div class="section"><h2>JSON de cada pedido (clique para expandir)</h2>
+${orders.map((o, i) => {
+  const d = o.deliveries?.[0] || {};
+  const item = d.items?.[0] || {};
+  const info = item.info || {};
+  const norm = o.amounts?.normalizer || 100;
+  const total = (o.amounts?.total || 0) / norm;
+  const commO = (o.amounts?.commission?.total || 0) / norm;
+  const commD = (d.amounts?.commission?.total || 0) / (d.amounts?.normalizer || norm);
+  const fretO = (o.amounts?.freight?.total || 0) / norm;
+  const fretD = (d.amounts?.freight?.total || 0) / (d.amounts?.normalizer || norm);
+  const nDel = o.deliveries?.length || 0;
+  return `<details style="margin-bottom:8px;background:#0D1117;border:1px solid rgba(255,255,255,.07);border-radius:8px;overflow:hidden">
+  <summary style="padding:10px 14px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:10px;font-size:12px">
+    <span style="color:#A855F7;font-weight:700">#${i+1}</span>
+    <span style="color:#F8FAFC;font-weight:600">${info.name || info.description || '—'}</span>
+    <span style="color:#64748B">${o.code || o.id}</span>
+    <span style="color:#FBBF24">${o.status} / delivery:${d.status||'?'}</span>
+    <span style="color:#38BDF8">R$${total.toFixed(2)}</span>
+    <span style="color:#F87171">CommOrder:${commO.toFixed(2)} CommDeliv:${commD.toFixed(2)}</span>
+    <span style="color:#34D399">FretOrder:${fretO.toFixed(2)} FretDeliv:${fretD.toFixed(2)}</span>
+    <span style="color:#94A3B8">${nDel} entrega(s)</span>
+    <span style="color:#64748B">${new Date(o.created_at).toLocaleDateString('pt-BR')}</span>
+  </summary>
+  <pre style="margin:0;border-radius:0;border-top:1px solid rgba(255,255,255,.06)">${JSON.stringify(o, null, 2)}</pre>
+</details>`;
+}).join('')}
+</div>
 </body></html>`;
     res.send(html);
   } catch(e) { res.send(`<pre style="padding:20px;color:red">${e.message}\n${e.stack}</pre>`); }
