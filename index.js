@@ -1130,10 +1130,9 @@ async function fetchMagalu(acc, days) {
         ? Math.round(deliveryCommission / MAGALU_COMMISSION_RATE * 100) / 100
         : (total - discount); // fallback se não tem comissão
 
-      // Valor líquido real do vendedor (o que a Magalu vai pagar)
-      // = base comissão - comissão% - tarifa fixa
-      // equivalente a: commissionBase - orderCommission
-      const magaluSellerNet = commissionBase - orderCommission;
+      // Valor líquido real do vendedor (o que a Magalu deposita na conta)
+      // = valor pago pelo cliente - comissão total (inclui tarifa fixa)
+      const magaluSellerNet = paidByCustomer - orderCommission;
 
       // Usa o máximo entre order e delivery (mais conservador)
       const commission = Math.max(orderCommission, deliveryCommission);
