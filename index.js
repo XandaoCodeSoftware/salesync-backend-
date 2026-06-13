@@ -1,4 +1,4 @@
-// SalesSync v5.10 — Backend Node.js
+// SalesSync v5.11 — Backend Node.js
 // Magalu corrigido com estrutura real da API
 const express = require('express');
 const { Pool } = require('pg');
@@ -971,7 +971,7 @@ async function fetchML(acc, days) {
 
 // ── SHOPEE ──
 const SHOPEE_BASE = process.env.SHOPEE_ENV === 'test'
-  ? 'https://partner.test-stable.shopeemobile.com'
+  ? 'https://openplatform.sandbox.test-stable.shopee.sg'
   : 'https://partner.shopeemobile.com';
 const SHOPEE_PID  = () => String(process.env.SHOPEE_PARTNER_ID || '');
 const SHOPEE_KEY  = () => String(process.env.SHOPEE_PARTNER_KEY || '');
