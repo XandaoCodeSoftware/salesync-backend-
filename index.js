@@ -1,4 +1,4 @@
-// SalesSync v5.7 — Backend Node.js
+// SalesSync v5.9 — Backend Node.js
 // Magalu corrigido com estrutura real da API
 const express = require('express');
 const { Pool } = require('pg');
@@ -969,35 +969,154 @@ async function fetchML(acc, days) {
   });
 }
 
-// ── FETCH SHOPEE ──
-function shopeeSign(pid, path, ts, key) {
-  return crypto.createHmac('sha256', key).update(`${pid}${path}${ts}`).digest('hex');
+// ── SHOPEE ──
+const SHOPEE_BASE = process.env.SHOPEE_ENV === 'test'
+  ? 'https://partner.test-stable.shopeemobile.com'
+  : 'https://partner.shopeemobile.com';
+const SHOPEE_PID  = () => String(process.env.SHOPEE_PARTNER_ID || '');
+const SHOPEE_KEY  = () => String(process.env.SHOPEE_PARTNER_KEY || '');
+
+// Assinatura Shopee v2:
+// - Partner-level (sem shop): pid + path + ts
+// - Shop-level (com shop): pid + path + ts + access_token + shop_id
+function shopeeSign(pid, path, ts, key, accessToken = '', shopId = '') {
+  const base = accessToken && shopId
+    ? `${pid}${path}${ts}${accessToken}${shopId}`
+    : `${pid}${path}${ts}`;
+  return crypto.createHmac('sha256', key).update(base).digest('hex');
 }
 
+function shopeeParams(path, acc, extra = {}) {
+  const ts      = Math.floor(Date.now() / 1000);
+  const pid     = SHOPEE_PID();
+  const key     = SHOPEE_KEY();
+  const shopId  = String(acc.platform_shop_id);
+  const token   = acc.access_token || '';
+  const sign    = shopeeSign(pid, path, ts, key, token, shopId);
+  return { partner_id: pid, shop_id: shopId, access_token: token, timestamp: ts, sign, ...extra };
+}
+
+async function refreshShopeeToken(account) {
+  try {
+    const ts   = Math.floor(Date.now() / 1000);
+    const path = '/api/v2/auth/access_token/get';
+    const pid  = SHOPEE_PID();
+    const sign = shopeeSign(pid, path, ts, SHOPEE_KEY());
+    const { data } = await axios.post(
+      `${SHOPEE_BASE}${path}?partner_id=${pid}&timestamp=${ts}&sign=${sign}`,
+      { refresh_token: account.refresh_token, partner_id: parseInt(pid), shop_id: parseInt(account.platform_shop_id) },
+      { headers: { 'Content-Type': 'application/json' } }
+    );
+    if (!data.access_token) throw new Error(JSON.stringify(data));
+    const expiresAt = new Date(Date.now() + (data.expire_in || 14400) * 1000);
+    await db.query(
+      `UPDATE marketplace_accounts SET access_token=$1, refresh_token=COALESCE($2,refresh_token), token_expires_at=$3, updated_at=NOW() WHERE id=$4`,
+      [data.access_token, data.refresh_token || null, expiresAt, account.id]
+    );
+    console.log('[Shopee] Token renovado');
+    return data.access_token;
+  } catch(e) {
+    console.error('[Shopee refresh]', e.response?.data || e.message);
+    return null;
+  }
+}
+
+const SHOPEE_STATUS = {
+  UNPAID: 'pending', READY_TO_SHIP: 'paid', PROCESSED: 'paid',
+  RETRY_SHIP: 'paid', SHIPPED: 'shipped', TO_CONFIRM_RECEIVE: 'shipped',
+  COMPLETED: 'delivered', CANCELLED: 'cancelled', IN_CANCEL: 'cancelled', TO_RETURN: 'cancelled',
+};
+
 async function fetchShopee(acc, days) {
-  const since = Math.floor((Date.now() - days * 86400000) / 1000);
-  const ts = Math.floor(Date.now() / 1000);
-  const path = '/api/v2/order/get_order_list';
-  const sign = shopeeSign(process.env.SHOPEE_PARTNER_ID, path, ts, process.env.SHOPEE_PARTNER_KEY);
-  const { data } = await axios.get(`https://partner.shopeemobile.com${path}`, {
-    params: {
-      partner_id: process.env.SHOPEE_PARTNER_ID, shop_id: acc.platform_shop_id,
-      access_token: acc.access_token, timestamp: ts, sign,
-      time_range_field: 'create_time', time_from: since,
-      time_to: Math.floor(Date.now() / 1000), page_size: 50, order_status: 'ALL'
-    }
+  // Renova token se necessário
+  let token = acc.access_token;
+  if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 300000)) {
+    token = await refreshShopeeToken(acc);
+    if (!token) throw new Error('Token Shopee expirado — reconecte a loja');
+    acc = { ...acc, access_token: token };
+  }
+
+  const since   = Math.floor((Date.now() - days * 86400000) / 1000);
+  const timeTo  = Math.floor(Date.now() / 1000);
+  const listPath = '/api/v2/order/get_order_list';
+
+  // 1. Busca lista de order_sn (paginado)
+  const allSns = [];
+  let cursor = '';
+  for (let page = 0; page < 10; page++) {
+    const params = shopeeParams(listPath, acc, {
+      time_range_field: 'create_time', time_from: since, time_to: timeTo,
+      page_size: 50, order_status: 'ALL', cursor,
+    });
+    const { data } = await axios.get(`${SHOPEE_BASE}${listPath}`, { params });
+    const list = data.response?.order_list || [];
+    allSns.push(...list.map(o => o.order_sn));
+    if (!data.response?.more || !list.length) break;
+    cursor = data.response.next_cursor || '';
+  }
+
+  if (!allSns.length) return [];
+
+  // 2. Busca detalhes financeiros em lotes de 50
+  const detailPath = '/api/v2/order/get_order_detail';
+  const optFields  = 'buyer_user_id,buyer_username,pay_time,item_list,recipient_address,actual_shipping_fee,commission_fee,service_fee,escrow_amount,buyer_total_amount,seller_discount,shopee_discount,voucher_from_seller,voucher_from_shopee,actual_shipping_fee_confirmed,payment_method,checkout_shipping_carrier';
+  const allOrders  = [];
+
+  for (let i = 0; i < allSns.length; i += 50) {
+    const batch = allSns.slice(i, i + 50);
+    const params = shopeeParams(detailPath, acc, {
+      order_sn_list: batch.join(','),
+      response_optional_fields: optFields,
+    });
+    const { data } = await axios.get(`${SHOPEE_BASE}${detailPath}`, { params });
+    allOrders.push(...(data.response?.order_list || []));
+  }
+
+  return allOrders.map(o => {
+    const item      = o.item_list?.[0] || {};
+    const status    = SHOPEE_STATUS[o.order_status] || 'paid';
+    const buyerPaid = parseFloat(o.buyer_total_amount || o.total_amount || 0);
+    const commission = parseFloat(o.commission_fee || 0);
+    const serviceFee = parseFloat(o.service_fee || 0);
+    const platformFee = commission + serviceFee;
+    const shippingFee = parseFloat(o.actual_shipping_fee || o.actual_shipping_fee_confirmed || 0);
+    const escrow = parseFloat(o.escrow_amount || 0); // valor real depositado
+
+    const sellerDiscount = parseFloat(o.seller_discount || o.voucher_from_seller || 0);
+    const shopeeDiscount = parseFloat(o.shopee_discount || o.voucher_from_shopee || 0);
+
+    const catalogPrice = parseFloat(item.model_discounted_price || item.item_price || 0);
+    const qty = item.model_quantity_purchased || item.quantity_purchased || 1;
+    const totalAmount = catalogPrice > 0 ? catalogPrice * qty : buyerPaid;
+
+    return {
+      id:                  o.order_sn,
+      platform:            'shopee',
+      platform_order_id:   o.order_sn,
+      shop_name:           acc.shop_name,
+      fulfillment_type:    'normal',
+      status,
+      buyer_name:          o.buyer_username || '',
+      total_amount:        totalAmount,     // preço catálogo × qtd
+      paid_amount:         buyerPaid,       // o que o cliente pagou
+      platform_fee:        platformFee,     // comissão + service fee
+      shipping_fee:        shippingFee,
+      tax_amount:          0,               // Shopee não retém imposto — usuário configura
+      discount_amount:     sellerDiscount,
+      shopee_discount:     shopeeDiscount,
+      shopee_escrow:       escrow,          // valor real depositado na conta
+      shopee_commission:   commission,
+      shopee_service_fee:  serviceFee,
+      quantity:            qty,
+      order_date:          new Date((o.pay_time || o.create_time || 0) * 1000).toISOString(),
+      item_title:          item.item_name || 'Produto Shopee',
+      item_image:          item.item_thumbnail || null,
+      item_sku:            item.model_sku || item.item_sku || '',
+      payment_method:      o.payment_method || '',
+      tracking_url:        '',
+      shipping_type:       o.checkout_shipping_carrier || o.shipping_carrier || '',
+    };
   });
-  return ((data.response?.order_list) || []).map(o => ({
-    id: o.order_sn, platform: 'shopee',
-    platform_order_id: o.order_sn, shop_name: acc.shop_name,
-    fulfillment_type: 'normal', status: (o.order_status || 'paid').toLowerCase(),
-    buyer_name: o.buyer_username || '', total_amount: o.total_amount || 0,
-    platform_fee: (o.total_amount || 0) * 0.08, shipping_fee: o.actual_shipping_cost || 0,
-    tax_amount: (o.total_amount || 0) * 0.06, quantity: 1,
-    order_date: new Date(o.create_time * 1000).toISOString(),
-    item_title: o.item_list?.[0]?.item_name || 'Produto Shopee',
-    item_image: null, item_sku: o.item_list?.[0]?.item_sku || '',
-  }));
 }
 
 // ── FETCH MAGALU — estrutura real confirmada pelo debug ──
@@ -1274,9 +1393,12 @@ async function enrichWithCosts(orders, userId) {
     // Para Magalu: usa o líquido real (commission_base - order_commission) que já desconta
     // comissão%, tarifa fixa e subsídios de desconto da Magalu. Para outros: cálculo padrão.
     const magalu_seller_net = o.magalu_seller_net != null ? parseFloat(o.magalu_seller_net) : null;
+    const shopee_escrow     = o.shopee_escrow     != null ? parseFloat(o.shopee_escrow)     : null;
     const net_revenue = (platform === 'magalu' && magalu_seller_net !== null)
       ? magalu_seller_net - tax_amount
-      : total_amount - platform_fee - shipping_fee - tax_amount;
+      : (platform === 'shopee' && shopee_escrow !== null)
+        ? shopee_escrow - tax_amount
+        : total_amount - platform_fee - shipping_fee - tax_amount;
     const return_total_cost = returnMap[`${platform}:${String(o.platform_order_id || o.id || '')}`] || 0;
     const profit     = o.status === 'cancelled' ? 0 : (net_revenue - total_cost - return_total_cost);
     const margin     = o.total_amount > 0 ? (profit / o.total_amount * 100) : 0;
@@ -2177,11 +2299,11 @@ app.get('/callback/shopee', async (req, res) => {
     );
     await db.query(`
       INSERT INTO marketplace_accounts (user_id,platform,platform_shop_id,shop_name,access_token,refresh_token,token_expires_at,mode,is_active)
-      VALUES ($1,'shopee',$2,$3,$4,$4,$5,$6,'normal',true)
+      VALUES ($1,'shopee',$2,$3,$4,$5,$6,'normal',true)
       ON CONFLICT (user_id,platform,platform_shop_id) DO UPDATE SET
         access_token=EXCLUDED.access_token,refresh_token=EXCLUDED.refresh_token,
         token_expires_at=EXCLUDED.token_expires_at,is_active=true,updated_at=NOW()`,
-      [uid, String(shop_id), `Shopee Loja ${shop_id}`, tk.access_token, tk.refresh_token, new Date(Date.now()+tk.expire_in*1000)]
+      [uid, String(shop_id), `Shopee Loja ${shop_id}`, tk.access_token, tk.refresh_token, new Date(Date.now()+(tk.expire_in||14400)*1000)]
     );
     res.redirect('https://salesync.shop?connected=shopee');
   } catch(e) { console.error('[Shopee]', e.response?.data||e.message); res.redirect('https://salesync.shop?error=shopee_failed'); }
