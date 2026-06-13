@@ -1,4 +1,4 @@
-// SalesSync v5.2 — Backend Node.js
+// SalesSync v5.4 — Backend Node.js
 // Magalu corrigido com estrutura real da API
 const express = require('express');
 const { Pool } = require('pg');
@@ -458,6 +458,120 @@ ${orders.map((o, i) => {
 </div>
 </body></html>`;
     res.send(html);
+  } catch(e) { res.send(`<pre style="padding:20px;color:red">${e.message}\n${e.stack}</pre>`); }
+});
+
+// Diagnóstico: busca pedido específico por código e exibe amounts completo
+app.get('/debug/magalu-order', auth, async (req, res) => {
+  const code = (req.query.code || '').trim();
+  if (!code) return res.send('<pre style="padding:20px;color:orange">Passe ?code=CODIGO_DO_PEDIDO</pre>');
+  try {
+    const { rows } = await db.query(
+      `SELECT * FROM marketplace_accounts WHERE user_id=$1 AND platform='magalu' AND is_active=true AND access_token IS NOT NULL LIMIT 1`,
+      [req.user.id]
+    );
+    if (!rows.length) return res.send('<pre style="padding:20px;color:red">Magalu não conectado</pre>');
+    const acc = rows[0];
+    const headers = { Authorization: `Bearer ${acc.access_token}` };
+
+    // Tenta buscar pelo código direto
+    let order = null;
+    try {
+      const r = await axios.get(`https://api.magalu.com/seller/v1/orders/${encodeURIComponent(code)}`, { headers, validateStatus: () => true });
+      if (r.status === 200) order = r.data;
+    } catch(_) {}
+
+    // Se não encontrou, busca na listagem recente pelo code
+    if (!order) {
+      const r2 = await axios.get('https://api.magalu.com/seller/v1/orders', {
+        params: { _limit: 50, _sort: 'created_at:desc' },
+        headers, validateStatus: () => true
+      });
+      order = (r2.data?.results || []).find(o => String(o.code || o.id) === code) || null;
+    }
+
+    if (!order) return res.send(`<pre style="padding:20px;color:red">Pedido ${code} não encontrado na Magalu API</pre>`);
+
+    const norm = order.amounts?.normalizer || 100;
+    const dNorm = order.deliveries?.[0]?.amounts?.normalizer || norm;
+    const d = order.deliveries?.[0] || {};
+
+    // Monta breakdown legível dos amounts
+    function fmtAmt(obj, n) {
+      if (!obj || typeof obj !== 'object') return String(obj || 0);
+      return Object.entries(obj).map(([k,v]) => {
+        if (typeof v === 'object' && v !== null) return `${k}: {${fmtAmt(v, n)}}`;
+        if (typeof v === 'number') return `${k}: R$${(v/n).toFixed(2)}`;
+        return `${k}: ${v}`;
+      }).join(' | ');
+    }
+
+    const css = `*{box-sizing:border-box;margin:0;padding:0;}body{font-family:'Segoe UI',sans-serif;background:#0D1117;color:#e6edf3;padding:20px;}
+h1{color:#A855F7;margin-bottom:16px;}h2{color:#94A3B8;font-size:13px;text-transform:uppercase;letter-spacing:.6px;margin:20px 0 10px;}
+pre{background:#0D1117;border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:14px;overflow-x:auto;font-size:11px;color:#38BDF8;line-height:1.6;}
+.card{background:#161B26;border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:16px;margin-bottom:14px;}
+.row{display:flex;justify-content:space-between;font-size:12px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.04);}
+.l{color:#64748B;}.v{color:#F8FAFC;font-weight:600;}.neg{color:#F87171;}.pos{color:#34D399;}`;
+
+    function amtRow(label, val, n=norm) {
+      const r = (val||0)/n;
+      const cls = r < 0 ? 'neg' : r > 0 ? 'pos' : 'v';
+      return `<div class="row"><span class="l">${label}</span><span class="${cls}">R$ ${r.toFixed(2)}</span></div>`;
+    }
+
+    const events = order.amounts?.events || d.amounts?.events || [];
+
+    res.send(`<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"/><title>Debug Pedido ${code}</title><style>${css}</style></head><body>
+<h1>Pedido ${code}</h1>
+<div class="card">
+  <h2>Resumo</h2>
+  <div class="row"><span class="l">Status pedido</span><span class="v">${order.status}</span></div>
+  <div class="row"><span class="l">Status delivery</span><span class="v">${d.status||'—'}</span></div>
+  <div class="row"><span class="l">Cliente</span><span class="v">${order.customer?.name||'—'}</span></div>
+  <div class="row"><span class="l">Produto</span><span class="v">${d.items?.[0]?.info?.name||'—'}</span></div>
+</div>
+
+<div class="card">
+  <h2>Amounts — ORDER level (normalizer: ${norm})</h2>
+  ${amtRow('total', order.amounts?.total)}
+  ${amtRow('commission.total', order.amounts?.commission?.total)}
+  ${amtRow('commission.intermediation', order.amounts?.commission?.intermediation)}
+  ${amtRow('commission.financial (MDR)', order.amounts?.commission?.financial)}
+  ${amtRow('commission.technology', order.amounts?.commission?.technology)}
+  ${amtRow('freight.total', order.amounts?.freight?.total)}
+  ${amtRow('freight.customer', order.amounts?.freight?.customer)}
+  ${amtRow('freight.seller', order.amounts?.freight?.seller)}
+  ${amtRow('tax.total', order.amounts?.tax?.total)}
+  ${amtRow('discount.total', order.amounts?.discount?.total)}
+  ${amtRow('discount.coupon', order.amounts?.discount?.coupon)}
+  ${amtRow('discount.promotional', order.amounts?.discount?.promotional)}
+  ${amtRow('other.total', order.amounts?.other?.total)}
+  ${amtRow('net', order.amounts?.net)}
+  ${amtRow('liquid', order.amounts?.liquid)}
+  ${amtRow('seller_net', order.amounts?.seller_net)}
+  ${amtRow('seller_liquid', order.amounts?.seller_liquid)}
+  <h2 style="margin-top:10px">Todos os campos do amounts (order):</h2>
+  <pre>${JSON.stringify(order.amounts, null, 2)}</pre>
+</div>
+
+<div class="card">
+  <h2>Amounts — DELIVERY level (normalizer: ${dNorm})</h2>
+  ${amtRow('total', d.amounts?.total, dNorm)}
+  ${amtRow('commission.total', d.amounts?.commission?.total, dNorm)}
+  ${amtRow('freight.total', d.amounts?.freight?.total, dNorm)}
+  ${amtRow('discount.total', d.amounts?.discount?.total, dNorm)}
+  ${amtRow('other.total', d.amounts?.other?.total, dNorm)}
+  ${amtRow('net', d.amounts?.net, dNorm)}
+  ${amtRow('seller_net', d.amounts?.seller_net, dNorm)}
+  <h2 style="margin-top:10px">Todos os campos do amounts (delivery):</h2>
+  <pre>${JSON.stringify(d.amounts, null, 2)}</pre>
+</div>
+
+${events.length ? `<div class="card"><h2>Events (${events.length} entradas)</h2><pre>${JSON.stringify(events, null, 2)}</pre></div>` : ''}
+
+<div class="card"><h2>JSON completo do pedido</h2>
+<pre>${JSON.stringify(order, null, 2)}</pre></div>
+</body></html>`);
   } catch(e) { res.send(`<pre style="padding:20px;color:red">${e.message}\n${e.stack}</pre>`); }
 });
 
@@ -3127,10 +3241,12 @@ async function drawMagaluEtiquetaDanfe(doc, data, y) {
   const nfNumber = nfe.number || (d.invoices?.[0]?.key ? String(d.invoices[0].key).slice(25, 34).replace(/^0+/, '') : '');
   const key = nfe.key || d.invoices?.[0]?.key || '';
   const deadline = d.shipping?.deadline?.limit_date || '';
-  const emitName = nfe.emitName || 'KARAKA STORE';
-  const emitCnpj = nfe.emitCnpj || '55938975000157';
-  const emitIe = nfe.emitIe || '718285699111';
-  const emitUf = nfe.emitUf || da.state || 'SP';
+  const nfKey = nfe.key || d.invoices?.[0]?.key || '';
+  const cnpjFromKey = nfKey.length >= 20 ? nfKey.slice(6, 20) : '';
+  const emitName = nfe.emitName || '';
+  const emitCnpj = nfe.emitCnpj || cnpjFromKey;
+  const emitIe = nfe.emitIe || '';
+  const emitUf = nfe.emitUf || da.state || '';
   const destName = nfe.destName || rec.name || '';
   const destDoc = nfe.destCpfCnpj || rec.document_number || '';
   const destUf = nfe.destUf || ra.state || '';
@@ -3236,10 +3352,10 @@ function danfeDataFromDelivery(data) {
     issuedAt: nfe.issuedAt || d.invoices?.[0]?.issued_at || '',
     protocol: nfe.protocol || '',
     protocolAt: nfe.protocolAt || nfe.issuedAt || d.invoices?.[0]?.issued_at || '',
-    emitName: nfe.emitName || 'KARAKA STORE',
-    emitCnpj: nfe.emitCnpj || '55938975000157',
-    emitIe: nfe.emitIe || '718285699111',
-    emitUf: nfe.emitUf || da.state || 'SP',
+    emitName: nfe.emitName || '',
+    emitCnpj: nfe.emitCnpj || (key.length >= 20 ? key.slice(6, 20) : ''),
+    emitIe: nfe.emitIe || '',
+    emitUf: nfe.emitUf || da.state || '',
     destName: nfe.destName || rec.name || '',
     destDoc: nfe.destCpfCnpj || rec.document_number || '',
     destIe: nfe.destIe || '',
@@ -3279,11 +3395,13 @@ async function drawDanfeSimplificadoOnly(doc, data, box, opts = {}) {
 
   doc.moveTo(x, y + h * 0.34).lineTo(x + w, y + h * 0.34).stroke();
 
-  let yy = y + h * 0.62;
-  const line = 20 * scale;
+  const line = Math.min(20 * scale, 26);
   const labelW = Math.min(90 * scale, w * 0.32);
   const valX = x + pad + labelW;
   const ufX = x + w - 44 * scale;
+  // 7 kv rows + 1 extra gap; anchor from bottom so text never overflows "DANFE SIMPLIFICADO"
+  const numKvRows = 7;
+  let yy = y + h - 44 * scale - numKvRows * line - 10 * scale;
 
   function kv(label, value, uf) {
     doc.font('Helvetica-Bold').fontSize(fs(8)).text(label, x + pad, yy, { width: labelW });
