@@ -1,4 +1,4 @@
-// SalesSync v5.9 — Backend Node.js
+// SalesSync v5.10 — Backend Node.js
 // Magalu corrigido com estrutura real da API
 const express = require('express');
 const { Pool } = require('pg');
@@ -2281,9 +2281,9 @@ app.get('/callback/mercadolivre', async (req, res) => {
 // ── OAUTH SHOPEE ──
 app.get('/auth/shopee', (req, res) => {
   const ts=Math.floor(Date.now()/1000), path='/api/v2/shop/auth_partner';
-  const sign=shopeeSign(process.env.SHOPEE_PARTNER_ID, path, ts, process.env.SHOPEE_PARTNER_KEY);
+  const sign=shopeeSign(SHOPEE_PID(), path, ts, SHOPEE_KEY());
   const cb=encodeURIComponent(`${process.env.SHOPEE_REDIRECT_URI}?uid=${req.query.user_id||''}`);
-  res.redirect(`https://partner.shopeemobile.com${path}?partner_id=${process.env.SHOPEE_PARTNER_ID}&timestamp=${ts}&sign=${sign}&redirect=${cb}`);
+  res.redirect(`${SHOPEE_BASE}${path}?partner_id=${SHOPEE_PID()}&timestamp=${ts}&sign=${sign}&redirect=${cb}`);
 });
 
 app.get('/callback/shopee', async (req, res) => {
@@ -2291,9 +2291,9 @@ app.get('/callback/shopee', async (req, res) => {
   if (!code) return res.redirect('https://salesync.shop?error=shopee_no_code');
   try {
     const ts=Math.floor(Date.now()/1000), path='/api/v2/auth/token/get';
-    const sign=shopeeSign(process.env.SHOPEE_PARTNER_ID, path, ts, process.env.SHOPEE_PARTNER_KEY);
+    const sign=shopeeSign(SHOPEE_PID(), path, ts, SHOPEE_KEY());
     const { data:tk } = await axios.post(
-      `https://partner.shopeemobile.com${path}?partner_id=${process.env.SHOPEE_PARTNER_ID}&timestamp=${ts}&sign=${sign}`,
+      `${SHOPEE_BASE}${path}?partner_id=${SHOPEE_PID()}&timestamp=${ts}&sign=${sign}`,
       { code, partner_id:parseInt(process.env.SHOPEE_PARTNER_ID), shop_id:parseInt(shop_id) },
       { headers:{ 'Content-Type':'application/json' } }
     );
