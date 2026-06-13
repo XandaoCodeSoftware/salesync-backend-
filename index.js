@@ -1,4 +1,4 @@
-// SalesSync v5.4 — Backend Node.js
+// SalesSync v5.5 — Backend Node.js
 // Magalu corrigido com estrutura real da API
 const express = require('express');
 const { Pool } = require('pg');
@@ -1099,33 +1099,74 @@ async function fetchMagalu(acc, days) {
       const norm     = o.amounts?.normalizer || 100;
       const dNorm    = delivery.amounts?.normalizer || norm;
 
-      // Valores no nível do pedido (order-level)
+      // ── Amounts order-level ──
       const total              = (o.amounts?.total             || 0) / norm;
       const orderCommission    = (o.amounts?.commission?.total || 0) / norm;
       const orderFreight       = (o.amounts?.freight?.total    || 0) / norm;
-      const tax                = (o.amounts?.tax?.total        || 0) / norm;
+      const orderDiscount      = (o.amounts?.discount?.total   || 0) / norm;
+      const orderTax           = (o.amounts?.tax?.total        || 0) / norm;
 
-      // Valores no nível da entrega (delivery-level, por seller — mais específico)
+      // ── Amounts delivery-level (mais específico por seller) ──
       const deliveryCommission = (delivery.amounts?.commission?.total || 0) / dNorm;
       const deliveryFreight    = (delivery.amounts?.freight?.total    || 0) / dNorm;
+      const deliveryDiscount   = (delivery.amounts?.discount?.total   || 0) / dNorm;
 
-      // Usa o máximo entre order e delivery (mais conservador — protege margem)
+      // Tarifa fixa da plataforma (sempre R$5 — diferença entre order e delivery commission)
+      const tarifaFixa = Math.max(0, orderCommission - deliveryCommission);
+
+      // Desconto total aplicado no pedido
+      const discount = Math.max(orderDiscount, deliveryDiscount);
+
+      // Base de cálculo da comissão Magalu (o que usam pra calcular o %)
+      // Fórmula derivada: delivery_commission / 0.18 (taxa padrão Magalu)
+      // Isso captura o subsídio da Magalu em descontos (ex: desconto à vista pago pela Magalu)
+      const MAGALU_COMMISSION_RATE = 0.18;
+      const commissionBase = deliveryCommission > 0
+        ? Math.round(deliveryCommission / MAGALU_COMMISSION_RATE * 100) / 100
+        : (total - discount); // fallback se não tem comissão
+
+      // Valor líquido real do vendedor (o que a Magalu vai pagar)
+      // = base comissão - comissão% - tarifa fixa
+      // equivalente a: commissionBase - orderCommission
+      const magaluSellerNet = commissionBase - orderCommission;
+
+      // Usa o máximo entre order e delivery (mais conservador)
       const commission = Math.max(orderCommission, deliveryCommission);
       const freight    = Math.max(orderFreight, deliveryFreight);
-      const totalRetained = commission + freight;
 
-      // Descrição de custos retidos (comissão + frete Magalu)
-      const magaluCostInfo = `Comissão: ${brlFmt(commission)} | Frete Magalu: ${brlFmt(freight)} | Total retido: ${brlFmt(totalRetained)}`;
+      // ── Pagamento ──
+      const payment       = o.payments?.[0] || {};
+      const paymentMethod = payment.method || payment.type || '';
+      const paymentBrand  = payment.brand || payment.method_brand || '';
+      const installments  = payment.installments || 1;
 
-      const qty   = item.quantity || 1;
-      const image = info.images?.[0]?.url || null;
-      const isFull = delivery.shipping?.provider?.extras?.is_fulfillment === true;
+      // ── Envio ──
+      const trackingUrl   = delivery.shipping?.tracking?.url || delivery.shipping?.tracking_url || '';
+      const shippedAt     = delivery.shipping?.shipped_at || '';
+      const shippingType  = delivery.shipping?.provider?.extras?.shipping_type || '';
+      const isFull        = delivery.shipping?.provider?.extras?.is_fulfillment === true;
 
-      // delivery.status é mais específico que o.status (ex: 'invoiced' enquanto order ainda é 'approved')
+      // ── NF-e ──
+      const invoiceKey      = delivery.invoices?.[0]?.key || '';
+      const invoiceIssuedAt = delivery.invoices?.[0]?.issued_at || '';
+
+      // ── Status ──
       const deliveryStatus = (delivery.status || '').toLowerCase();
       const orderStatus    = (o.status || '').toLowerCase();
       const resolvedStatus = deliveryStatus || orderStatus;
       const status = statusMap[resolvedStatus] || statusMap[orderStatus] || 'paid';
+
+      const qty   = item.quantity || 1;
+      const image = info.images?.[0]?.url || null;
+
+      const magaluCostInfo = [
+        `Comissão: ${brlFmt(commission)}`,
+        `Tarifa: ${brlFmt(tarifaFixa)}`,
+        `Frete: ${brlFmt(freight)}`,
+        `Desconto total: ${brlFmt(discount)}`,
+        `Base comissão: ${brlFmt(commissionBase)}`,
+        `Líquido estimado: ${brlFmt(magaluSellerNet)}`,
+      ].join(' | ');
 
       return {
         id:               String(o.code || o.id),
@@ -1140,22 +1181,39 @@ async function fetchMagalu(acc, days) {
         magalu_channel:   o.channel || o.sales_channel || delivery.channel || 'MagazineLuiza',
         magalu_label_available: Boolean(delivery.id) && !isFull && !['cancelled','delivered'].includes(status),
         buyer_name:       o.customer?.name || '',
-        total_amount:     total,
-        platform_fee:     commission,
+        total_amount:     total,          // valor pago pelo cliente
+        paid_amount:      total,
+        platform_fee:     commission,     // comissão + tarifa (order level = max)
         shipping_fee:     freight,
-        tax_amount:       tax,
+        tax_amount:       orderTax,
+        discount_amount:  discount,       // desconto total aplicado
         quantity:         qty,
         order_date:       o.created_at || o.purchased_at || new Date().toISOString(),
         item_title:       info.name || info.description || 'Produto Magalu',
         item_image:       image,
         item_sku:         info.sku || '',
-        // Breakdown de custos retidos pela Magalu (comissão + frete)
-        magalu_cost_info:         magaluCostInfo,
-        magalu_commission_order:  orderCommission,
+        // Pagamento
+        payment_method:   paymentMethod,
+        payment_brand:    paymentBrand,
+        installments,
+        // Envio
+        tracking_url:     trackingUrl,
+        shipped_at:       shippedAt,
+        shipping_type:    shippingType,
+        // NF-e
+        invoice_key:      invoiceKey,
+        invoice_issued_at: invoiceIssuedAt,
+        // Breakdown financeiro Magalu
+        magalu_cost_info:           magaluCostInfo,
+        magalu_commission_order:    orderCommission,
         magalu_commission_delivery: deliveryCommission,
-        magalu_freight_order:     orderFreight,
-        magalu_freight_delivery:  deliveryFreight,
-        magalu_total_retained:    totalRetained,
+        magalu_freight_order:       orderFreight,
+        magalu_freight_delivery:    deliveryFreight,
+        magalu_tarifa_fixa:         tarifaFixa,
+        magalu_discount:            discount,
+        magalu_commission_base:     commissionBase,
+        magalu_seller_net:          magaluSellerNet,
+        magalu_total_retained:      commission + freight,
       };
     });
 }
@@ -1204,7 +1262,12 @@ async function enrichWithCosts(orders, userId) {
       ? parseFloat(o.shipping_fee || 0)
       : (ship_fixed === null ? parseFloat(o.shipping_fee || 0) : (parseFloat(ship_fixed || 0) * (o.quantity || 1)));
     const tax_amount = tax_pct === null ? parseFloat(o.tax_amount || 0) : (total_amount * tax_pct / 100);
-    const net_revenue= total_amount - platform_fee - shipping_fee - tax_amount;
+    // Para Magalu: usa o líquido real (commission_base - order_commission) que já desconta
+    // comissão%, tarifa fixa e subsídios de desconto da Magalu. Para outros: cálculo padrão.
+    const magalu_seller_net = o.magalu_seller_net != null ? parseFloat(o.magalu_seller_net) : null;
+    const net_revenue = (platform === 'magalu' && magalu_seller_net !== null)
+      ? magalu_seller_net - tax_amount
+      : total_amount - platform_fee - shipping_fee - tax_amount;
     const return_total_cost = returnMap[`${platform}:${String(o.platform_order_id || o.id || '')}`] || 0;
     const profit     = o.status === 'cancelled' ? 0 : (net_revenue - total_cost - return_total_cost);
     const margin     = o.total_amount > 0 ? (profit / o.total_amount * 100) : 0;
