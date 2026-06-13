@@ -938,7 +938,7 @@ async function fetchMagalu(acc, days) {
     new:        'pending',    // aguardando pagamento
     approved:   'paid',       // aprovado / pago
     processing: 'paid',       // em processamento
-    invoiced:   'shipped',    // nota fiscal emitida
+    invoiced:   'invoiced',   // NF aprovada, aguardando envio (era 'shipped' — errado)
     shipped:    'shipped',    // em rota de entrega
     delivered:  'delivered',  // entregue
     finished:   'delivered',  // finalizado
@@ -946,32 +946,45 @@ async function fetchMagalu(acc, days) {
     canceled:   'cancelled',
   };
 
+  const brlFmt = v => 'R$' + Number(v).toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+
   return allOrders
     // Filtra pedidos de teste da Magalu
     .filter(o => !MAGALU_TEST_DOCUMENTS.includes(o.customer?.document_number))
     .map(o => {
-      // Estrutura confirmada pelo debug:
-      // o.deliveries[0].items[0].info = { sku, name, images[{url}] }
-      // o.amounts = { total, commission, freight, tax, normalizer }
       const delivery = o.deliveries?.[0] || {};
       const item     = delivery.items?.[0] || {};
-      const info     = item.info || {};          // ← campo correto!
+      const info     = item.info || {};
       const norm     = o.amounts?.normalizer || 100;
+      const dNorm    = delivery.amounts?.normalizer || norm;
 
-      const total      = (o.amounts?.total                  || 0) / norm;
-      const commission = (o.amounts?.commission?.total      || 0) / norm;
-      const freight    = (o.amounts?.freight?.total         || 0) / norm;
-      const tax        = (o.amounts?.tax?.total             || 0) / norm;
-      const qty        = item.quantity || 1;
+      // Valores no nível do pedido (order-level)
+      const total              = (o.amounts?.total             || 0) / norm;
+      const orderCommission    = (o.amounts?.commission?.total || 0) / norm;
+      const orderFreight       = (o.amounts?.freight?.total    || 0) / norm;
+      const tax                = (o.amounts?.tax?.total        || 0) / norm;
 
-      // Imagem: info.images[0].url
+      // Valores no nível da entrega (delivery-level, por seller — mais específico)
+      const deliveryCommission = (delivery.amounts?.commission?.total || 0) / dNorm;
+      const deliveryFreight    = (delivery.amounts?.freight?.total    || 0) / dNorm;
+
+      // Usa o máximo entre order e delivery (mais conservador — protege margem)
+      const commission = Math.max(orderCommission, deliveryCommission);
+      const freight    = Math.max(orderFreight, deliveryFreight);
+      const totalRetained = commission + freight;
+
+      // Descrição de custos retidos (comissão + frete Magalu)
+      const magaluCostInfo = `Comissão: ${brlFmt(commission)} | Frete Magalu: ${brlFmt(freight)} | Total retido: ${brlFmt(totalRetained)}`;
+
+      const qty   = item.quantity || 1;
       const image = info.images?.[0]?.url || null;
-
-      // Fulfillment: via shipping.provider.extras.is_fulfillment
       const isFull = delivery.shipping?.provider?.extras?.is_fulfillment === true;
 
-      const orderStatus = (o.status || '').toLowerCase();
-      const status = statusMap[orderStatus] || 'paid';
+      // delivery.status é mais específico que o.status (ex: 'invoiced' enquanto order ainda é 'approved')
+      const deliveryStatus = (delivery.status || '').toLowerCase();
+      const orderStatus    = (o.status || '').toLowerCase();
+      const resolvedStatus = deliveryStatus || orderStatus;
+      const status = statusMap[resolvedStatus] || statusMap[orderStatus] || 'paid';
 
       return {
         id:               String(o.code || o.id),
@@ -980,7 +993,6 @@ async function fetchMagalu(acc, days) {
         shop_name:        delivery.seller?.name || acc.shop_name,
         fulfillment_type: isFull ? 'full' : 'normal',
         status,
-        // Dados de entrega para botão/diagnóstico de etiqueta Magalu
         delivery_id:      delivery.id || null,
         shipping_id:      delivery.id || null,
         magalu_delivery_id: delivery.id || null,
@@ -996,6 +1008,13 @@ async function fetchMagalu(acc, days) {
         item_title:       info.name || info.description || 'Produto Magalu',
         item_image:       image,
         item_sku:         info.sku || '',
+        // Breakdown de custos retidos pela Magalu (comissão + frete)
+        magalu_cost_info:         magaluCostInfo,
+        magalu_commission_order:  orderCommission,
+        magalu_commission_delivery: deliveryCommission,
+        magalu_freight_order:     orderFreight,
+        magalu_freight_delivery:  deliveryFreight,
+        magalu_total_retained:    totalRetained,
       };
     });
 }
