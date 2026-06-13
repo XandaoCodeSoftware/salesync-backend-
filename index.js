@@ -1085,8 +1085,8 @@ async function enrichWithCosts(orders, userId) {
     const total_cost = unit_cost * (o.quantity || 1);
     const total_amount = parseFloat(o.total_amount || 0);
     const platform_fee = fee_pct === null ? parseFloat(o.platform_fee || 0) : (total_amount * fee_pct / 100);
-    // Mercado Livre: frete é por pedido/cliente. Não usa frete padrão do SKU.
-    const shipping_fee = platform === 'mercadolivre'
+    // ML e Magalu: frete vem direto da API (valor real cobrado). Não usa ship_fixed do cadastro.
+    const shipping_fee = (platform === 'mercadolivre' || platform === 'magalu')
       ? parseFloat(o.shipping_fee || 0)
       : (ship_fixed === null ? parseFloat(o.shipping_fee || 0) : (parseFloat(ship_fixed || 0) * (o.quantity || 1)));
     const tax_amount = tax_pct === null ? parseFloat(o.tax_amount || 0) : (total_amount * tax_pct / 100);
