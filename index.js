@@ -1,4 +1,4 @@
-// SalesSync v5.5 — Backend Node.js
+// SalesSync v5.7 — Backend Node.js
 // Magalu corrigido com estrutura real da API
 const express = require('express');
 const { Pool } = require('pg');
@@ -1100,7 +1100,12 @@ async function fetchMagalu(acc, days) {
       const dNorm    = delivery.amounts?.normalizer || norm;
 
       // ── Amounts order-level ──
-      const total              = (o.amounts?.total             || 0) / norm;
+      const paidByCustomer     = (o.amounts?.total             || 0) / norm;
+      const uNorm              = item.unit_price?.normalizer || norm;
+      const unitPriceCatalog   = (item.unit_price?.value      || 0) / uNorm;
+      const qty                = item.quantity || 1;
+      // total_amount = preço de venda real (catálogo × qtd), não o valor pago após desconto
+      const total              = unitPriceCatalog > 0 ? unitPriceCatalog * qty : paidByCustomer;
       const orderCommission    = (o.amounts?.commission?.total || 0) / norm;
       const orderFreight       = (o.amounts?.freight?.total    || 0) / norm;
       const orderDiscount      = (o.amounts?.discount?.total   || 0) / norm;
@@ -1144,7 +1149,7 @@ async function fetchMagalu(acc, days) {
       const trackingUrl   = delivery.shipping?.tracking?.url || delivery.shipping?.tracking_url || '';
       const shippedAt     = delivery.shipping?.shipped_at || '';
       const shippingType  = delivery.shipping?.provider?.extras?.shipping_type || '';
-      const isFull        = delivery.shipping?.provider?.extras?.is_fulfillment === true;
+      const isFull = delivery.shipping?.provider?.extras?.is_fulfillment === true;
 
       // ── NF-e ──
       const invoiceKey      = delivery.invoices?.[0]?.key || '';
@@ -1155,8 +1160,6 @@ async function fetchMagalu(acc, days) {
       const orderStatus    = (o.status || '').toLowerCase();
       const resolvedStatus = deliveryStatus || orderStatus;
       const status = statusMap[resolvedStatus] || statusMap[orderStatus] || 'paid';
-
-      const qty   = item.quantity || 1;
       const image = info.images?.[0]?.url || null;
 
       const magaluCostInfo = [
@@ -1181,12 +1184,12 @@ async function fetchMagalu(acc, days) {
         magalu_channel:   o.channel || o.sales_channel || delivery.channel || 'MagazineLuiza',
         magalu_label_available: Boolean(delivery.id) && !isFull && !['cancelled','delivered'].includes(status),
         buyer_name:       o.customer?.name || '',
-        total_amount:     total,          // valor pago pelo cliente
-        paid_amount:      total,
-        platform_fee:     commission,     // comissão + tarifa (order level = max)
+        total_amount:     total,            // preço de catálogo × qtd (valor de venda real)
+        paid_amount:      paidByCustomer,  // valor pago pelo cliente (após desconto)
+        platform_fee:     commission,      // comissão + tarifa (order level = max)
         shipping_fee:     freight,
         tax_amount:       orderTax,
-        discount_amount:  discount,       // desconto total aplicado
+        discount_amount:  discount,        // desconto total aplicado
         quantity:         qty,
         order_date:       o.created_at || o.purchased_at || new Date().toISOString(),
         item_title:       info.name || info.description || 'Produto Magalu',
@@ -1256,12 +1259,19 @@ async function enrichWithCosts(orders, userId) {
     const ship_fixed = product.shipping_fee === null || product.shipping_fee === undefined ? defaults.shipping_fee : product.shipping_fee;
     const total_cost = unit_cost * (o.quantity || 1);
     const total_amount = parseFloat(o.total_amount || 0);
-    const platform_fee = fee_pct === null ? parseFloat(o.platform_fee || 0) : (total_amount * fee_pct / 100);
+    // Para Magalu: paid_amount = valor NF (o que cliente pagou após desconto).
+    // total_amount = preço catálogo (para exibição de faturamento). Imposto é sobre NF.
+    const paid_amount = platform === 'magalu'
+      ? parseFloat(o.paid_amount || o.total_amount || 0)
+      : total_amount;
+    const platform_fee = fee_pct === null ? parseFloat(o.platform_fee || 0) : (paid_amount * fee_pct / 100);
     // ML e Magalu: frete vem direto da API (valor real cobrado). Não usa ship_fixed do cadastro.
     const shipping_fee = (platform === 'mercadolivre' || platform === 'magalu')
       ? parseFloat(o.shipping_fee || 0)
       : (ship_fixed === null ? parseFloat(o.shipping_fee || 0) : (parseFloat(ship_fixed || 0) * (o.quantity || 1)));
-    const tax_amount = tax_pct === null ? parseFloat(o.tax_amount || 0) : (total_amount * tax_pct / 100);
+    // Imposto sobre o valor da NF (paid_amount), não sobre o preço catálogo
+    const tax_base = platform === 'magalu' ? paid_amount : total_amount;
+    const tax_amount = tax_pct === null ? parseFloat(o.tax_amount || 0) : (tax_base * tax_pct / 100);
     // Para Magalu: usa o líquido real (commission_base - order_commission) que já desconta
     // comissão%, tarifa fixa e subsídios de desconto da Magalu. Para outros: cálculo padrão.
     const magalu_seller_net = o.magalu_seller_net != null ? parseFloat(o.magalu_seller_net) : null;
@@ -5120,27 +5130,4 @@ REGRAS IMPORTANTES:
     }
 
     const messages = [
-      { role: 'system', content: systemPrompt },
-      ...history.slice(-10).map(h => ({ role: h.role, content: h.content })),
-      { role: 'user', content: userContent }
-    ];
-
-    const { data } = await axios.post('https://api.openai.com/v1/chat/completions', {
-      model: 'gpt-4o-mini',
-      messages,
-      max_tokens: wantsCsv ? 4000 : 700,
-      temperature: 0.7
-    }, {
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }
-    });
-
-    const reply = data.choices?.[0]?.message?.content || 'Sem resposta.';
-    res.json({ reply, tokens_used: data.usage?.total_tokens || 0 });
-  } catch(e) {
-    const msg = e.response?.data?.error?.message || e.message;
-    res.status(500).json({ error: msg });
-  }
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v5.2 rodando na porta ${PORT}`));  
+      { role: 'system', con
