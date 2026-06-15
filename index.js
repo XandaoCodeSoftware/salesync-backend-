@@ -697,28 +697,57 @@ pre{background:#0D1117;border-radius:8px;padding:12px;overflow-x:auto;font-size:
         steps += `<div class="row"><span class="l">✅ Primeiro order_sn encontrado</span><span class="v ok">${orders[0].order_sn}</span></div>
 <div class="row"><span class="l">Tem mais páginas na janela?</span><span class="v">${more ? 'Sim' : 'Não'}</span></div>`;
 
-        // 2c. Detail do primeiro pedido
-        const firstSn = orders[0].order_sn;
-        const orderDetail = await testEndpoint('GET /api/v2/order/get_order_detail', '/api/v2/order/get_order_detail', {
-          order_sn_list: firstSn,
-          response_optional_fields: 'buyer_username,pay_time,item_list,actual_shipping_fee,commission_fee,service_fee,escrow_amount,buyer_total_amount,payment_method'
+        // Pega o primeiro pedido NÃO cancelado para ter dados financeiros reais
+        const nonCancelledSn = orders.find(x => !String(x.order_sn).startsWith(''))?.order_sn || orders[0].order_sn;
+        // Busca detalhes de todos os order_sn encontrados para achar um não-cancelado
+        const allSnsList = [...new Set([...orders.map(x=>x.order_sn)])].slice(0,5).join(',');
+        const orderDetailAll = await testEndpoint('GET /api/v2/order/get_order_detail (lote)', '/api/v2/order/get_order_detail', {
+          order_sn_list: allSnsList,
+          response_optional_fields: 'buyer_username,pay_time,item_list,actual_shipping_fee,actual_shipping_fee_confirmed,commission_fee,service_fee,escrow_amount,buyer_total_amount,payment_method,checkout_shipping_carrier,reverse_shipping_fee'
         });
-        steps += `</div><div class="section"><h2>4. Order Detail (1º pedido: ${firstSn})</h2>
-<div class="row"><span class="l">Status</span><span class="v ${orderDetail.ok?'ok':'err'}">${orderDetail.ok ? '✅ OK' : '❌ ERRO '+orderDetail.status}</span></div>`;
-        if (orderDetail.ok) {
-          const o = orderDetail.data?.response?.order_list?.[0] || {};
-          steps += `<div class="row"><span class="l">order_status</span><span class="v">${o.order_status||'—'}</span></div>
+        const allDetailOrders = orderDetailAll.data?.response?.order_list || [];
+        // Prefere pedido COMPLETED ou SHIPPED para ter dados financeiros
+        const bestOrder = allDetailOrders.find(x => ['COMPLETED','SHIPPED','TO_CONFIRM_RECEIVE','PROCESSED'].includes(x.order_status))
+                       || allDetailOrders.find(x => x.order_status !== 'CANCELLED')
+                       || allDetailOrders[0] || {};
+        const firstSn = bestOrder.order_sn || orders[0].order_sn;
+
+        steps += `</div><div class="section"><h2>4. Order Detail — pedido: ${firstSn} (${bestOrder.order_status||'?'})</h2>
+<div class="row"><span class="l">Status HTTP</span><span class="v ${orderDetailAll.ok?'ok':'err'}">${orderDetailAll.ok ? '✅ OK' : '❌ '+orderDetailAll.status}</span></div>`;
+        const o = bestOrder;
+        steps += `
+<div class="row"><span class="l">order_status</span><span class="v">${o.order_status||'—'}</span></div>
 <div class="row"><span class="l">buyer_username</span><span class="v">${o.buyer_username||'—'}</span></div>
-<div class="row"><span class="l">buyer_total_amount</span><span class="v">${o.buyer_total_amount||'—'}</span></div>
-<div class="row"><span class="l">commission_fee</span><span class="v">${o.commission_fee||'—'}</span></div>
-<div class="row"><span class="l">service_fee</span><span class="v">${o.service_fee||'—'}</span></div>
-<div class="row"><span class="l">actual_shipping_fee</span><span class="v">${o.actual_shipping_fee||'—'}</span></div>
-<div class="row"><span class="l">escrow_amount</span><span class="v">${o.escrow_amount||'—'}</span></div>
-<div class="row"><span class="l">item_list[0].item_name</span><span class="v">${o.item_list?.[0]?.item_name||'—'}</span></div>
-<div class="row"><span class="l">item_list[0].model_sku</span><span class="v">${o.item_list?.[0]?.model_sku||'—'}</span></div>
+<div class="row"><span class="l">buyer_total_amount</span><span class="v ${o.buyer_total_amount!=null?'ok':'warn'}">${o.buyer_total_amount??'❌ ausente'}</span></div>
+<div class="row"><span class="l">commission_fee</span><span class="v ${o.commission_fee!=null?'ok':'warn'}">${o.commission_fee??'❌ ausente'}</span></div>
+<div class="row"><span class="l">service_fee</span><span class="v ${o.service_fee!=null?'ok':'warn'}">${o.service_fee??'❌ ausente'}</span></div>
+<div class="row"><span class="l">actual_shipping_fee</span><span class="v ${o.actual_shipping_fee!=null?'ok':'warn'}">${o.actual_shipping_fee??'❌ ausente'}</span></div>
+<div class="row"><span class="l">actual_shipping_fee_confirmed</span><span class="v">${o.actual_shipping_fee_confirmed??'—'}</span></div>
+<div class="row"><span class="l">escrow_amount</span><span class="v ${o.escrow_amount!=null?'ok':'warn'}">${o.escrow_amount??'❌ ausente'}</span></div>
+<div class="row"><span class="l">reverse_shipping_fee</span><span class="v">${o.reverse_shipping_fee??'—'}</span></div>
+<div class="row"><span class="l">item_name</span><span class="v">${o.item_list?.[0]?.item_name||'—'}</span></div>
+<div class="row"><span class="l">model_sku</span><span class="v">${o.item_list?.[0]?.model_sku||'—'}</span></div>
+<div class="row"><span class="l">image_info.image_url</span><span class="v ok">${o.item_list?.[0]?.image_info?.image_url ? '✅ presente' : '❌ ausente'}</span></div>
 <details style="margin-top:8px"><summary style="cursor:pointer;color:#64748B;font-size:11px">JSON completo do pedido</summary><pre>${JSON.stringify(o, null, 2)}</pre></details>`;
+
+        // 4b. Testa v2.payment.get_escrow_detail (dados financeiros reais pós-entrega)
+        const escrowDetail = await testEndpoint('GET /api/v2/payment/get_escrow_detail', '/api/v2/payment/get_escrow_detail', {
+          order_sn: firstSn
+        });
+        steps += `</div><div class="section"><h2>4b. Escrow/Payment Detail (${firstSn})</h2>
+<div class="row"><span class="l">Status</span><span class="v ${escrowDetail.ok?'ok':'err'}">${escrowDetail.ok ? '✅ OK' : '❌ ERRO '+escrowDetail.status}</span></div>`;
+        if (escrowDetail.ok) {
+          const ed = escrowDetail.data?.response || {};
+          steps += `
+<div class="row"><span class="l">buyer_total_amount</span><span class="v">${ed.buyer_total_amount??'—'}</span></div>
+<div class="row"><span class="l">actual_shipping_fee</span><span class="v">${ed.actual_shipping_fee??'—'}</span></div>
+<div class="row"><span class="l">commission_fee</span><span class="v">${ed.commission_fee??'—'}</span></div>
+<div class="row"><span class="l">service_fee</span><span class="v">${ed.service_fee??'—'}</span></div>
+<div class="row"><span class="l">escrow_amount</span><span class="v">${ed.escrow_amount??'—'}</span></div>
+<div class="row"><span class="l">seller_income</span><span class="v">${ed.seller_income??'—'}</span></div>
+<details style="margin-top:8px"><summary style="cursor:pointer;color:#64748B;font-size:11px">JSON completo escrow</summary><pre>${JSON.stringify(ed, null, 2)}</pre></details>`;
         } else {
-          steps += `<pre>${JSON.stringify(orderDetail.error, null, 2)}</pre>`;
+          steps += `<pre>${JSON.stringify(escrowDetail.data||escrowDetail.error, null, 2)}</pre>`;
         }
         steps += `</div>`;
       } else {
