@@ -976,6 +976,28 @@ const SHOPEE_BASE = process.env.SHOPEE_ENV === 'test'
 const SHOPEE_PID  = () => String(process.env.SHOPEE_PARTNER_ID || '');
 const SHOPEE_KEY  = () => String(process.env.SHOPEE_PARTNER_KEY || '');
 
+// ── ALERTA DE EXPIRAÇÃO DA KEY SHOPEE ──
+(function checkShopeeKeyExpiry() {
+  const expiresAt = process.env.SHOPEE_KEY_EXPIRES_AT;
+  const mode = process.env.SHOPEE_ENV === 'test' ? 'TEST' : 'PRODUÇÃO';
+  if (!expiresAt) {
+    console.warn(`[Shopee] ⚠ SHOPEE_KEY_EXPIRES_AT não definido! Configure a data de expiração da key (modo: ${mode}).`);
+    return;
+  }
+  const expDate = new Date(expiresAt);
+  const now = new Date();
+  const daysLeft = Math.ceil((expDate - now) / 86400000);
+  if (daysLeft <= 0) {
+    console.error(`[Shopee] ❌ API Key EXPIRADA em ${expDate.toLocaleDateString('pt-BR')} (modo: ${mode})! Renove imediatamente no Shopee Partner Center.`);
+  } else if (daysLeft <= 7) {
+    console.error(`[Shopee] 🚨 URGENTE: API Key expira em ${daysLeft} dia(s) — ${expDate.toLocaleDateString('pt-BR')} (modo: ${mode})! Renove agora.`);
+  } else if (daysLeft <= 30) {
+    console.warn(`[Shopee] ⚠ API Key expira em ${daysLeft} dia(s) — ${expDate.toLocaleDateString('pt-BR')} (modo: ${mode}). Renove em breve.`);
+  } else {
+    console.log(`[Shopee] ✅ API Key OK — expira em ${daysLeft} dia(s) (${expDate.toLocaleDateString('pt-BR')}) · modo: ${mode}`);
+  }
+})();
+
 // Assinatura Shopee v2:
 // - Partner-level (sem shop): pid + path + ts
 // - Shop-level (com shop): pid + path + ts + access_token + shop_id
@@ -5271,6 +5293,35 @@ REGRAS IMPORTANTES:
     const msg = e.response?.data?.error?.message || e.message;
     res.status(500).json({ error: msg });
   }
+});
+
+// ── STATUS DA KEY SHOPEE ──
+app.get('/api/shopee/key-status', auth, (req, res) => {
+  const expiresAt = process.env.SHOPEE_KEY_EXPIRES_AT;
+  const mode = process.env.SHOPEE_ENV === 'test' ? 'test' : 'production';
+  if (!expiresAt) return res.json({ ok: true, mode, warning: false, message: 'SHOPEE_KEY_EXPIRES_AT não configurado.' });
+  const expDate = new Date(expiresAt);
+  const now = new Date();
+  const daysLeft = Math.ceil((expDate - now) / 86400000);
+  let level = 'ok';
+  if (daysLeft <= 0) level = 'expired';
+  else if (daysLeft <= 7) level = 'critical';
+  else if (daysLeft <= 30) level = 'warning';
+  res.json({
+    ok: level === 'ok',
+    mode,
+    level,
+    daysLeft,
+    expiresAt: expDate.toISOString(),
+    expiresFormatted: expDate.toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit', timeZone:'America/Sao_Paulo' }),
+    message: level === 'expired'
+      ? `⛔ Shopee API Key EXPIRADA! Renove no Shopee Partner Center.`
+      : level === 'critical'
+      ? `🚨 Shopee API Key expira em ${daysLeft} dia(s)! Renove URGENTE.`
+      : level === 'warning'
+      ? `⚠️ Shopee API Key expira em ${daysLeft} dia(s). Renove em breve.`
+      : `✅ Shopee API Key OK — ${daysLeft} dias restantes.`
+  });
 });
 
 const PORT = process.env.PORT || 3000;
