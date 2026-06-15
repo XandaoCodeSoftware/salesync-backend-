@@ -662,6 +662,7 @@ pre{background:#0D1117;border-radius:8px;padding:12px;overflow-x:auto;font-size:
     steps += `<div class="section"><h2>3. Order List — diagnóstico completo</h2>`;
 
     // Testa variações de time_range_field e janelas
+    // order_status: 'ALL' é INVÁLIDO na Shopee — omitir o parâmetro retorna todos os status
     const combos = [
       { label: 'create_time · últimos 7 dias',   field: 'create_time', from: nowDebug - 7*86400,  to: nowDebug },
       { label: 'create_time · últimos 15 dias',  field: 'create_time', from: nowDebug - W,         to: nowDebug },
@@ -674,7 +675,8 @@ pre{background:#0D1117;border-radius:8px;padding:12px;overflow-x:auto;font-size:
     let orders = [], firstWindowOk = null;
     for (const c of combos) {
       const r = await testEndpoint(c.label, '/api/v2/order/get_order_list', {
-        time_range_field: c.field, time_from: c.from, time_to: c.to, page_size: 10, order_status: 'ALL'
+        time_range_field: c.field, time_from: c.from, time_to: c.to, page_size: 10
+        // order_status omitido = retorna todos os status
       });
       const list = r.data?.response?.order_list || [];
       // Mostra JSON RAW completo (não só .response) para ver error/message do topo
@@ -1292,7 +1294,8 @@ async function fetchShopee(acc, days) {
     for (let page = 0; page < 20; page++) {
       const data = await shopeeGet(listPath, {
         time_range_field: 'create_time', time_from: win.from, time_to: win.to,
-        page_size: 50, order_status: 'ALL', cursor,
+        page_size: 50, cursor,
+        // order_status omitido = retorna TODOS os status (ALL não é valor válido na API Shopee)
       });
       const list = data.response?.order_list || [];
       for (const o of list) {
