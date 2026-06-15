@@ -2498,47 +2498,110 @@ app.get('/callback/mercadolivre', async (req, res) => {
 });
 
 // ── OAUTH SHOPEE ──
-app.get('/auth/shopee', (req, res) => {
+// A Shopee NÃO devolve o state/uid no callback.
+// Solução: salvar user_id em tabela temporária (nonce) antes de redirecionar,
+// e recuperar pelo shop_id no callback.
+async function ensureShopeeNonceTable() {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS shopee_oauth_nonce (
+      nonce      TEXT PRIMARY KEY,
+      user_id    UUID NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW()
+    )
+  `).catch(() => {});
+}
+ensureShopeeNonceTable();
+
+app.get('/auth/shopee', async (req, res) => {
+  const uid = req.query.user_id || '';
+  if (!uid) return res.status(400).send('user_id obrigatório');
+
+  // Salva nonce → user_id no banco (expira em 10 min, mas não precisamos limpar imediatamente)
+  const nonce = crypto.randomBytes(16).toString('hex');
+  await db.query(
+    `INSERT INTO shopee_oauth_nonce (nonce, user_id) VALUES ($1, $2)
+     ON CONFLICT (nonce) DO UPDATE SET user_id=$2, created_at=NOW()`,
+    [nonce, uid]
+  ).catch(e => console.error('[Shopee nonce save]', e.message));
+
   const ts   = Math.floor(Date.now() / 1000);
   const path = '/api/v2/shop/auth_partner';
   const sign = shopeeSign(SHOPEE_PID(), path, ts, SHOPEE_KEY());
 
-  // SHOPEE_REDIRECT_URI deve ser EXATAMENTE o domínio cadastrado no Shopee Partner Console.
-  // Exemplo: https://api2.salesync.shop/callback/shopee
-  // O uid vai no state (não no redirect) pois a Shopee não aceita query params extras no redirect.
-  const redirectUri = process.env.SHOPEE_REDIRECT_URI || '';
-  const uid = req.query.user_id || '';
+  // Embutimos o nonce na redirect_uri como query param — a Shopee preserva o path+query do redirect.
+  const baseRedirect = process.env.SHOPEE_REDIRECT_URI || '';
+  const redirectUri  = `${baseRedirect}?nonce=${nonce}`;
 
-  // Shopee v2: state é passado via parâmetro separado (retornado como-está no callback)
-  const authUrl = `${SHOPEE_BASE}${path}?partner_id=${SHOPEE_PID()}&timestamp=${ts}&sign=${sign}&redirect=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(uid)}`;
-  console.log('[Shopee Auth] redirect to:', authUrl);
+  const authUrl = `${SHOPEE_BASE}${path}?partner_id=${SHOPEE_PID()}&timestamp=${ts}&sign=${sign}&redirect=${encodeURIComponent(redirectUri)}`;
+  console.log('[Shopee Auth] uid:', uid, '| nonce:', nonce);
   res.redirect(authUrl);
 });
 
 app.get('/callback/shopee', async (req, res) => {
-  // uid pode vir via state (novo) ou via query param ?uid= (legado)
-  const { code, shop_id, state } = req.query;
-  const uid = req.query.uid || state || '';
-  console.log('[Shopee Callback] code:', code ? 'ok' : 'MISSING', '| shop_id:', shop_id, '| uid:', uid);
+  const { code, shop_id, nonce } = req.query;
+  console.log('[Shopee Callback] code:', code ? 'ok' : 'MISSING', '| shop_id:', shop_id, '| nonce:', nonce || '(vazio)');
+
   if (!code) return res.redirect('https://salesync.shop?error=shopee_no_code');
+
+  // Recupera user_id pelo nonce
+  let uid = '';
+  if (nonce) {
+    try {
+      const { rows } = await db.query(
+        `DELETE FROM shopee_oauth_nonce WHERE nonce=$1 AND created_at > NOW() - INTERVAL '10 minutes' RETURNING user_id`,
+        [nonce]
+      );
+      uid = rows[0]?.user_id || '';
+      if (!uid) console.warn('[Shopee Callback] nonce expirado ou não encontrado:', nonce);
+    } catch(e) { console.error('[Shopee nonce lookup]', e.message); }
+  }
+
+  if (!uid) {
+    console.error('[Shopee Callback] ❌ user_id não encontrado — nonce inválido/expirado');
+    return res.redirect('https://salesync.shop?error=shopee_session_expired');
+  }
+
   try {
-    const ts=Math.floor(Date.now()/1000), path='/api/v2/auth/token/get';
-    const sign=shopeeSign(SHOPEE_PID(), path, ts, SHOPEE_KEY());
-    const { data:tk } = await axios.post(
+    const ts   = Math.floor(Date.now() / 1000);
+    const path = '/api/v2/auth/token/get';
+    const sign = shopeeSign(SHOPEE_PID(), path, ts, SHOPEE_KEY());
+    const { data: tk } = await axios.post(
       `${SHOPEE_BASE}${path}?partner_id=${SHOPEE_PID()}&timestamp=${ts}&sign=${sign}`,
-      { code, partner_id:parseInt(process.env.SHOPEE_PARTNER_ID), shop_id:parseInt(shop_id) },
-      { headers:{ 'Content-Type':'application/json' } }
+      { code, partner_id: parseInt(process.env.SHOPEE_PARTNER_ID), shop_id: parseInt(shop_id) },
+      { headers: { 'Content-Type': 'application/json' } }
     );
+
+    if (!tk.access_token) throw new Error(JSON.stringify(tk));
+
+    // Busca nome real da loja
+    let shopName = `Shopee Loja ${shop_id}`;
+    try {
+      const ts2   = Math.floor(Date.now() / 1000);
+      const spath = '/api/v2/shop/get_shop_info';
+      const ssign = shopeeSign(SHOPEE_PID(), spath, ts2, SHOPEE_KEY(), tk.access_token, String(shop_id));
+      const { data: si } = await axios.get(`${SHOPEE_BASE}${spath}`, {
+        params: { partner_id: SHOPEE_PID(), shop_id: String(shop_id), access_token: tk.access_token, timestamp: ts2, sign: ssign }
+      });
+      shopName = si?.response?.shop_name || si?.shop_name || shopName;
+    } catch(e) { console.warn('[Shopee] shop_info falhou, usando nome padrão:', e.message); }
+
     await db.query(`
       INSERT INTO marketplace_accounts (user_id,platform,platform_shop_id,shop_name,access_token,refresh_token,token_expires_at,mode,is_active)
       VALUES ($1,'shopee',$2,$3,$4,$5,$6,'normal',true)
       ON CONFLICT (user_id,platform,platform_shop_id) DO UPDATE SET
-        access_token=EXCLUDED.access_token,refresh_token=EXCLUDED.refresh_token,
-        token_expires_at=EXCLUDED.token_expires_at,is_active=true,updated_at=NOW()`,
-      [uid, String(shop_id), `Shopee Loja ${shop_id}`, tk.access_token, tk.refresh_token, new Date(Date.now()+(tk.expire_in||14400)*1000)]
+        access_token=EXCLUDED.access_token, refresh_token=EXCLUDED.refresh_token,
+        token_expires_at=EXCLUDED.token_expires_at, shop_name=EXCLUDED.shop_name,
+        is_active=true, updated_at=NOW()`,
+      [uid, String(shop_id), shopName, tk.access_token, tk.refresh_token,
+       new Date(Date.now() + (tk.expire_in || 14400) * 1000)]
     );
+
+    console.log(`[Shopee] ✅ Conta conectada: ${shopName} (shop_id ${shop_id}) → user ${uid}`);
     res.redirect('https://salesync.shop?connected=shopee');
-  } catch(e) { console.error('[Shopee]', e.response?.data||e.message); res.redirect('https://salesync.shop?error=shopee_failed'); }
+  } catch(e) {
+    console.error('[Shopee callback]', e.response?.data || e.message);
+    res.redirect('https://salesync.shop?error=shopee_failed');
+  }
 });
 
 // ── OAUTH MAGALU ──
