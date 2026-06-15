@@ -677,14 +677,16 @@ pre{background:#0D1117;border-radius:8px;padding:12px;overflow-x:auto;font-size:
         time_range_field: c.field, time_from: c.from, time_to: c.to, page_size: 10, order_status: 'ALL'
       });
       const list = r.data?.response?.order_list || [];
-      const rawJson = JSON.stringify(r.data?.response || r.error || {}).slice(0, 200);
+      // Mostra JSON RAW completo (não só .response) para ver error/message do topo
+      const rawFull = JSON.stringify(r.data || r.error || {}, null, 2);
       steps += `<div class="row">
         <span class="l" style="font-size:10px">${c.label}</span>
         <span class="v ${r.ok ? (list.length ? 'ok' : 'warn') : 'err'}" style="font-size:10px">
-          ${r.ok ? `${list.length} pedido(s)` : '❌ '+r.status}
+          ${r.ok ? `${list.length} pedido(s)` : '❌ HTTP '+r.status}
         </span>
       </div>
-      <div style="font-size:9px;color:#475569;padding:2px 0 6px 8px;word-break:break-all">${rawJson}</div>`;
+      <details style="margin-bottom:6px"><summary style="cursor:pointer;color:#475569;font-size:10px;padding:2px 8px">▶ ver JSON completo</summary>
+      <pre style="font-size:10px;max-height:200px;overflow:auto">${rawFull}</pre></details>`;
       if (r.ok && list.length && !orders.length) { orders = list; firstWindowOk = r; }
     }
 
