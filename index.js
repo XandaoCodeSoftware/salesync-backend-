@@ -656,29 +656,41 @@ pre{background:#0D1117;border-radius:8px;padding:12px;overflow-x:auto;font-size:
     }
     steps += `<details style="margin-top:8px"><summary style="cursor:pointer;color:#64748B;font-size:11px">JSON completo</summary><pre>${JSON.stringify(shopInfo.data||shopInfo.error, null, 2)}</pre></details></div>`;
 
-    // 2b. Order list — testa janelas de 15 dias (limitação da API Shopee)
+    // 2b. Order list — testa múltiplas combinações para achar o que funciona
     const nowDebug = Math.floor(Date.now() / 1000);
-    const WINDOW = 15 * 86400;
-    // Testa as 3 janelas mais recentes de 15 dias
-    const debugWindows = [
-      { from: nowDebug - WINDOW,     to: nowDebug,             label: 'Últimos 15 dias' },
-      { from: nowDebug - WINDOW * 2, to: nowDebug - WINDOW,    label: '15-30 dias atrás' },
-      { from: nowDebug - WINDOW * 3, to: nowDebug - WINDOW * 2, label: '30-45 dias atrás' },
+    const W = 15 * 86400;
+    steps += `<div class="section"><h2>3. Order List — diagnóstico completo</h2>`;
+
+    // Testa variações de time_range_field e janelas
+    const combos = [
+      { label: 'create_time · últimos 7 dias',   field: 'create_time', from: nowDebug - 7*86400,  to: nowDebug },
+      { label: 'create_time · últimos 15 dias',  field: 'create_time', from: nowDebug - W,         to: nowDebug },
+      { label: 'create_time · 15-30 dias atrás', field: 'create_time', from: nowDebug - W*2,       to: nowDebug - W },
+      { label: 'create_time · 30-45 dias atrás', field: 'create_time', from: nowDebug - W*3,       to: nowDebug - W*2 },
+      { label: 'update_time · últimos 15 dias',  field: 'update_time', from: nowDebug - W,         to: nowDebug },
+      { label: 'update_time · 15-30 dias atrás', field: 'update_time', from: nowDebug - W*2,       to: nowDebug - W },
     ];
+
     let orders = [], firstWindowOk = null;
-    steps += `<div class="section"><h2>3. Order List (janelas de 15 dias — limitação Shopee)</h2>
-<div class="row"><span class="l" style="font-size:10px;color:#FBBF24">⚠ Shopee só aceita max 15 dias por request. Testando 3 janelas:</span></div>`;
-    for (const win of debugWindows) {
-      const wResult = await testEndpoint(`${win.label}`, '/api/v2/order/get_order_list', {
-        time_range_field: 'create_time', time_from: win.from, time_to: win.to, page_size: 5, order_status: 'ALL'
+    for (const c of combos) {
+      const r = await testEndpoint(c.label, '/api/v2/order/get_order_list', {
+        time_range_field: c.field, time_from: c.from, time_to: c.to, page_size: 10, order_status: 'ALL'
       });
-      const wOrders = wResult.data?.response?.order_list || [];
-      steps += `<div class="row"><span class="l">${win.label}</span><span class="v ${wResult.ok?'ok':'err'}">${wResult.ok ? `✅ ${wOrders.length} pedido(s)` : '❌ ERRO '+wResult.status}</span></div>`;
-      if (wResult.ok && wOrders.length && !orders.length) { orders = wOrders; firstWindowOk = wResult; }
+      const list = r.data?.response?.order_list || [];
+      const rawJson = JSON.stringify(r.data?.response || r.error || {}).slice(0, 200);
+      steps += `<div class="row">
+        <span class="l" style="font-size:10px">${c.label}</span>
+        <span class="v ${r.ok ? (list.length ? 'ok' : 'warn') : 'err'}" style="font-size:10px">
+          ${r.ok ? `${list.length} pedido(s)` : '❌ '+r.status}
+        </span>
+      </div>
+      <div style="font-size:9px;color:#475569;padding:2px 0 6px 8px;word-break:break-all">${rawJson}</div>`;
+      if (r.ok && list.length && !orders.length) { orders = list; firstWindowOk = r; }
     }
+
     const more = firstWindowOk?.data?.response?.more;
     if (orders.length) {
-        steps += `<div class="row"><span class="l">Primeiro order_sn encontrado</span><span class="v">${orders[0].order_sn}</span></div>
+        steps += `<div class="row"><span class="l">✅ Primeiro order_sn encontrado</span><span class="v ok">${orders[0].order_sn}</span></div>
 <div class="row"><span class="l">Tem mais páginas na janela?</span><span class="v">${more ? 'Sim' : 'Não'}</span></div>`;
 
         // 2c. Detail do primeiro pedido
