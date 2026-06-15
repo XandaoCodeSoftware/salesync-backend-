@@ -656,22 +656,30 @@ pre{background:#0D1117;border-radius:8px;padding:12px;overflow-x:auto;font-size:
     }
     steps += `<details style="margin-top:8px"><summary style="cursor:pointer;color:#64748B;font-size:11px">JSON completo</summary><pre>${JSON.stringify(shopInfo.data||shopInfo.error, null, 2)}</pre></details></div>`;
 
-    // 2b. Order list
-    const since = Math.floor((Date.now() - days * 86400000) / 1000);
-    const timeTo = Math.floor(Date.now() / 1000);
-    const orderList = await testEndpoint('GET /api/v2/order/get_order_list', '/api/v2/order/get_order_list', {
-      time_range_field: 'create_time', time_from: since, time_to: timeTo, page_size: 5, order_status: 'ALL'
-    });
-    steps += `<div class="section"><h2>3. Order List (últimos ${days} dias)</h2>
-<div class="row"><span class="l">Status</span><span class="v ${orderList.ok?'ok':'err'}">${orderList.ok ? '✅ OK' : '❌ ERRO '+orderList.status}</span></div>`;
-    if (orderList.ok) {
-      const orders = orderList.data?.response?.order_list || [];
-      const more   = orderList.data?.response?.more;
-      steps += `<div class="row"><span class="l">Pedidos retornados</span><span class="v">${orders.length}</span></div>
-<div class="row"><span class="l">Tem mais páginas?</span><span class="v">${more ? 'Sim' : 'Não'}</span></div>`;
-      if (orders.length) {
-        steps += `<div class="row"><span class="l">Primeiro order_sn</span><span class="v">${orders[0].order_sn}</span></div>
-<div class="row"><span class="l">Último order_sn</span><span class="v">${orders[orders.length-1].order_sn}</span></div>`;
+    // 2b. Order list — testa janelas de 15 dias (limitação da API Shopee)
+    const nowDebug = Math.floor(Date.now() / 1000);
+    const WINDOW = 15 * 86400;
+    // Testa as 3 janelas mais recentes de 15 dias
+    const debugWindows = [
+      { from: nowDebug - WINDOW,     to: nowDebug,             label: 'Últimos 15 dias' },
+      { from: nowDebug - WINDOW * 2, to: nowDebug - WINDOW,    label: '15-30 dias atrás' },
+      { from: nowDebug - WINDOW * 3, to: nowDebug - WINDOW * 2, label: '30-45 dias atrás' },
+    ];
+    let orders = [], firstWindowOk = null;
+    steps += `<div class="section"><h2>3. Order List (janelas de 15 dias — limitação Shopee)</h2>
+<div class="row"><span class="l" style="font-size:10px;color:#FBBF24">⚠ Shopee só aceita max 15 dias por request. Testando 3 janelas:</span></div>`;
+    for (const win of debugWindows) {
+      const wResult = await testEndpoint(`${win.label}`, '/api/v2/order/get_order_list', {
+        time_range_field: 'create_time', time_from: win.from, time_to: win.to, page_size: 5, order_status: 'ALL'
+      });
+      const wOrders = wResult.data?.response?.order_list || [];
+      steps += `<div class="row"><span class="l">${win.label}</span><span class="v ${wResult.ok?'ok':'err'}">${wResult.ok ? `✅ ${wOrders.length} pedido(s)` : '❌ ERRO '+wResult.status}</span></div>`;
+      if (wResult.ok && wOrders.length && !orders.length) { orders = wOrders; firstWindowOk = wResult; }
+    }
+    const more = firstWindowOk?.data?.response?.more;
+    if (orders.length) {
+        steps += `<div class="row"><span class="l">Primeiro order_sn encontrado</span><span class="v">${orders[0].order_sn}</span></div>
+<div class="row"><span class="l">Tem mais páginas na janela?</span><span class="v">${more ? 'Sim' : 'Não'}</span></div>`;
 
         // 2c. Detail do primeiro pedido
         const firstSn = orders[0].order_sn;
@@ -698,11 +706,8 @@ pre{background:#0D1117;border-radius:8px;padding:12px;overflow-x:auto;font-size:
         }
         steps += `</div>`;
       } else {
-        steps += `<div style="color:#FBBF24;padding:8px">⚠ Nenhum pedido nos últimos ${days} dias. Tente ?days=90 ou ?days=180</div>`;
+        steps += `<div style="color:#FBBF24;padding:8px 0">⚠ Nenhum pedido encontrado nas últimas 3 janelas de 15 dias (45 dias no total).</div>`;
       }
-    } else {
-      steps += `<pre>${JSON.stringify(orderList.error, null, 2)}</pre>`;
-    }
     steps += `</div>`;
 
     // 3. Parâmetros usados
@@ -1230,8 +1235,11 @@ async function fetchShopee(acc, days) {
     acc = { ...acc, access_token: token };
   }
 
-  const since   = Math.floor((Date.now() - days * 86400000) / 1000);
-  const timeTo  = Math.floor(Date.now() / 1000);
+  // Shopee limita get_order_list a janelas de 15 dias por request.
+  // Para períodos maiores, divide em blocos de 15 dias e concatena.
+  const SHOPEE_WINDOW_DAYS = 15;
+  const nowTs    = Math.floor(Date.now() / 1000);
+  const sinceTs  = Math.floor((Date.now() - days * 86400000) / 1000);
   const listPath = '/api/v2/order/get_order_list';
 
   // Helper: faz GET e detecta token inválido automaticamente
@@ -1239,7 +1247,6 @@ async function fetchShopee(acc, days) {
     const params = shopeeParams(path, acc, extraParams);
     try {
       const { data } = await axios.get(`${SHOPEE_BASE}${path}`, { params });
-      // Shopee retorna 200 mas com error no body em alguns casos
       if (data?.error && SHOPEE_INVALID_TOKEN_ERRORS.some(e => String(data.error).toLowerCase().includes(e))) {
         await shopeeHandleInvalidToken(acc, data);
         throw new Error(`TOKEN_INVALID:${data.message || data.error}`);
@@ -1254,19 +1261,34 @@ async function fetchShopee(acc, days) {
     }
   }
 
-  // 1. Busca lista de order_sn (paginado)
-  const allSns = [];
-  let cursor = '';
-  for (let page = 0; page < 10; page++) {
-    const data = await shopeeGet(listPath, {
-      time_range_field: 'create_time', time_from: since, time_to: timeTo,
-      page_size: 50, order_status: 'ALL', cursor,
-    });
-    const list = data.response?.order_list || [];
-    allSns.push(...list.map(o => o.order_sn));
-    if (!data.response?.more || !list.length) break;
-    cursor = data.response.next_cursor || '';
+  // Gera janelas de 15 dias do mais recente para o mais antigo
+  const windows = [];
+  let winEnd = nowTs;
+  while (winEnd > sinceTs) {
+    const winStart = Math.max(sinceTs, winEnd - SHOPEE_WINDOW_DAYS * 86400);
+    windows.push({ from: winStart, to: winEnd });
+    winEnd = winStart;
   }
+
+  // 1. Busca lista de order_sn em todas as janelas
+  const allSns = [];
+  const seenSns = new Set();
+  for (const win of windows) {
+    let cursor = '';
+    for (let page = 0; page < 20; page++) {
+      const data = await shopeeGet(listPath, {
+        time_range_field: 'create_time', time_from: win.from, time_to: win.to,
+        page_size: 50, order_status: 'ALL', cursor,
+      });
+      const list = data.response?.order_list || [];
+      for (const o of list) {
+        if (!seenSns.has(o.order_sn)) { seenSns.add(o.order_sn); allSns.push(o.order_sn); }
+      }
+      if (!data.response?.more || !list.length) break;
+      cursor = data.response.next_cursor || '';
+    }
+  }
+  console.log(`[Shopee] ${allSns.length} order_sn coletados em ${windows.length} janela(s) de ${SHOPEE_WINDOW_DAYS} dias`);
 
   if (!allSns.length) return [];
 
