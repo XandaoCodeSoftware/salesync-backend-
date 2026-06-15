@@ -1197,12 +1197,36 @@ const SHOPEE_STATUS = {
   COMPLETED: 'delivered', CANCELLED: 'cancelled', IN_CANCEL: 'cancelled', TO_RETURN: 'cancelled',
 };
 
+// Detecta erros de token inválido da Shopee e marca conta como desconectada no banco.
+// Cobre sandbox→produção, token revogado, partner_id trocado, etc.
+const SHOPEE_INVALID_TOKEN_ERRORS = ['invalid_access_token', 'invalid_acceess_token', 'access_denied', 'token_expired', 'invalid_token'];
+async function shopeeHandleInvalidToken(account, errData) {
+  const errCode = String(errData?.error || errData?.message || errData || '').toLowerCase();
+  const isInvalid = SHOPEE_INVALID_TOKEN_ERRORS.some(e => errCode.includes(e));
+  if (isInvalid) {
+    console.warn(`[Shopee] ⚠ Token inválido para conta ${account.id} (shop ${account.platform_shop_id}) — limpando tokens. Causa: ${errCode}`);
+    await db.query(
+      `UPDATE marketplace_accounts
+       SET access_token=NULL, refresh_token=NULL, token_expires_at=NULL,
+           shop_name=COALESCE(NULLIF(shop_name,''),'Shopee (reconectar)'),
+           updated_at=NOW()
+       WHERE id=$1`,
+      [account.id]
+    ).catch(e => console.error('[Shopee] Erro ao limpar token:', e.message));
+    return true;
+  }
+  return false;
+}
+
 async function fetchShopee(acc, days) {
   // Renova token se necessário
   let token = acc.access_token;
   if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 300000)) {
     token = await refreshShopeeToken(acc);
-    if (!token) throw new Error('Token Shopee expirado — reconecte a loja');
+    if (!token) {
+      await shopeeHandleInvalidToken(acc, 'token_expired');
+      throw new Error('TOKEN_INVALID:Token Shopee expirado — reconecte a loja');
+    }
     acc = { ...acc, access_token: token };
   }
 
@@ -1210,15 +1234,34 @@ async function fetchShopee(acc, days) {
   const timeTo  = Math.floor(Date.now() / 1000);
   const listPath = '/api/v2/order/get_order_list';
 
+  // Helper: faz GET e detecta token inválido automaticamente
+  async function shopeeGet(path, extraParams) {
+    const params = shopeeParams(path, acc, extraParams);
+    try {
+      const { data } = await axios.get(`${SHOPEE_BASE}${path}`, { params });
+      // Shopee retorna 200 mas com error no body em alguns casos
+      if (data?.error && SHOPEE_INVALID_TOKEN_ERRORS.some(e => String(data.error).toLowerCase().includes(e))) {
+        await shopeeHandleInvalidToken(acc, data);
+        throw new Error(`TOKEN_INVALID:${data.message || data.error}`);
+      }
+      return data;
+    } catch(e) {
+      if (e.message?.startsWith('TOKEN_INVALID:')) throw e;
+      const errData = e.response?.data;
+      const invalidated = await shopeeHandleInvalidToken(acc, errData);
+      if (invalidated) throw new Error(`TOKEN_INVALID:${errData?.message || 'Token inválido'}`);
+      throw e;
+    }
+  }
+
   // 1. Busca lista de order_sn (paginado)
   const allSns = [];
   let cursor = '';
   for (let page = 0; page < 10; page++) {
-    const params = shopeeParams(listPath, acc, {
+    const data = await shopeeGet(listPath, {
       time_range_field: 'create_time', time_from: since, time_to: timeTo,
       page_size: 50, order_status: 'ALL', cursor,
     });
-    const { data } = await axios.get(`${SHOPEE_BASE}${listPath}`, { params });
     const list = data.response?.order_list || [];
     allSns.push(...list.map(o => o.order_sn));
     if (!data.response?.more || !list.length) break;
@@ -1234,11 +1277,10 @@ async function fetchShopee(acc, days) {
 
   for (let i = 0; i < allSns.length; i += 50) {
     const batch = allSns.slice(i, i + 50);
-    const params = shopeeParams(detailPath, acc, {
+    const data = await shopeeGet(detailPath, {
       order_sn_list: batch.join(','),
       response_optional_fields: optFields,
     });
-    const { data } = await axios.get(`${SHOPEE_BASE}${detailPath}`, { params });
     allOrders.push(...(data.response?.order_list || []));
   }
 
@@ -1991,7 +2033,14 @@ async function ssSyncOrdersForUser(userId, platform=null, days=45) {
       await ssUpsertOrders(userId, acc.id, orders);
       all = all.concat(orders || []);
       await db.query(`UPDATE marketplace_accounts SET last_sync_at=NOW() WHERE id=$1`, [acc.id]);
-    } catch(e) { console.error('[orders sync]', acc.platform, e.response?.data || e.message); }
+    } catch(e) {
+      const msg = e.message || '';
+      if (msg.startsWith('TOKEN_INVALID:')) {
+        console.warn(`[orders sync] ${acc.platform} conta ${acc.id}: token inválido, conta marcada para reconexão.`);
+      } else {
+        console.error('[orders sync]', acc.platform, e.response?.data || msg);
+      }
+    }
   }
   return all;
 }
@@ -5453,6 +5502,30 @@ REGRAS IMPORTANTES:
   } catch(e) {
     const msg = e.response?.data?.error?.message || e.message;
     res.status(500).json({ error: msg });
+  }
+});
+
+// ── ADMIN: invalida todos os tokens Shopee (migração sandbox → produção) ──
+// Uso: GET /admin/shopee/invalidate-all-tokens?secret=SEU_ADMIN_SECRET
+// Isso força TODOS os usuários a reconectarem a Shopee.
+app.get('/admin/shopee/invalidate-all-tokens', async (req, res) => {
+  const secret = req.query.secret || '';
+  const adminSecret = process.env.ADMIN_SECRET || '';
+  if (!adminSecret || secret !== adminSecret) {
+    return res.status(403).json({ error: 'Acesso negado. Configure ADMIN_SECRET no Render e passe ?secret=...' });
+  }
+  try {
+    const { rowCount } = await db.query(`
+      UPDATE marketplace_accounts
+      SET access_token=NULL, refresh_token=NULL, token_expires_at=NULL,
+          shop_name=CASE WHEN shop_name NOT LIKE '%(reconectar)%' THEN shop_name || ' (reconectar)' ELSE shop_name END,
+          updated_at=NOW()
+      WHERE platform='shopee' AND (access_token IS NOT NULL OR refresh_token IS NOT NULL)
+    `);
+    console.log(`[Admin] ✅ ${rowCount} contas Shopee invalidadas para reconexão.`);
+    res.json({ success: true, accounts_invalidated: rowCount, message: `${rowCount} conta(s) Shopee marcada(s) para reconexão. Cada usuário verá o aviso ao entrar.` });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
