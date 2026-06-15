@@ -2151,6 +2151,7 @@ async function ssSyncOrdersForUser(userId, platform=null, days=45) {
       if (acc.platform === 'mercadolivre') orders = await fetchML(acc, days);
       else if (acc.platform === 'shopee') orders = await fetchShopee(acc, days);
       else if (acc.platform === 'magalu') orders = await fetchMagalu(acc, days);
+      else if (acc.platform === 'tiktok') orders = await fetchTiktok(acc, days);
       await ssUpsertOrders(userId, acc.id, orders);
       all = all.concat(orders || []);
       await db.query(`UPDATE marketplace_accounts SET last_sync_at=NOW() WHERE id=$1`, [acc.id]);
@@ -2206,6 +2207,8 @@ async function ssQuickSyncOrdersForUser(userId, platform=null) {
         orders = await fetchShopee(acc, 2);
       } else if (acc.platform === 'magalu') {
         orders = await fetchMagalu(acc, 2);
+      } else if (acc.platform === 'tiktok') {
+        orders = await fetchTiktok(acc, 2);
       }
       if (orders.length) { await ssUpsertOrders(userId, acc.id, orders); count += orders.length; }
       await db.query(`UPDATE marketplace_accounts SET last_sync_at=NOW() WHERE id=$1`, [acc.id]);
@@ -5742,5 +5745,303 @@ app.get('/api/shopee/key-status', auth, (req, res) => {
   });
 });
 
+// ═══════════════════════════════════════════════════════════════
+// ── TIKTOK SHOP INTEGRATION ─────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+
+const TIKTOK_BASE    = 'https://open-api.tiktokglobalshop.com';
+const TIKTOK_APP_KEY = () => process.env.TIKTOK_APP_KEY || '';
+const TIKTOK_SECRET  = () => process.env.TIKTOK_APP_SECRET || '';
+
+// Tabela nonce para OAuth TikTok (mesmo padrão Shopee — TikTok não devolve state)
+async function ensureTiktokNonceTable() {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS tiktok_oauth_nonce (
+      nonce      TEXT PRIMARY KEY,
+      user_id    UUID NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW()
+    )
+  `).catch(() => {});
+  // Garante coluna refresh_token_expires_at na tabela de contas (pode não existir em bases antigas)
+  await db.query(`ALTER TABLE marketplace_accounts ADD COLUMN IF NOT EXISTS refresh_token_expires_at TIMESTAMP`).catch(() => {});
+}
+ensureTiktokNonceTable();
+
+// Gera assinatura HMAC-SHA256 para TikTok Shop API
+function tiktokSign(secret, params, body = '') {
+  // Ordena params excluindo sign e access_token, concatena: secret + key+value... + body + secret
+  const keys = Object.keys(params).filter(k => k !== 'sign' && k !== 'access_token').sort();
+  const str  = secret + keys.map(k => `${k}${params[k]}`).join('') + body + secret;
+  return crypto.createHmac('sha256', secret).update(str).digest('hex');
+}
+
+// Monta params base para chamadas TikTok API v2
+function tiktokParams(path, accessToken, extra = {}) {
+  const ts     = Math.floor(Date.now() / 1000);
+  const appKey = TIKTOK_APP_KEY();
+  const secret = TIKTOK_SECRET();
+  const params = { app_key: appKey, timestamp: ts, ...extra };
+  if (accessToken) params.access_token = accessToken;
+  params.sign = tiktokSign(secret, { ...params, path }, '');
+  return params;
+}
+
+// Status TikTok → interno SaleSync
+const TIKTOK_STATUS = {
+  'UNPAID':             'pending',
+  'ON_HOLD':            'pending',
+  'AWAITING_SHIPMENT':  'paid',
+  'AWAITING_COLLECTION':'paid',
+  'IN_TRANSIT':         'shipped',
+  'DELIVERED':          'delivered',
+  'COMPLETED':          'completed',
+  'CANCELLED':          'cancelled',
+  'PARTIALLY_CANCELLED':'cancelled',
+};
+
+// ── OAuth: inicia autorização TikTok ──────────────────────────────
+app.get('/auth/tiktok', async (req, res) => {
+  const uid = req.query.user_id || '';
+  if (!uid) return res.status(400).send('user_id obrigatório');
+  // Salva nonce → user_id (TikTok retorna state no callback ✅)
+  const nonce = crypto.randomBytes(16).toString('hex');
+  await db.query(
+    `INSERT INTO tiktok_oauth_nonce (nonce, user_id) VALUES ($1,$2)
+     ON CONFLICT (nonce) DO UPDATE SET user_id=$2, created_at=NOW()`,
+    [nonce, uid]
+  );
+  const redirectUri = `${process.env.TIKTOK_REDIRECT_URI || 'https://api2.salesync.shop/callback/tiktok'}`;
+  const authUrl = `https://services.tiktokshop.com/open/authorize?service_id=7651281043454445330&state=${nonce}`;
+  console.log(`[TikTok] OAuth iniciado uid=${uid} nonce=${nonce}`);
+  res.redirect(authUrl);
+});
+
+// ── OAuth: callback TikTok ────────────────────────────────────────
+app.get('/callback/tiktok', async (req, res) => {
+  const { code, state } = req.query;
+  console.log(`[TikTok Callback] code=${code ? 'ok' : 'AUSENTE'} | state=${state}`);
+
+  if (!code) return res.status(400).send('Código de autorização ausente');
+
+  // Recupera user_id pelo state/nonce
+  let userId = null;
+  if (state) {
+    const { rows } = await db.query(
+      `SELECT user_id FROM tiktok_oauth_nonce WHERE nonce=$1`, [state]
+    );
+    if (rows.length) {
+      userId = rows[0].user_id;
+      await db.query(`DELETE FROM tiktok_oauth_nonce WHERE nonce=$1`, [state]);
+    }
+  }
+  if (!userId) {
+    console.error('[TikTok] Nonce não encontrado para state:', state);
+    return res.status(400).send('Sessão OAuth inválida ou expirada. Tente novamente.');
+  }
+
+  try {
+    // Troca code por access_token
+    const appKey = TIKTOK_APP_KEY();
+    const secret = TIKTOK_SECRET();
+    const ts     = Math.floor(Date.now() / 1000);
+    const body   = { app_key: appKey, app_secret: secret, auth_code: code, grant_type: 'authorized_code' };
+    const sign   = tiktokSign(secret, { app_key: appKey, timestamp: ts }, JSON.stringify(body));
+
+    const tkRes = await axios.post(
+      `${TIKTOK_BASE}/api/v2/token/get`,
+      body,
+      { params: { app_key: appKey, timestamp: ts, sign } }
+    );
+    const tk = tkRes.data?.data;
+    if (!tk?.access_token) {
+      console.error('[TikTok] Erro ao obter token:', tkRes.data);
+      return res.status(500).send('Erro ao obter token TikTok: ' + JSON.stringify(tkRes.data));
+    }
+
+    const accessToken  = tk.access_token;
+    const refreshToken = tk.refresh_token;
+    const shopId       = String(tk.open_id || tk.seller_base_region || '');
+    // open_id identifica o seller — usamos como shop_id
+    const openId       = String(tk.open_id || '');
+    const expiresAt    = new Date(Date.now() + (tk.access_token_expire_in || 3600) * 1000);
+    const refreshExp   = new Date(Date.now() + (tk.refresh_token_expire_in || 86400 * 30) * 1000);
+
+    // Busca nome da loja
+    let shopName = 'TikTok Shop';
+    try {
+      const tsNow = Math.floor(Date.now() / 1000);
+      const shopParams = tiktokParams('/api/v2/shop/get_authorized_shop', accessToken, {});
+      const shopRes = await axios.get(`${TIKTOK_BASE}/api/v2/shop/get_authorized_shop`, { params: shopParams });
+      const shops = shopRes.data?.data?.shop_list || shopRes.data?.data?.shops || [];
+      if (shops.length) shopName = shops[0].shop_name || shops[0].name || 'TikTok Shop';
+    } catch(e) {
+      console.warn('[TikTok] Não conseguiu buscar nome da loja:', e.message);
+    }
+
+    // Salva conta no banco
+    await db.query(`
+      INSERT INTO marketplace_accounts (user_id, platform, platform_shop_id, shop_name, access_token, refresh_token, token_expires_at, mode, is_active)
+      VALUES ($1,'tiktok',$2,$3,$4,$5,$6,'production',true)
+      ON CONFLICT (user_id, platform, platform_shop_id) DO UPDATE
+        SET shop_name=$3, access_token=$4, refresh_token=$5,
+            token_expires_at=$6, mode='production', is_active=true, updated_at=NOW()
+    `, [userId, openId, shopName, accessToken, refreshToken, expiresAt]);
+
+    console.log(`[TikTok] ✅ Conectado: ${shopName} (open_id=${openId}) uid=${userId}`);
+    res.redirect(`${process.env.FRONTEND_URL || 'https://salesync.shop'}?connected=tiktok`);
+  } catch(e) {
+    console.error('[TikTok] Erro callback:', e.response?.data || e.message);
+    res.status(500).send('Erro ao conectar TikTok Shop: ' + (e.response?.data?.message || e.message));
+  }
+});
+
+// ── Refresh token TikTok ──────────────────────────────────────────
+async function refreshTiktokToken(acc) {
+  try {
+    const appKey = TIKTOK_APP_KEY();
+    const secret = TIKTOK_SECRET();
+    const ts     = Math.floor(Date.now() / 1000);
+    const body   = { app_key: appKey, app_secret: secret, refresh_token: acc.refresh_token, grant_type: 'refresh_token' };
+    const sign   = tiktokSign(secret, { app_key: appKey, timestamp: ts }, JSON.stringify(body));
+    const res    = await axios.post(`${TIKTOK_BASE}/api/v2/token/refresh`, body, { params: { app_key: appKey, timestamp: ts, sign } });
+    const tk     = res.data?.data;
+    if (!tk?.access_token) return null;
+    const expiresAt = new Date(Date.now() + (tk.access_token_expire_in || 3600) * 1000);
+    const refreshExp = new Date(Date.now() + (tk.refresh_token_expire_in || 86400 * 30) * 1000);
+    await db.query(
+      `UPDATE accounts SET access_token=$1, refresh_token=$2, token_expires_at=$3, refresh_token_expires_at=$4 WHERE id=$5`,
+      [tk.access_token, tk.refresh_token || acc.refresh_token, expiresAt, refreshExp, acc.id]
+    );
+    return tk.access_token;
+  } catch(e) {
+    console.error('[TikTok] Falha ao renovar token:', e.response?.data || e.message);
+    return null;
+  }
+}
+
+// ── fetchTiktok: busca pedidos ────────────────────────────────────
+async function fetchTiktok(acc, days) {
+  // Renova token se necessário
+  let token = acc.access_token;
+  if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 300000)) {
+    token = await refreshTiktokToken(acc);
+    if (!token) {
+      await db.query(`UPDATE accounts SET status='token_invalid' WHERE id=$1`, [acc.id]);
+      throw new Error('TOKEN_INVALID:Token TikTok expirado — reconecte a loja');
+    }
+    acc = { ...acc, access_token: token };
+  }
+
+  const nowTs   = Math.floor(Date.now() / 1000);
+  const sinceTs = Math.floor((Date.now() - days * 86400000) / 1000);
+
+  // Helper GET TikTok
+  async function tiktokGet(path, extra = {}) {
+    const params = tiktokParams(path, token, extra);
+    const { data } = await axios.get(`${TIKTOK_BASE}${path}`, { params });
+    if (data?.code && data.code !== 0) {
+      const msg = data.message || data.msg || JSON.stringify(data);
+      if (String(data.code) === '105001' || msg.toLowerCase().includes('token')) {
+        await db.query(`UPDATE accounts SET status='token_invalid' WHERE id=$1`, [acc.id]);
+        throw new Error(`TOKEN_INVALID:${msg}`);
+      }
+      throw new Error(`[TikTok API] code=${data.code} msg=${msg}`);
+    }
+    return data;
+  }
+
+  // 1. Lista pedidos paginando
+  const allOrderIds = [];
+  const seenIds     = new Set();
+  let cursor        = null;
+  let hasMore       = true;
+
+  while (hasMore) {
+    const extra = {
+      create_time_from: sinceTs,
+      create_time_to:   nowTs,
+      page_size:        50,
+    };
+    if (cursor) extra.cursor = cursor;
+
+    const data = await tiktokGet('/api/v2/order/search', extra);
+    const list = data?.data?.order_list || data?.data?.orders || [];
+    for (const o of list) {
+      const id = o.order_id || o.id;
+      if (id && !seenIds.has(id)) { seenIds.add(id); allOrderIds.push(id); }
+    }
+    hasMore = data?.data?.more || data?.data?.has_more || false;
+    cursor  = data?.data?.next_cursor || data?.data?.cursor || null;
+    if (!list.length || !hasMore) break;
+  }
+  console.log(`[TikTok] ${allOrderIds.length} pedidos encontrados`);
+  if (!allOrderIds.length) return [];
+
+  // 2. Busca detalhes em lotes de 50
+  const allOrders = [];
+  for (let i = 0; i < allOrderIds.length; i += 50) {
+    const batch = allOrderIds.slice(i, i + 50);
+    const data  = await tiktokGet('/api/v2/order/get_order_detail', { order_id_list: batch.join(',') });
+    const list  = data?.data?.order_list || data?.data?.orders || [];
+    allOrders.push(...list);
+  }
+
+  return allOrders.map(o => {
+    const item    = o.item_list?.[0] || o.line_items?.[0] || {};
+    const status  = TIKTOK_STATUS[o.order_status] || 'paid';
+    const orderTs = o.paid_time || o.create_time || 0;
+
+    // Valores
+    const totalAmount  = parseFloat(o.payment?.total_amount ?? o.subtotal ?? item.sku_sale_price ?? 0);
+    const buyerPaid    = parseFloat(o.payment?.buyer_total_amount ?? o.payment?.total_amount ?? totalAmount);
+    const platformFee  = parseFloat(o.payment?.platform_fee ?? o.platform_fee ?? 0);
+    const shippingFee  = parseFloat(o.payment?.shipping_fee ?? o.shipping_fee ?? 0);
+    const commission   = parseFloat(o.payment?.commission_fee ?? o.commission_fee ?? 0);
+    const sellerIncome = parseFloat(o.payment?.seller_income ?? o.seller_income ?? 0);
+
+    // Produto
+    const itemImage = item.sku_image ?? item.product_image ?? item.image_url ?? null;
+    const qty       = parseInt(item.quantity ?? 1, 10);
+    const skuPrice  = parseFloat(item.sku_sale_price ?? item.sale_price ?? 0);
+
+    return {
+      id:                o.order_id || o.id,
+      platform:          'tiktok',
+      platform_order_id: o.order_id || o.id,
+      shop_name:         acc.shop_name,
+      fulfillment_type:  'normal',
+      status,
+      buyer_name:        o.buyer_email?.split('@')[0] || o.recipient_address?.name || '',
+      total_amount:      skuPrice * qty || totalAmount,
+      paid_amount:       buyerPaid,
+      platform_fee:      platformFee || commission,
+      shipping_fee:      shippingFee,
+      reverse_shipping_fee: 0,
+      tax_amount:        0,
+      discount_amount:   parseFloat(o.payment?.discount_total ?? 0),
+      shopee_discount:   0,
+      shopee_escrow:     sellerIncome,
+      shopee_commission: commission,
+      shopee_service_fee:0,
+      quantity:          qty,
+      order_date:        new Date(orderTs * 1000).toISOString(),
+      item_title:        item.product_name ?? item.title ?? 'Produto TikTok',
+      item_image:        itemImage,
+      item_sku:          item.seller_sku ?? item.sku_id ?? '',
+      item_id:           String(item.product_id ?? ''),
+      model_id:          String(item.sku_id ?? ''),
+      model_name:        item.sku_name ?? '',
+      payment_method:    o.payment?.payment_method ?? '',
+      shipping_type:     o.shipping_type ?? '',
+      tracking_url:      '',
+      weight_kg:         0,
+    };
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// FIM TIKTOK SHOP
+// ═══════════════════════════════════════════════════════════════
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v5.2 rodando na porta ${PORT}`));  
+app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v5.2 rodando na porta ${PORT}`));
