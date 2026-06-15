@@ -5882,9 +5882,10 @@ app.get('/auth/tiktok', async (req, res) => {
      ON CONFLICT (nonce) DO UPDATE SET user_id=$2, created_at=NOW()`,
     [nonce, uid]
   );
-  const redirectUri = `${process.env.TIKTOK_REDIRECT_URI || 'https://api2.salesync.shop/callback/tiktok'}`;
-  const authUrl = `https://services.tiktokshop.com/open/authorize?service_id=7651281043454445330&state=${nonce}`;
-  console.log(`[TikTok] OAuth iniciado uid=${uid} nonce=${nonce}`);
+  const redirectUri = encodeURIComponent(process.env.TIKTOK_REDIRECT_URI || 'https://api2.salesync.shop/callback/tiktok');
+  // URL OAuth correta: usa app_key (não service_id) + redirect_uri + state
+  const authUrl = `https://auth.tiktok-shops.com/oauth/authorize?app_key=${TIKTOK_APP_KEY()}&redirect_uri=${redirectUri}&state=${nonce}`;
+  console.log(`[TikTok] OAuth iniciado uid=${uid} nonce=${nonce} url=${authUrl}`);
   res.redirect(authUrl);
 });
 
@@ -5916,15 +5917,20 @@ app.get('/callback/tiktok', async (req, res) => {
     const appKey = TIKTOK_APP_KEY();
     const secret = TIKTOK_SECRET();
     const ts     = Math.floor(Date.now() / 1000);
-    const body   = { app_key: appKey, app_secret: secret, auth_code: code, grant_type: 'authorized_code' };
-    const sign   = tiktokSign(secret, { app_key: appKey, timestamp: ts }, JSON.stringify(body));
 
+    // TikTok token endpoint: params na query, body separado
+    const tokenParams = { app_key: appKey, timestamp: ts };
+    const tokenBody   = { app_key: appKey, app_secret: secret, auth_code: code, grant_type: 'authorized_code' };
+    tokenParams.sign  = tiktokSign(secret, { ...tokenParams, path: '/api/v2/token/get' }, JSON.stringify(tokenBody));
+
+    console.log('[TikTok] Trocando code por token...');
     const tkRes = await axios.post(
       `${TIKTOK_BASE}/api/v2/token/get`,
-      body,
-      { params: { app_key: appKey, timestamp: ts, sign } }
+      tokenBody,
+      { params: tokenParams, headers: { 'Content-Type': 'application/json' } }
     );
-    const tk = tkRes.data?.data;
+    console.log('[TikTok] Resposta token:', JSON.stringify(tkRes.data));
+    const tk = tkRes.data?.data || tkRes.data;
     if (!tk?.access_token) {
       console.error('[TikTok] Erro ao obter token:', tkRes.data);
       return res.status(500).send('Erro ao obter token TikTok: ' + JSON.stringify(tkRes.data));
@@ -5932,9 +5938,8 @@ app.get('/callback/tiktok', async (req, res) => {
 
     const accessToken  = tk.access_token;
     const refreshToken = tk.refresh_token;
-    const shopId       = String(tk.open_id || tk.seller_base_region || '');
-    // open_id identifica o seller — usamos como shop_id
-    const openId       = String(tk.open_id || '');
+    // seller_base_region ou open_id identificam o seller
+    const openId = String(tk.seller_id || tk.open_id || tk.seller_base_region || code.slice(0,20));
     const expiresAt    = new Date(Date.now() + (tk.access_token_expire_in || 3600) * 1000);
     const refreshExp   = new Date(Date.now() + (tk.refresh_token_expire_in || 86400 * 30) * 1000);
 
