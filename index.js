@@ -737,14 +737,22 @@ pre{background:#0D1117;border-radius:8px;padding:12px;overflow-x:auto;font-size:
         steps += `</div><div class="section"><h2>4b. Escrow/Payment Detail (${firstSn})</h2>
 <div class="row"><span class="l">Status</span><span class="v ${escrowDetail.ok?'ok':'err'}">${escrowDetail.ok ? '✅ OK' : '❌ ERRO '+escrowDetail.status}</span></div>`;
         if (escrowDetail.ok) {
-          const ed = escrowDetail.data?.response || {};
+          const ed  = escrowDetail.data?.response || {};
+          const oi  = ed.order_income || {};  // campos financeiros ficam em order_income
+          const bpi = ed.buyer_payment_info || {};
+          const ok  = v => v != null && v !== '' ? 'ok' : 'warn';
+          const fmt = v => v != null ? `<span class="v ${ok(v)}">${v}</span>` : `<span class="v warn">❌ ausente</span>`;
           steps += `
-<div class="row"><span class="l">buyer_total_amount</span><span class="v">${ed.buyer_total_amount??'—'}</span></div>
-<div class="row"><span class="l">actual_shipping_fee</span><span class="v">${ed.actual_shipping_fee??'—'}</span></div>
-<div class="row"><span class="l">commission_fee</span><span class="v">${ed.commission_fee??'—'}</span></div>
-<div class="row"><span class="l">service_fee</span><span class="v">${ed.service_fee??'—'}</span></div>
-<div class="row"><span class="l">escrow_amount</span><span class="v">${ed.escrow_amount??'—'}</span></div>
-<div class="row"><span class="l">seller_income</span><span class="v">${ed.seller_income??'—'}</span></div>
+<div class="row"><span class="l">buyer_total_amount</span>${fmt(oi.buyer_total_amount ?? bpi.buyer_total_amount)}</div>
+<div class="row"><span class="l">actual_shipping_fee</span>${fmt(oi.actual_shipping_fee)}</div>
+<div class="row"><span class="l">buyer_paid_shipping_fee</span>${fmt(oi.buyer_paid_shipping_fee)}</div>
+<div class="row"><span class="l">commission_fee</span>${fmt(oi.commission_fee)}</div>
+<div class="row"><span class="l">service_fee</span>${fmt(oi.service_fee)}</div>
+<div class="row"><span class="l">net_commission_fee</span>${fmt(oi.net_commission_fee)}</div>
+<div class="row"><span class="l">net_service_fee</span>${fmt(oi.net_service_fee)}</div>
+<div class="row"><span class="l">escrow_amount</span>${fmt(oi.escrow_amount)}</div>
+<div class="row"><span class="l">voucher_from_shopee</span>${fmt(oi.voucher_from_shopee)}</div>
+<div class="row"><span class="l">shopee_shipping_rebate</span>${fmt(oi.shopee_shipping_rebate)}</div>
 <details style="margin-top:8px"><summary style="cursor:pointer;color:#64748B;font-size:11px">JSON completo escrow</summary><pre>${JSON.stringify(ed, null, 2)}</pre></details>`;
         } else {
           steps += `<pre>${JSON.stringify(escrowDetail.data||escrowDetail.error, null, 2)}</pre>`;
@@ -1338,13 +1346,11 @@ async function fetchShopee(acc, days) {
 
   if (!allSns.length) return [];
 
-  // 2. Busca detalhes financeiros em lotes de 50
-  // Campos confirmados pelo JSON real da API Shopee BR (junho/2026)
+  // 2. Busca detalhes dos pedidos em lotes de 50
   const detailPath = '/api/v2/order/get_order_detail';
   const optFields  = [
     'buyer_user_id', 'buyer_username', 'pay_time', 'item_list',
     'recipient_address', 'actual_shipping_fee', 'actual_shipping_fee_confirmed',
-    'commission_fee', 'service_fee', 'escrow_amount', 'buyer_total_amount',
     'seller_discount', 'shopee_discount', 'voucher_from_seller', 'voucher_from_shopee',
     'payment_method', 'checkout_shipping_carrier', 'package_list',
     'invoice_data', 'reverse_shipping_fee'
@@ -1360,9 +1366,29 @@ async function fetchShopee(acc, days) {
     allOrders.push(...(data.response?.order_list || []));
   }
 
+  // 3. Busca dados financeiros via get_escrow_detail (único endpoint BR que retorna
+  //    commission_fee, service_fee, escrow_amount, buyer_total_amount)
+  //    Os campos ficam dentro de data.response.order_income
+  const escrowPath = '/api/v2/payment/get_escrow_detail';
+  const escrowMap  = {};  // order_sn → order_income
+
+  for (const sn of allSns) {
+    try {
+      const data = await shopeeGet(escrowPath, { order_sn: sn });
+      const oi = data?.response?.order_income;
+      if (oi) escrowMap[sn] = oi;
+    } catch (e) {
+      // TOKEN_INVALID deve propagar; outros erros (pedido sem escrow) ignoramos
+      if (e.message?.startsWith('TOKEN_INVALID:')) throw e;
+      console.warn(`[Shopee] get_escrow_detail falhou para ${sn}:`, e.message);
+    }
+  }
+  console.log(`[Shopee] escrow obtido para ${Object.keys(escrowMap).length}/${allSns.length} pedidos`);
+
   return allOrders.map(o => {
     const item      = o.item_list?.[0] || {};
     const status    = SHOPEE_STATUS[o.order_status] || 'paid';
+    const oi        = escrowMap[o.order_sn] || {};  // order_income do escrow
 
     // Imagem: API BR retorna dentro de image_info.image_url (não item_thumbnail)
     const itemImage = item.image_info?.image_url || item.item_thumbnail || null;
@@ -1371,25 +1397,22 @@ async function fetchShopee(acc, days) {
     const orderTs = o.pay_time || o.create_time || 0;
     const orderDate = new Date(orderTs * 1000).toISOString();
 
-    // Preço catálogo × qtd = valor de venda real
+    // Preço catálogo × qtd = valor de venda
     const catalogPrice = parseFloat(item.model_discounted_price ?? item.model_original_price ?? item.item_price ?? 0);
     const qty          = parseInt(item.model_quantity_purchased ?? item.quantity_purchased ?? 1, 10);
     const totalAmount  = catalogPrice * qty;
 
-    // Financeiro: campos opcionais — só vêm em pedidos pagos/enviados/entregues
-    const buyerPaid    = parseFloat(o.buyer_total_amount ?? 0);
-    const commission   = parseFloat(o.commission_fee ?? 0);
-    const serviceFee   = parseFloat(o.service_fee ?? 0);
-    const platformFee  = commission + serviceFee;
-    // actual_shipping_fee_confirmed é o valor definitivo após entrega
-    // actual_shipping_fee é o estimado na criação
-    const shippingFee  = parseFloat(o.actual_shipping_fee_confirmed ?? o.actual_shipping_fee ?? 0);
-    const escrow       = parseFloat(o.escrow_amount ?? 0);
-    // reverse_shipping_fee: frete de devolução cobrado do vendedor
-    const reverseShippingFee = parseFloat(o.reverse_shipping_fee ?? 0);
-
-    const sellerDiscount = parseFloat(o.seller_discount ?? o.voucher_from_seller ?? 0);
-    const shopeeDiscount = parseFloat(o.shopee_discount ?? o.voucher_from_shopee ?? 0);
+    // Dados financeiros: vêm do get_escrow_detail (order_income), não do get_order_detail
+    // actual_shipping_fee_confirmed é boolean (true/false), não um valor numérico!
+    const shippingFee        = parseFloat(oi.actual_shipping_fee ?? o.actual_shipping_fee ?? 0);
+    const buyerPaid          = parseFloat(oi.buyer_total_amount ?? 0);
+    const commission         = parseFloat(oi.commission_fee ?? 0);
+    const serviceFee         = parseFloat(oi.service_fee ?? 0);
+    const platformFee        = commission + serviceFee;
+    const escrow             = parseFloat(oi.escrow_amount ?? 0);
+    const reverseShippingFee = parseFloat(oi.reverse_shipping_fee ?? o.reverse_shipping_fee ?? 0);
+    const sellerDiscount     = parseFloat(oi.voucher_from_seller ?? o.seller_discount ?? o.voucher_from_seller ?? 0);
+    const shopeeDiscount     = parseFloat(oi.voucher_from_shopee ?? o.shopee_discount ?? o.voucher_from_shopee ?? 0);
 
     return {
       id:                   o.order_sn,
@@ -1399,15 +1422,15 @@ async function fetchShopee(acc, days) {
       fulfillment_type:     'normal',
       status,
       buyer_name:           o.buyer_username || '',
-      total_amount:         totalAmount,        // preço catálogo × qtd (valor de venda)
+      total_amount:         totalAmount,          // preço catálogo × qtd (valor de venda)
       paid_amount:          buyerPaid || totalAmount, // o que o cliente pagou (fallback p/ totalAmount)
-      platform_fee:         platformFee,        // commission_fee + service_fee
-      shipping_fee:         shippingFee,        // frete cobrado do vendedor
-      reverse_shipping_fee: reverseShippingFee, // frete devolução
-      tax_amount:           0,                  // Shopee BR não retém imposto — usuário configura
+      platform_fee:         platformFee,          // commission_fee + service_fee (do escrow)
+      shipping_fee:         shippingFee,          // frete real do vendedor (do escrow)
+      reverse_shipping_fee: reverseShippingFee,   // frete devolução
+      tax_amount:           0,                    // Shopee BR não retém imposto — usuário configura
       discount_amount:      sellerDiscount,
       shopee_discount:      shopeeDiscount,
-      shopee_escrow:        escrow,             // valor real depositado na conta
+      shopee_escrow:        escrow,               // valor real depositado na conta (do escrow)
       shopee_commission:    commission,
       shopee_service_fee:   serviceFee,
       quantity:             qty,
