@@ -1310,8 +1310,16 @@ async function fetchShopee(acc, days) {
   if (!allSns.length) return [];
 
   // 2. Busca detalhes financeiros em lotes de 50
+  // Campos confirmados pelo JSON real da API Shopee BR (junho/2026)
   const detailPath = '/api/v2/order/get_order_detail';
-  const optFields  = 'buyer_user_id,buyer_username,pay_time,item_list,recipient_address,actual_shipping_fee,commission_fee,service_fee,escrow_amount,buyer_total_amount,seller_discount,shopee_discount,voucher_from_seller,voucher_from_shopee,actual_shipping_fee_confirmed,payment_method,checkout_shipping_carrier';
+  const optFields  = [
+    'buyer_user_id', 'buyer_username', 'pay_time', 'item_list',
+    'recipient_address', 'actual_shipping_fee', 'actual_shipping_fee_confirmed',
+    'commission_fee', 'service_fee', 'escrow_amount', 'buyer_total_amount',
+    'seller_discount', 'shopee_discount', 'voucher_from_seller', 'voucher_from_shopee',
+    'payment_method', 'checkout_shipping_carrier', 'package_list',
+    'invoice_data', 'reverse_shipping_fee'
+  ].join(',');
   const allOrders  = [];
 
   for (let i = 0; i < allSns.length; i += 50) {
@@ -1326,46 +1334,68 @@ async function fetchShopee(acc, days) {
   return allOrders.map(o => {
     const item      = o.item_list?.[0] || {};
     const status    = SHOPEE_STATUS[o.order_status] || 'paid';
-    const buyerPaid = parseFloat(o.buyer_total_amount || o.total_amount || 0);
-    const commission = parseFloat(o.commission_fee || 0);
-    const serviceFee = parseFloat(o.service_fee || 0);
-    const platformFee = commission + serviceFee;
-    const shippingFee = parseFloat(o.actual_shipping_fee || o.actual_shipping_fee_confirmed || 0);
-    const escrow = parseFloat(o.escrow_amount || 0); // valor real depositado
 
-    const sellerDiscount = parseFloat(o.seller_discount || o.voucher_from_seller || 0);
-    const shopeeDiscount = parseFloat(o.shopee_discount || o.voucher_from_shopee || 0);
+    // Imagem: API BR retorna dentro de image_info.image_url (não item_thumbnail)
+    const itemImage = item.image_info?.image_url || item.item_thumbnail || null;
 
-    const catalogPrice = parseFloat(item.model_discounted_price || item.item_price || 0);
-    const qty = item.model_quantity_purchased || item.quantity_purchased || 1;
-    const totalAmount = catalogPrice > 0 ? catalogPrice * qty : buyerPaid;
+    // Data: pay_time é null em cancelados/não pagos — usa create_time como fallback
+    const orderTs = o.pay_time || o.create_time || 0;
+    const orderDate = new Date(orderTs * 1000).toISOString();
+
+    // Preço catálogo × qtd = valor de venda real
+    const catalogPrice = parseFloat(item.model_discounted_price ?? item.model_original_price ?? item.item_price ?? 0);
+    const qty          = parseInt(item.model_quantity_purchased ?? item.quantity_purchased ?? 1, 10);
+    const totalAmount  = catalogPrice * qty;
+
+    // Financeiro: campos opcionais — só vêm em pedidos pagos/enviados/entregues
+    const buyerPaid    = parseFloat(o.buyer_total_amount ?? 0);
+    const commission   = parseFloat(o.commission_fee ?? 0);
+    const serviceFee   = parseFloat(o.service_fee ?? 0);
+    const platformFee  = commission + serviceFee;
+    // actual_shipping_fee_confirmed é o valor definitivo após entrega
+    // actual_shipping_fee é o estimado na criação
+    const shippingFee  = parseFloat(o.actual_shipping_fee_confirmed ?? o.actual_shipping_fee ?? 0);
+    const escrow       = parseFloat(o.escrow_amount ?? 0);
+    // reverse_shipping_fee: frete de devolução cobrado do vendedor
+    const reverseShippingFee = parseFloat(o.reverse_shipping_fee ?? 0);
+
+    const sellerDiscount = parseFloat(o.seller_discount ?? o.voucher_from_seller ?? 0);
+    const shopeeDiscount = parseFloat(o.shopee_discount ?? o.voucher_from_shopee ?? 0);
 
     return {
-      id:                  o.order_sn,
-      platform:            'shopee',
-      platform_order_id:   o.order_sn,
-      shop_name:           acc.shop_name,
-      fulfillment_type:    'normal',
+      id:                   o.order_sn,
+      platform:             'shopee',
+      platform_order_id:    o.order_sn,
+      shop_name:            acc.shop_name,
+      fulfillment_type:     'normal',
       status,
-      buyer_name:          o.buyer_username || '',
-      total_amount:        totalAmount,     // preço catálogo × qtd
-      paid_amount:         buyerPaid,       // o que o cliente pagou
-      platform_fee:        platformFee,     // comissão + service fee
-      shipping_fee:        shippingFee,
-      tax_amount:          0,               // Shopee não retém imposto — usuário configura
-      discount_amount:     sellerDiscount,
-      shopee_discount:     shopeeDiscount,
-      shopee_escrow:       escrow,          // valor real depositado na conta
-      shopee_commission:   commission,
-      shopee_service_fee:  serviceFee,
-      quantity:            qty,
-      order_date:          new Date((o.pay_time || o.create_time || 0) * 1000).toISOString(),
-      item_title:          item.item_name || 'Produto Shopee',
-      item_image:          item.item_thumbnail || null,
-      item_sku:            item.model_sku || item.item_sku || '',
-      payment_method:      o.payment_method || '',
-      tracking_url:        '',
-      shipping_type:       o.checkout_shipping_carrier || o.shipping_carrier || '',
+      buyer_name:           o.buyer_username || '',
+      total_amount:         totalAmount,        // preço catálogo × qtd (valor de venda)
+      paid_amount:          buyerPaid || totalAmount, // o que o cliente pagou (fallback p/ totalAmount)
+      platform_fee:         platformFee,        // commission_fee + service_fee
+      shipping_fee:         shippingFee,        // frete cobrado do vendedor
+      reverse_shipping_fee: reverseShippingFee, // frete devolução
+      tax_amount:           0,                  // Shopee BR não retém imposto — usuário configura
+      discount_amount:      sellerDiscount,
+      shopee_discount:      shopeeDiscount,
+      shopee_escrow:        escrow,             // valor real depositado na conta
+      shopee_commission:    commission,
+      shopee_service_fee:   serviceFee,
+      quantity:             qty,
+      order_date:           orderDate,
+      // Produto
+      item_title:           item.item_name || 'Produto Shopee',
+      item_image:           itemImage,
+      item_sku:             item.model_sku || item.item_sku || '',
+      item_id:              String(item.item_id || ''),
+      model_id:             String(item.model_id || ''),
+      model_name:           item.model_name || '',
+      // Pagamento / envio
+      payment_method:       o.payment_method || '',
+      shipping_type:        o.checkout_shipping_carrier || '',
+      tracking_url:         '',
+      // Peso (útil pra cálculo de frete)
+      weight_kg:            parseFloat(item.weight ?? 0),
     };
   });
 }
