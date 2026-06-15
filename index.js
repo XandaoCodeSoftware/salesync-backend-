@@ -1,6047 +1,4005 @@
-// SalesSync v5.11 — Backend Node.js
-// Magalu corrigido com estrutura real da API
-const express = require('express');
-const { Pool } = require('pg');
-const axios   = require('axios');
-const crypto  = require('crypto');
-const cors    = require('cors');
-const jwt     = require('jsonwebtoken');
-let PDFDocument = null;
-let bwipjs = null;
-let PDFLib = null;
-try { PDFDocument = require('pdfkit'); } catch {}
-try { bwipjs = require('bwip-js'); } catch {}
-try { PDFLib = require('pdf-lib'); } catch {}
-require('dotenv').config();
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>SalesSync</title>
+ <link rel="icon" type="image/x-icon" href="favicon.ico">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Caveat:wght@600;700&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.44.0/tabler-icons.min.css"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+:root{
+  --bg:#060818;--bg2:#0c1220;--bg3:#111827;--bg4:#1a2235;--bg5:#222d42;
+  --p:#6d28d9;--p2:#8b5cf6;--p3:#a78bfa;
+  --green:#059669;--green2:#10b981;
+  --red:#dc2626;--red2:#f87171;
+  --orange:#ea580c;--orange2:#fb923c;
+  --blue:#0284c7;--blue2:#38bdf8;
+  --yellow:#d97706;--yellow2:#fbbf24;
+  --txt:#f1f5f9;--txt2:#94a3b8;--txt3:#475569;--txt4:#1e293b;
+  --border:rgba(148,163,184,.08);--border2:rgba(148,163,184,.15);
+  --glow:rgba(109,40,217,.4);
+}
+/* LIGHT MODE */
+body.light-mode{
+  --bg:#f0f4f8;--bg2:#ffffff;--bg3:#e8edf5;--bg4:#dde4f0;--bg5:#cdd6e8;
+  --txt:#0f172a;--txt2:#334155;--txt3:#64748b;--txt4:#e2e8f0;
+  --border:rgba(15,23,42,.08);--border2:rgba(15,23,42,.14);
+  --glow:rgba(109,40,217,.2);
+}
+body.light-mode html,body.light-mode body{background:var(--bg);color:var(--txt);}
+/* Badge estoque baixo */
+.stock-alert-badge{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:linear-gradient(135deg,#dc2626,#ea580c);color:#fff;border-radius:14px;padding:10px 20px;font-size:13px;font-weight:700;display:flex;align-items:center;gap:10px;box-shadow:0 8px 32px rgba(220,38,38,.4);z-index:3000;animation:slideUp .4s ease;cursor:pointer;}
+@keyframes slideUp{from{transform:translateX(-50%) translateY(20px);opacity:0}to{transform:translateX(-50%) translateY(0);opacity:1}}
+html,body{width:100%;height:100%;font-family:'Inter',sans-serif;background:var(--bg);color:var(--txt);overflow:hidden;}
 
-const app = express();
-app.use(cors());
-app.use(express.json());
+/* LOADING */
+#ld{position:fixed;inset:0;background:var(--bg);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;}
+.ld-logo{font-size:48px;animation:pulse 2s ease-in-out infinite;}
+.ld-name{font-size:24px;font-weight:800;letter-spacing:-0.5px;background:linear-gradient(135deg,#a78bfa,#818cf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.ld-bar{width:140px;height:2px;background:rgba(255,255,255,.06);border-radius:2px;overflow:hidden;margin-top:8px;}
+.ld-fill{height:100%;background:linear-gradient(90deg,var(--p),var(--p2));animation:fill 2s ease forwards;}
+.ld-st{font-size:11px;color:var(--txt3);}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.08)}}
+@keyframes fill{0%{width:0}100%{width:100%}}
 
-const db = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
-db.connect()
-  .then(async () => {
-    console.log('✅ Supabase conectado!');
-    await ensureProductSchema();
-    await ensureSalesSyncSchema();
-    await ensureOrdersReturnsSchema();
-  })
-  .catch(e => console.error('❌ Erro DB:', e.message));
+/* LOGIN */
+#ls{position:fixed;inset:0;background:var(--bg);z-index:800;display:none;align-items:center;justify-content:center;}
+#ls.on{display:flex;}
+.lcard{background:var(--bg2);border:1px solid var(--border2);border-radius:20px;padding:36px;width:360px;box-shadow:0 32px 80px rgba(0,0,0,.5);}
+.llogo{display:flex;align-items:center;gap:10px;justify-content:center;margin-bottom:28px;}
+.llogo-ico{width:44px;height:44px;background:linear-gradient(135deg,var(--p),var(--p2));border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:22px;box-shadow:0 8px 24px var(--glow);}
+.llogo-nm{font-size:22px;font-weight:800;letter-spacing:-0.5px;background:linear-gradient(135deg,#a78bfa,#818cf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.ltabs{display:flex;background:var(--bg3);border-radius:10px;padding:3px;margin-bottom:24px;gap:3px;}
+.ltab{flex:1;padding:8px;border-radius:8px;text-align:center;font-size:12px;font-weight:600;cursor:pointer;color:var(--txt3);transition:all .2s;}
+.ltab.on{background:var(--bg5);color:var(--txt);box-shadow:0 2px 8px rgba(0,0,0,.3);}
+.lf{display:flex;flex-direction:column;gap:12px;}
+.lfl{font-size:11px;color:var(--txt3);font-weight:600;margin-bottom:4px;display:block;}
+.lfi{background:var(--bg3);border:1px solid var(--border2);border-radius:10px;padding:11px 14px;font-size:13px;color:var(--txt);outline:none;width:100%;font-family:'Inter',sans-serif;transition:border-color .2s;}
+.lfi:focus{border-color:var(--p2);}
+.lbtn{background:linear-gradient(135deg,var(--p),var(--p2));border:none;color:#fff;border-radius:10px;padding:12px;font-size:13px;font-weight:700;cursor:pointer;width:100%;font-family:'Inter',sans-serif;margin-top:4px;box-shadow:0 4px 16px var(--glow);transition:opacity .2s;}
+.lbtn:hover{opacity:.9;}
+.lerr{font-size:11px;color:var(--red2);text-align:center;min-height:16px;}
 
-const CACHE = {};
-const CACHE_TTL = 15 * 60 * 1000;
+/* === APP LAYOUT === */
+#app{display:none;}
+#app.on{display:block;position:fixed;inset:0;}
 
-// CPFs de teste do ambiente Magalu — filtrar fora
-const MAGALU_TEST_DOCUMENTS = ['39743407006', '00000000000', '12345678909'];
+/* TOPBAR */
+#topbar{
+  position:absolute;top:0;left:0;right:0;height:56px;
+  background:rgba(12,18,32,.95);backdrop-filter:blur(12px);
+  border-bottom:1px solid var(--border);
+  display:flex;align-items:center;padding:0 16px;gap:14px;
+  z-index:100;
+}
+.t-logo{width:34px;height:34px;background:linear-gradient(135deg,var(--p),var(--p2));border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;box-shadow:0 4px 12px var(--glow);}
+.t-name{font-size:17px;font-weight:800;letter-spacing:-0.5px;background:linear-gradient(135deg,#a78bfa,#818cf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.t-div{width:1px;height:28px;background:var(--border2);}
+.t-metric{display:flex;flex-direction:column;gap:1px;}
+.t-metric span{font-size:9px;color:var(--txt3);text-transform:uppercase;letter-spacing:.8px;font-weight:600;}
+.t-metric strong{font-size:14px;font-weight:700;letter-spacing:-0.3px;}
+.t-r{margin-left:auto;display:flex;align-items:center;gap:6px;}
+.t-chip{background:var(--bg3);border:1px solid var(--border2);border-radius:8px;padding:5px 10px;font-size:11px;color:var(--txt2);display:flex;align-items:center;gap:6px;cursor:pointer;transition:border-color .2s;}
+.t-chip:hover{border-color:var(--p2);}
+.t-chip .online{width:6px;height:6px;border-radius:50%;background:var(--green2);box-shadow:0 0 6px var(--green2);animation:blink 2s infinite;}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+.t-btn{width:32px;height:32px;border-radius:8px;background:var(--bg3);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--txt3);font-size:16px;transition:all .2s;}
+.t-btn:hover{border-color:var(--p2);color:var(--p3);}
+
+/* PLATBAR */
+#platbar{
+  position:absolute;top:56px;left:0;right:0;height:38px;
+  background:rgba(12,18,32,.9);backdrop-filter:blur(8px);
+  border-bottom:1px solid var(--border);
+  display:flex;align-items:center;padding:0 16px;gap:4px;
+  z-index:99;overflow-x:auto;
+}
+#platbar::-webkit-scrollbar{display:none;}
+.pfil{padding:4px 12px;border-radius:20px;font-size:10px;font-weight:600;cursor:pointer;border:1px solid transparent;color:var(--txt3);transition:all .2s;white-space:nowrap;display:flex;align-items:center;gap:5px;}
+.pfil:hover{color:var(--txt2);background:var(--bg3);}
+.pfil.on{background:rgba(109,40,217,.15);border-color:var(--p2);color:var(--p3);}
+.pfil.ml.on{background:rgba(255,220,0,.08);border-color:#ffd600;color:#ffd600;}
+.pfil.mg.on{background:rgba(0,120,255,.08);border-color:#0078ff;color:#4da6ff;}
+.pfil.sp.on{background:rgba(238,77,45,.08);border-color:#ee4d2d;color:#ff7a5c;}
+
+/* SIDEBAR */
+#sidebar{
+  position:absolute;top:94px;left:0;bottom:0;width:56px;
+  background:rgba(12,18,32,.95);backdrop-filter:blur(8px);
+  border-right:1px solid var(--border);
+  display:flex;flex-direction:column;align-items:center;
+  padding:10px 0;gap:2px;z-index:98;
+}
+.s-btn{width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--txt3);font-size:20px;transition:all .2s;position:relative;flex-shrink:0;}
+.s-btn:hover{background:var(--bg3);color:var(--txt2);}
+.s-btn.on{background:rgba(109,40,217,.2);color:var(--p3);}
+.s-tip{position:absolute;left:48px;background:var(--bg4);border:1px solid var(--border2);border-radius:7px;padding:4px 10px;font-size:10px;color:var(--txt2);white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .2s;z-index:300;}
+.s-btn:hover .s-tip{opacity:1;}
+.s-sp{flex:1;}
+.s-ver{font-size:8px;color:var(--txt3);padding-bottom:4px;}
+
+/* PERIOD BAR */
+#periodbar{
+  position:absolute;top:94px;left:56px;right:0;height:38px;
+  background:rgba(12,18,32,.9);
+  border-bottom:1px solid var(--border);
+  display:flex;align-items:center;padding:0 14px;gap:4px;
+  z-index:98;
+}
+.pill{padding:4px 12px;border-radius:20px;font-size:10px;font-weight:600;cursor:pointer;border:1px solid transparent;color:var(--txt3);transition:all .2s;white-space:nowrap;}
+.pill:hover{color:var(--txt2);background:var(--bg3);}
+.pill.on{background:rgba(109,40,217,.15);border-color:var(--p2);color:var(--p3);}
+.sync-info{margin-left:auto;font-size:10px;color:var(--txt3);display:flex;align-items:center;gap:6px;}
 
 
-async function ensureProductSchema() {
-  try {
-    await db.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS platform TEXT DEFAULT 'geral'`);
-    await db.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS tax_pct NUMERIC(10,4)`);
-    await db.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS fee_pct NUMERIC(10,4)`);
-    await db.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS shipping_fee NUMERIC(12,2)`);
+/* CUSTOM DATE MODAL */
+.date-modal-box{max-width:420px;}
+.date-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+.date-input{background:var(--bg3);border:1px solid var(--border2);border-radius:10px;color:var(--txt);height:38px;padding:0 12px;font-size:13px;font-family:'Inter',sans-serif;outline:none;}
+.date-input:focus{border-color:var(--p2);box-shadow:0 0 0 3px rgba(139,92,246,.12);}
+.date-limit{font-size:10px;color:var(--txt3);line-height:1.45;background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.12);border-radius:10px;padding:9px 11px;}
+.date-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:4px;}
 
-    // Se existia UNIQUE(user_id, sku), ele impede o mesmo SKU em plataformas diferentes.
-    // Remove somente constraints únicas antigas que não possuem a coluna platform.
-    const { rows } = await db.query(`
-      SELECT con.conname
-      FROM pg_constraint con
-      JOIN pg_class rel ON rel.oid = con.conrelid
-      JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
-      WHERE rel.relname = 'products'
-        AND con.contype = 'u'
-        AND pg_get_constraintdef(con.oid) ILIKE '%user_id%'
-        AND pg_get_constraintdef(con.oid) ILIKE '%sku%'
-        AND pg_get_constraintdef(con.oid) NOT ILIKE '%platform%'
-    `);
-    for (const r of rows) {
-      await db.query(`ALTER TABLE products DROP CONSTRAINT IF EXISTS ${r.conname}`);
-      console.log('[Products] constraint antiga removida:', r.conname);
-    }
+/* CONTENT AREA — scroll natural da página */
+#content{
+  position:absolute;
+  top:132px;
+  left:56px;
+  right:0;
+  bottom:0;
+  overflow-y:auto;
+  overflow-x:hidden;
+  padding:10px;
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
 
-    await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS products_user_platform_sku_uidx ON products(user_id, platform, sku)`);
-    await db.query(`UPDATE products SET platform='geral' WHERE platform IS NULL OR platform=''`);
-    console.log('✅ Products schema OK: custo/imposto/tarifa/frete por plataforma + SKU');
-  } catch (e) {
-    console.error('[Products schema]', e.message);
+/* TOPO COMPACTO */
+/* ── DASHBOARD NOVO LAYOUT ── */
+.dash-main-row{display:grid;grid-template-columns:1fr minmax(380px,440px);gap:8px;align-items:stretch;margin-bottom:8px;flex-shrink:0;}
+.dash-metrics{display:grid;grid-template-columns:repeat(4,1fr);grid-template-rows:auto auto;gap:5px;}
+/* Metric cards */
+.mcard{background:linear-gradient(135deg,var(--bg2),var(--bg3));border:1px solid var(--border2);border-radius:10px;padding:7px 10px;position:relative;overflow:hidden;transition:all .2s;min-width:0;}
+.mcard:hover{border-color:rgba(139,92,246,.3);transform:translateY(-1px);}
+.mcard.sm{padding:5px 9px;}
+.mcard-accent{position:absolute;top:0;left:0;right:0;height:2px;background:var(--ca);}
+.mcard-label{font-size:12.5px;color:var(--txt3);text-transform:uppercase;letter-spacing:.5px;font-weight:700;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.mcard-val{font-size:27px;font-weight:800;letter-spacing:-.4px;color:var(--txt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.15;}
+.mcard.sm .mcard-val{font-size:16px;}
+.mcard-sub{font-size:8px;color:var(--txt3);margin-top:1px;display:flex;align-items:center;gap:4px;flex-wrap:wrap;}
+.mcard-cmp{display:inline-flex;align-items:center;gap:2px;font-size:10px;font-weight:700;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;}
+/* badge APENAS dentro dos metric cards — não afeta badges do resto do sistema */
+.mcard .badge{font-size:10px;}
+.mcard-cmp.up{color:var(--green2);}
+.mcard-cmp.dn{color:var(--red2);}
+.mcard-cmp.eq{color:var(--txt3);}
+/* Product panel full width below */
+.prod-panel-full{margin-bottom:8px;flex-shrink:0;}
+.badge{display:inline-flex;align-items:center;padding:1px 5px;border-radius:20px;font-size:7.5px;font-weight:700;}
+.badge.green{background:rgba(16,185,129,.12);color:var(--green2);border:1px solid rgba(16,185,129,.2);}
+.badge.red{background:rgba(220,38,38,.1);color:var(--red2);border:1px solid rgba(220,38,38,.2);}
+.top-panel{min-width:0;background:rgba(12,18,32,.38);border:1px solid var(--border);border-radius:12px;padding:7px;overflow:hidden;}
+.top-panel-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;}
+/* Chart period tabs */
+.ctab{background:transparent;border:none;color:rgba(148,163,184,.55);font-size:9.5px;font-weight:700;padding:3px 7px;border-radius:5px;cursor:pointer;transition:all .15s;letter-spacing:.2px;line-height:1.4}
+.ctab:hover{color:#c4b5fd;background:rgba(139,92,246,.12)}
+.ctab.active{background:rgba(139,92,246,.2);color:#a78bfa}
+/* Page size selector */
+.page-size-sel{display:flex;align-items:center;gap:6px;font-size:10px;color:var(--txt3);}
+.page-size-sel select{background:var(--bg3);border:1px solid var(--border2);color:var(--txt2);border-radius:6px;padding:2px 8px;font-size:10px;cursor:pointer;outline:none;}
+@media(max-width:1100px){.dash-main-row{grid-template-columns:1fr}#ss-chart-panel{display:none!important}.dash-metrics{grid-template-columns:repeat(4,1fr)}}
+@media(max-width:800px){.dash-metrics{grid-template-columns:repeat(2,1fr)}.mcard-val{font-size:13px}.mcard.sm .mcard-val{font-size:11px}}
+
+/* FULFILLMENT TABS */
+.ftabs{display:flex;gap:4px;}
+.ftab{padding:5px 14px;border-radius:20px;font-size:10px;font-weight:600;cursor:pointer;border:1px solid var(--border2);color:var(--txt3);transition:all .2s;}
+.ftab:hover{border-color:var(--p2);color:var(--p3);}
+.ftab.on{background:rgba(109,40,217,.15);border-color:var(--p2);color:var(--p3);}
+
+/* PRODUCT TABS + LIST */
+.ptabs{display:flex;gap:4px;margin-bottom:0;flex-wrap:wrap;}
+.ptab{padding:5px 14px;border-radius:20px;font-size:10px;font-weight:600;cursor:pointer;border:1px solid var(--border2);color:var(--txt3);transition:all .2s;}
+.ptab:hover{border-color:var(--p2);color:var(--p3);}
+.ptab.on{background:rgba(109,40,217,.15);border-color:var(--p2);color:var(--p3);}
+.prod-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;max-height:118px;overflow:auto;}
+.prod-item{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:5px 7px;display:flex;align-items:center;gap:6px;cursor:pointer;transition:all .2s;min-width:0;}
+.prod-item:hover{border-color:var(--border2);background:var(--bg3);}
+.prod-img{width:30px;height:30px;border-radius:7px;object-fit:cover;background:var(--bg4);border:1px solid var(--border);flex-shrink:0;}
+.prod-img-ph{width:30px;height:30px;border-radius:7px;background:var(--bg4);border:1px solid var(--border);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:13px;}
+.prod-title{flex:1;font-size:9px;font-weight:600;color:var(--txt);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;}
+.prod-right{text-align:right;flex-shrink:0;}
+.prod-right .v{font-size:11px;font-weight:700;letter-spacing:-.3px;}
+.prod-right .p{font-size:8px;color:var(--txt3);margin-top:1px;}
+
+/* TABLE */
+.tbl-wrap{
+  background:var(--bg2);
+  border:1px solid var(--border2);
+  border-radius:12px;
+  overflow:hidden;
+  margin-bottom:10px;
+  flex-shrink:0;
+  width:100%;
+  overflow-x:auto;
+}
+.tbl-head{padding:12px 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);}
+.tbl-title{font-size:12px;font-weight:700;color:var(--txt2);display:flex;align-items:center;gap:6px;}
+.tbl-actions{display:flex;gap:6px;align-items:center;}
+.srch{background:var(--bg3);border:1px solid var(--border2);border-radius:8px;padding:6px 12px;font-size:11px;color:var(--txt);outline:none;width:160px;font-family:'Inter',sans-serif;}
+.srch:focus{border-color:var(--p2);}
+.srch::placeholder{color:var(--txt3);}
+.ic-btn{width:30px;height:30px;border-radius:8px;background:var(--bg3);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--txt3);font-size:15px;transition:all .2s;}
+.ic-btn:hover{border-color:var(--p2);color:var(--p3);}
+table{width:100%;border-collapse:collapse;font-size:10px;}
+thead th{padding:8px 10px;text-align:left;font-size:9px;font-weight:700;color:var(--txt3);text-transform:uppercase;letter-spacing:.6px;background:var(--bg3);border-bottom:1px solid var(--border);}
+tbody td{padding:8px 10px;color:var(--txt2);border-bottom:1px solid rgba(255,255,255,.03);vertical-align:middle;}
+tbody tr:last-child td{border-bottom:none;}
+tbody tr:hover td{background:rgba(109,40,217,.04);cursor:pointer;}
+tbody tr.date-row td{background:var(--bg3);padding:6px 10px;font-size:9px;font-weight:700;color:var(--txt3);text-transform:uppercase;letter-spacing:.8px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);}
+.row-img{width:32px;height:32px;border-radius:7px;object-fit:cover;background:var(--bg4);border:1px solid var(--border);}
+.row-img-ph{width:32px;height:32px;border-radius:7px;background:var(--bg4);border:1px solid var(--border);display:inline-flex;align-items:center;justify-content:center;font-size:14px;}
+.profit-pos{background:rgba(16,185,129,.1);color:var(--green2);font-size:9px;font-weight:700;padding:2px 7px;border-radius:20px;white-space:nowrap;border:1px solid rgba(16,185,129,.15);}
+.profit-neg{background:rgba(220,38,38,.08);color:var(--red2);font-size:9px;font-weight:700;padding:2px 7px;border-radius:20px;border:1px solid rgba(220,38,38,.15);}
+.plat-ml{background:rgba(255,214,0,.08);color:#ffd600;font-size:9px;font-weight:700;padding:1px 6px;border-radius:4px;border:1px solid rgba(255,214,0,.15);}
+.plat-sp{background:rgba(238,77,45,.08);color:#ee4d2d;font-size:9px;font-weight:700;padding:1px 6px;border-radius:4px;border:1px solid rgba(238,77,45,.15);}
+.plat-mg{background:rgba(0,120,255,.08);color:#4da6ff;font-size:9px;font-weight:700;padding:1px 6px;border-radius:4px;border:1px solid rgba(0,120,255,.15);}
+.type-full{background:rgba(56,189,248,.08);color:var(--blue2);font-size:8px;font-weight:700;padding:1px 5px;border-radius:4px;border:1px solid rgba(56,189,248,.15);}
+.type-normal{background:rgba(109,40,217,.08);color:var(--p3);font-size:8px;font-weight:700;padding:1px 5px;border-radius:4px;border:1px solid rgba(109,40,217,.15);}
+.cost-wrap{display:flex;align-items:center;gap:4px;}
+.cost-inp{background:var(--bg4);border:1px solid var(--border2);border-radius:6px;padding:2px 7px;font-size:10px;color:var(--txt);width:72px;outline:none;font-family:'Inter',sans-serif;}
+.cost-inp:focus{border-color:var(--p2);}
+#content::-webkit-scrollbar{width:5px;}#content::-webkit-scrollbar-thumb{background:var(--bg5);border-radius:4px;}
+.tbl-foot{padding:8px 16px;display:flex;justify-content:space-between;align-items:center;border-top:1px solid var(--border);background:var(--bg3);flex-shrink:0;}
+.page-btn{width:26px;height:26px;border-radius:7px;background:var(--bg4);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--txt3);font-size:13px;transition:all .2s;}
+.page-btn:hover{border-color:var(--p2);color:var(--p3);}
+
+/* STATUS BADGE */
+.st{font-size:9px;font-weight:700;padding:2px 7px;border-radius:20px;}
+
+/* MODALS */
+.mo{position:fixed;inset:0;background:rgba(6,8,24,.9);backdrop-filter:blur(8px);z-index:500;display:none;align-items:center;justify-content:center;padding:16px;}
+.mo.on{display:flex;}
+.md{background:var(--bg2);border:1px solid var(--border2);border-radius:20px;width:100%;max-width:620px;max-height:88vh;overflow-y:auto;box-shadow:0 32px 80px rgba(0,0,0,.7);}
+.md.wide{max-width:740px;}
+.md::-webkit-scrollbar{width:4px;}
+.md::-webkit-scrollbar-thumb{background:var(--bg5);border-radius:2px;}
+.mh{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;background:var(--bg2);z-index:10;}
+.mh-left{display:flex;align-items:center;gap:10px;}
+.mh-ico{width:36px;height:36px;background:rgba(109,40,217,.15);border:1px solid rgba(109,40,217,.2);border-radius:10px;display:flex;align-items:center;justify-content:center;color:var(--p3);font-size:18px;}
+.mh-title{font-size:15px;font-weight:700;}
+.mh-sub{font-size:10px;color:var(--txt3);margin-top:1px;}
+.mh-close{width:30px;height:30px;border-radius:8px;background:var(--bg3);border:1px solid var(--border);cursor:pointer;color:var(--txt3);display:flex;align-items:center;justify-content:center;font-size:16px;transition:all .2s;}
+.mh-close:hover{border-color:var(--red);color:var(--red2);}
+.mb{padding:16px 20px;display:flex;flex-direction:column;gap:12px;}
+.mpc{background:var(--bg3);border:1px solid var(--border2);border-radius:14px;overflow:hidden;}
+.mpch{padding:12px 16px;display:flex;align-items:center;gap:12px;cursor:pointer;}
+.mp-ico{width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;flex-shrink:0;}
+.mp-ico.ml{background:#ffd600;color:#000;}
+.mp-ico.sp{background:#ee4d2d;color:#fff;}
+.mp-ico.mg{background:#0078ff;color:#fff;}
+.mp-info h3{font-size:13px;font-weight:700;}
+.mp-info p{font-size:10px;color:var(--txt3);margin-top:2px;}
+.mp-status{margin-left:auto;display:flex;align-items:center;gap:8px;}
+.conn-badge{background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.2);color:var(--green2);font-size:9px;font-weight:700;padding:3px 10px;border-radius:20px;display:flex;align-items:center;gap:4px;}
+.conn-badge::before{content:'';width:5px;height:5px;border-radius:50%;background:var(--green2);box-shadow:0 0 6px var(--green2);}
+.disc-badge{background:var(--bg4);border:1px solid var(--border2);color:var(--txt3);font-size:9px;font-weight:600;padding:3px 10px;border-radius:20px;}
+.chev{font-size:16px;color:var(--txt3);transition:transform .3s;}
+.chev.open{transform:rotate(180deg);}
+.mp-body{border-top:1px solid var(--border);padding:12px 16px;display:none;flex-direction:column;gap:10px;}
+.mp-body.on{display:flex;}
+.mp-acc{background:var(--bg4);border:1px solid var(--border);border-radius:10px;padding:10px 12px;display:flex;align-items:center;gap:10px;}
+.mp-ava{width:32px;height:32px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;background:rgba(109,40,217,.15);color:var(--p3);}
+.mp-acc-info{flex:1;}
+.mp-acc-name{font-size:12px;font-weight:600;}
+.mp-acc-sub{font-size:10px;color:var(--txt3);margin-top:2px;display:flex;gap:6px;}
+.mp-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;}
+.mp-stat{background:var(--bg3);border-radius:8px;padding:6px 8px;text-align:center;}
+.mp-stat span{font-size:8px;color:var(--txt3);display:block;text-transform:uppercase;letter-spacing:.4px;}
+.mp-stat strong{font-size:11px;font-weight:700;color:var(--txt2);display:block;margin-top:2px;}
+.note{display:flex;align-items:center;gap:6px;font-size:10px;color:var(--txt3);padding:8px 12px;background:rgba(255,255,255,.02);border-radius:8px;border:1px solid var(--border);}
+.note i{font-size:14px;color:var(--p3);}
+.ib{width:28px;height:28px;border-radius:7px;background:var(--bg3);border:1px solid var(--border);cursor:pointer;color:var(--txt3);display:flex;align-items:center;justify-content:center;font-size:14px;transition:all .2s;}
+.ib:hover{border-color:var(--p2);color:var(--p3);}
+.ib.danger:hover{border-color:var(--red);color:var(--red2);}
+.btn{display:flex;align-items:center;justify-content:center;gap:6px;padding:10px 16px;border-radius:10px;font-size:12px;font-weight:700;cursor:pointer;border:none;width:100%;font-family:'Inter',sans-serif;transition:all .2s;}
+.btn.primary{background:linear-gradient(135deg,var(--p),var(--p2));color:#fff;box-shadow:0 4px 16px var(--glow);}
+.btn.primary:hover{opacity:.9;}
+.btn.ghost{background:var(--bg4);border:1px solid var(--border2);color:var(--txt2);}
+.btn.ghost:hover{border-color:var(--p2);color:var(--p3);}
+.fi{display:flex;flex-direction:column;gap:4px;}
+.fi label{font-size:10px;color:var(--txt3);font-weight:600;}
+.fi input,.fi select{background:var(--bg3);border:1px solid var(--border2);border-radius:9px;padding:9px 13px;font-size:13px;color:var(--txt);font-family:'Inter',sans-serif;outline:none;width:100%;}
+.fi input:focus,.fi select:focus{border-color:var(--p2);}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+.calc-result{background:rgba(109,40,217,.08);border:1px solid rgba(109,40,217,.2);border-radius:12px;padding:14px 16px;}
+.cr-row{display:flex;justify-content:space-between;font-size:11px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.04);}
+.cr-row:last-child{border-bottom:none;}
+.cr-row .l{color:var(--txt3);}
+.cr-row .v{font-weight:700;}
+.od-img-big{width:80px;height:80px;border-radius:12px;object-fit:cover;background:var(--bg4);border:1px solid var(--border);flex-shrink:0;}
+.od-img-big-ph{width:80px;height:80px;border-radius:12px;background:var(--bg4);border:1px solid var(--border);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:32px;}
+.od-block{background:var(--bg3);border:1px solid var(--border);border-radius:12px;padding:12px 14px;}
+.od-block-title{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--txt3);margin-bottom:10px;display:flex;align-items:center;gap:5px;}
+.od-row{display:flex;justify-content:space-between;font-size:11px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.04);}
+.od-row:last-child{border-bottom:none;}
+.od-row .l{color:var(--txt3);}
+.od-row .v{font-weight:600;color:var(--txt);}
+.od-total{background:rgba(109,40,217,.1);border:1px solid rgba(109,40,217,.25);border-radius:12px;padding:14px 16px;display:flex;justify-content:space-between;align-items:center;}
+.empty{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px;gap:12px;color:var(--txt3);}
+.empty i{font-size:44px;opacity:.25;}
+.empty p{font-size:13px;}
+.spin{display:inline-block;width:18px;height:18px;border:2px solid rgba(139,92,246,.25);border-top-color:var(--p2);border-radius:50%;animation:spin .6s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg)}}
+/* AI CHAT */
+.ai-sug{background:var(--bg4);border:1px solid var(--border2);border-radius:20px;padding:4px 10px;font-size:10px;color:var(--txt2);cursor:pointer;font-family:'Inter',sans-serif;transition:all .15s;white-space:nowrap;}
+.ai-sug:hover{border-color:var(--p2);color:var(--p3);background:rgba(109,40,217,.1);}
+.ai-msg{display:flex;flex-direction:column;max-width:88%;}
+.ai-msg.user{align-self:flex-end;}
+.ai-bubble{padding:9px 13px;border-radius:14px;font-size:12px;line-height:1.55;word-break:break-word;}
+.ai-bubble.bot{background:var(--bg3);border:1px solid var(--border2);color:var(--txt);border-radius:4px 14px 14px 14px;}
+.ai-bubble.user{background:linear-gradient(135deg,var(--p),var(--p2));color:#fff;border-radius:14px 4px 14px 14px;}
+.ai-bubble.typing{color:var(--txt3);font-style:italic;}
+.ai-bubble strong{color:var(--p3);}
+.ai-bubble ul{padding-left:14px;margin:4px 0;}
+.ai-bubble li{margin-bottom:3px;}
+@keyframes ai-panel-in{from{transform:translateX(100%)}to{transform:translateX(0)}}
+@media(max-width:768px){#ai-panel{width:100%!important;}#ai-fab{bottom:70px;}}
+.toast{position:fixed;bottom:24px;right:24px;background:var(--bg3);border:1px solid var(--p2);border-radius:12px;padding:12px 18px;font-size:12px;color:var(--txt2);z-index:9000;display:flex;align-items:center;gap:8px;box-shadow:0 12px 40px rgba(0,0,0,.5);transform:translateY(80px);opacity:0;transition:all .3s;pointer-events:none;}
+.toast.on{transform:none;opacity:1;}
+.toast i{color:var(--p3);font-size:17px;}
+
+/* PRODUCT COST MANAGER */
+.prod-cost-form{display:grid;grid-template-columns:110px 105px 1fr 82px 82px 82px 82px 42px;gap:7px;align-items:end;}
+.prod-cost-card{background:var(--bg3);border:1px solid var(--border);border-radius:12px;padding:10px 12px;display:grid;grid-template-columns:90px 95px 1fr 82px 70px 70px 82px 34px;gap:8px;align-items:center;}
+.prod-cost-card:hover{border-color:var(--border2);background:rgba(255,255,255,.025);}
+.plat-select{background:var(--bg3);border:1px solid var(--border2);border-radius:9px;padding:8px 10px;font-size:11px;color:var(--txt);font-family:'Inter',sans-serif;outline:none;width:100%;}
+.plat-chip{font-size:9px;font-weight:800;padding:3px 8px;border-radius:999px;text-align:center;white-space:nowrap;border:1px solid var(--border2);}
+.plat-chip.mercadolivre{background:rgba(255,214,0,.08);color:#ffd600;border-color:rgba(255,214,0,.18);}
+.plat-chip.magalu{background:rgba(0,120,255,.08);color:#4da6ff;border-color:rgba(0,120,255,.18);}
+.plat-chip.shopee{background:rgba(238,77,45,.08);color:#ff7a5c;border-color:rgba(238,77,45,.18);}
+.plat-chip.tiktok{background:rgba(255,0,80,.08);color:#ff0050;border-color:rgba(255,0,80,.18);}
+.plat-chip.geral{background:rgba(148,163,184,.08);color:var(--txt2);}
+.tax-pill{font-size:11px;font-weight:700;color:var(--blue2);}
+@media(max-width:900px){.prod-cost-form{grid-template-columns:1fr 1fr}.prod-cost-card{grid-template-columns:1fr 1fr}.prod-cost-card .ib{justify-self:end}}
+
+
+
+/* === FIX v4.8 — Aba Custos bonita e alinhada === */
+#mo-cst .md.wide{max-width:880px;overflow:hidden;}
+#mo-cst .mb{padding:16px 18px 18px;}
+.cost-panel{display:flex;flex-direction:column;gap:14px;}
+.cost-create{background:linear-gradient(135deg,rgba(109,40,217,.10),rgba(15,23,42,.55));border:1px solid var(--border2);border-radius:16px;padding:14px;display:grid;grid-template-columns:150px 1fr 1.3fr 105px 90px 90px 105px 42px;gap:8px;align-items:center;box-shadow:inset 0 1px 0 rgba(255,255,255,.03);}
+.cost-create select,.cost-create input{height:34px;background:var(--bg3);border:1px solid var(--border2);border-radius:10px;color:var(--txt);font-size:11px;font-family:'Inter',sans-serif;padding:0 11px;outline:none;min-width:0;}
+.cost-create select:focus,.cost-create input:focus{border-color:var(--p2);box-shadow:0 0 0 3px rgba(139,92,246,.12);}
+.cost-create input::placeholder{color:var(--txt3);}
+.cost-help{background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.12);color:var(--txt2);border-radius:12px;padding:10px 12px;font-size:11px;line-height:1.45;}
+.cost-list{display:flex;flex-direction:column;gap:8px;max-height:420px;overflow:auto;padding-right:4px;}
+.cost-list::-webkit-scrollbar{width:4px}.cost-list::-webkit-scrollbar-thumb{background:var(--bg5);border-radius:4px;}
+.cost-card{background:var(--bg3);border:1px solid var(--border);border-radius:14px;padding:10px 12px;display:grid;grid-template-columns:74px minmax(160px,1.3fr) 105px 95px 95px 105px 34px;gap:9px;align-items:center;transition:all .2s;}
+.cost-card:hover{border-color:rgba(139,92,246,.32);background:rgba(255,255,255,.025);}
+.cost-field{min-width:0;display:flex;flex-direction:column;gap:4px;}
+.cost-field label{font-size:8px;color:var(--txt3);font-weight:800;text-transform:uppercase;letter-spacing:.6px;}
+.cost-field input{height:32px;background:var(--bg4);border:1px solid var(--border2);border-radius:9px;color:var(--txt);font-size:11px;font-weight:700;padding:0 9px;outline:none;font-family:'Inter',sans-serif;width:100%;}
+.cost-field input:focus{border-color:var(--p2);box-shadow:0 0 0 3px rgba(139,92,246,.12);}
+.cost-sku{font-size:11px;font-weight:800;color:var(--p3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.cost-name{font-size:10px;color:var(--txt3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.plat-chip{height:22px;border-radius:999px;padding:0 10px;display:inline-flex;align-items:center;justify-content:center;font-size:9px;font-weight:900;border:1px solid var(--border2);white-space:nowrap;}
+.plat-chip.mercadolivre{background:rgba(255,214,0,.10);border-color:rgba(255,214,0,.25);color:#ffd600;}
+.plat-chip.magalu{background:rgba(0,120,255,.10);border-color:rgba(0,120,255,.28);color:#4da6ff;}
+.plat-chip.shopee{background:rgba(238,77,45,.10);border-color:rgba(238,77,45,.25);color:#ff7a5c;}
+.plat-chip.tiktok{background:rgba(255,0,80,.10);border-color:rgba(255,0,80,.25);color:#ff0050;}
+.plat-chip.geral{background:rgba(148,163,184,.10);border-color:rgba(148,163,184,.22);color:var(--txt2);}
+#mo-cst .ib{background:rgba(16,185,129,.08);border-color:rgba(16,185,129,.18);color:var(--green2);}
+#mo-cst .ib:hover{background:rgba(16,185,129,.14);border-color:rgba(16,185,129,.35);}
+.cost-defaults{background:linear-gradient(135deg,rgba(56,189,248,.08),rgba(109,40,217,.08));border:1px solid var(--border2);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:10px;}
+.cost-defaults-title{display:flex;align-items:center;justify-content:space-between;gap:10px;}
+.cost-defaults-title strong{font-size:12px;color:var(--txt);display:flex;align-items:center;gap:7px;}
+.cost-defaults-title span{font-size:10px;color:var(--txt3);}
+.default-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;}
+.default-card{background:rgba(15,23,42,.62);border:1px solid var(--border);border-radius:13px;padding:10px;display:grid;grid-template-columns:86px 1fr 1fr 1fr 32px;gap:7px;align-items:end;}
+.default-card label{font-size:8px;color:var(--txt3);font-weight:800;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:4px;}
+.default-card input{height:31px;background:var(--bg4);border:1px solid var(--border2);border-radius:9px;color:var(--txt);font-size:11px;font-weight:700;padding:0 8px;width:100%;outline:none;}
+.default-card input:focus{border-color:var(--p2);box-shadow:0 0 0 3px rgba(139,92,246,.12);}
+.default-card .ib{width:31px;height:31px;}
+.auto-note{font-size:10px;color:var(--txt3);line-height:1.45;}
+.auto-badge{font-size:8px;color:var(--green2);background:rgba(16,185,129,.10);border:1px solid rgba(16,185,129,.18);border-radius:999px;padding:2px 7px;font-weight:800;}
+@media(max-width:900px){.default-grid{grid-template-columns:1fr}.default-card{grid-template-columns:1fr 1fr}.default-card .plat-chip{grid-column:1/-1}.cost-create{grid-template-columns:1fr 1fr}.cost-card{grid-template-columns:1fr 1fr}}
+
+
+/* === FIX v5.1 — Custos com scroll, deletar e limpar === */
+#mo-cst{padding:16px;}
+#mo-cst .md.wide{max-width:980px;width:100%;max-height:90vh;display:flex;flex-direction:column;overflow:hidden;}
+#mo-cst .mh{flex-shrink:0;}
+#mo-cst .mb{flex:1;min-height:0;overflow:hidden;padding:14px 16px 16px;}
+#mo-cst .cost-panel{height:100%;min-height:0;display:flex;flex-direction:column;gap:12px;}
+#mo-cst .cost-defaults,#mo-cst .cost-create,#mo-cst .cost-help{flex-shrink:0;}
+#mo-cst .cost-list{flex:1;min-height:170px;max-height:none;overflow-y:auto;overflow-x:hidden;padding-right:6px;scrollbar-width:thin;}
+#mo-cst .cost-list::-webkit-scrollbar{width:7px;}
+#mo-cst .cost-list::-webkit-scrollbar-track{background:rgba(255,255,255,.035);border-radius:999px;}
+#mo-cst .cost-list::-webkit-scrollbar-thumb{background:linear-gradient(180deg,var(--p2),var(--p));border-radius:999px;}
+#mo-cst .cost-card{grid-template-columns:74px minmax(150px,1.3fr) 100px 90px 90px 100px 32px 32px;}
+.cost-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end;}
+.cost-mini-btn{height:28px;border:1px solid var(--border2);background:rgba(15,23,42,.75);color:var(--txt2);border-radius:9px;padding:0 10px;font-size:10px;font-weight:800;cursor:pointer;display:inline-flex;align-items:center;gap:5px;transition:all .2s;}
+.cost-mini-btn:hover{border-color:var(--p2);color:var(--p3);background:rgba(109,40,217,.10);}
+.cost-mini-btn.danger:hover{border-color:rgba(248,113,113,.45);color:var(--red2);background:rgba(248,113,113,.08);}
+#mo-cst .ib.danger{background:rgba(248,113,113,.07);border-color:rgba(248,113,113,.18);color:var(--red2);}
+#mo-cst .ib.danger:hover{background:rgba(248,113,113,.13);border-color:rgba(248,113,113,.38);}
+@media(max-height:760px){#mo-cst .cost-help{display:none;}#mo-cst .default-grid{grid-template-columns:repeat(4,1fr);}#mo-cst .default-card{grid-template-columns:1fr;}}
+@media(max-width:900px){#mo-cst .cost-card{grid-template-columns:1fr 1fr;}#mo-cst .cost-card .ib{width:100%;}#mo-cst .cost-create{grid-template-columns:1fr 1fr;}.cost-tools{justify-content:flex-start;}}
+
+.inline-edit{display:inline-flex;align-items:center;gap:4px;cursor:pointer;border-radius:7px;padding:2px 4px;}
+.inline-edit:hover{background:rgba(255,255,255,.04);}
+.inline-input{width:72px;height:24px;background:var(--bg4);border:1px solid var(--p2);border-radius:7px;color:var(--txt);font-size:10px;font-weight:700;padding:0 6px;outline:none;}
+.save-mini,.cancel-mini{font-size:12px;cursor:pointer}.save-mini{color:var(--green2)}.cancel-mini{color:var(--red2)}
+@media(max-width:1050px){.cost-create{grid-template-columns:1fr 1fr 1fr}.cost-create .btn{width:100%!important}.cost-card{grid-template-columns:1fr 1fr 1fr}.cost-card .ib{justify-self:end}}
+
+
+.ship-badge{display:inline-flex;align-items:center;gap:4px;font-size:8.5px;font-weight:800;padding:2px 7px;border-radius:999px;border:1px solid rgba(148,163,184,.18);white-space:nowrap;}
+.ship-badge.ready,.ship-badge.not_delivered,.ship-badge.paid_not_shipped{background:rgba(251,191,36,.10);color:var(--yellow2);border-color:rgba(251,191,36,.20)}
+.ship-badge.invoiced{background:rgba(245,158,11,.12);color:#f59e0b;border-color:rgba(245,158,11,.25);white-space:normal;text-align:center;line-height:1.3;}
+.ship-badge.handling{background:rgba(139,92,246,.10);color:var(--p3);border-color:rgba(139,92,246,.20)}
+.ship-badge.shipped{background:rgba(56,189,248,.10);color:var(--blue2);border-color:rgba(56,189,248,.20)}
+.ship-badge.delivered{background:rgba(16,185,129,.10);color:var(--green2);border-color:rgba(16,185,129,.20)}
+.ship-badge.cancelled{background:rgba(248,113,113,.10);color:var(--red2);border-color:rgba(248,113,113,.20)}
+.ship-label-btn{display:inline-flex;align-items:center;gap:4px;background:rgba(16,185,129,.10);color:var(--green2);border:1px solid rgba(16,185,129,.22);border-radius:999px;padding:2px 7px;font-size:8.5px;font-weight:800;text-decoration:none;margin-top:3px;}
+.ship-label-btn:hover{border-color:var(--green2)}
+.tag-chip{display:inline-flex;background:rgba(148,163,184,.08);border:1px solid rgba(148,163,184,.13);border-radius:999px;padding:2px 7px;font-size:8.5px;font-weight:700;color:var(--txt2);}
+
+
+
+.label-modal-backdrop{position:fixed;inset:0;background:rgba(6,8,24,.88);backdrop-filter:blur(8px);z-index:9500;display:flex;align-items:center;justify-content:center;padding:16px}
+.label-modal{width:100%;max-width:390px;background:var(--bg2);border:1px solid var(--border2);border-radius:18px;box-shadow:0 28px 70px rgba(0,0,0,.65);overflow:hidden}
+.label-modal-head{padding:15px 17px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:10px}
+.label-modal-head strong{font-size:14px}.label-modal-head span{font-size:10px;color:var(--txt3);display:block;margin-top:2px}
+.label-modal-close{width:28px;height:28px;border-radius:8px;background:var(--bg3);border:1px solid var(--border);color:var(--txt3);cursor:pointer}
+.label-modal-body{padding:14px;display:flex;flex-direction:column;gap:8px}
+.label-choice{width:100%;border:1px solid var(--border2);background:var(--bg3);border-radius:12px;color:var(--txt);padding:11px 13px;display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;font-family:'Inter',sans-serif;text-align:left}
+.label-choice:hover{border-color:var(--p2);background:rgba(109,40,217,.14)}
+.label-choice b{font-size:12px}.label-choice small{font-size:9px;color:var(--txt3);display:block;margin-top:2px}.label-choice i{font-size:18px;color:var(--p3)}
+.label-batch{border-top:1px solid var(--border);margin-top:6px;padding-top:10px}
+.label-batch-title{font-size:11px;font-weight:800;color:var(--txt2);display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px}
+.label-batch-title small{font-size:9px;color:var(--txt3);font-weight:600}
+.label-batch-list{max-height:190px;overflow:auto;display:flex;flex-direction:column;gap:6px;padding-right:3px}
+.label-batch-list::-webkit-scrollbar{width:4px}.label-batch-list::-webkit-scrollbar-thumb{background:var(--bg5);border-radius:4px}
+.label-batch-item{display:grid;grid-template-columns:18px 1fr auto;gap:8px;align-items:center;background:rgba(255,255,255,.025);border:1px solid var(--border);border-radius:10px;padding:8px}
+.label-batch-item:hover{border-color:var(--border2)}
+.label-batch-item input{accent-color:var(--p2)}
+.label-batch-name{font-size:10px;font-weight:800;color:var(--txt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.label-batch-sub{font-size:8.5px;color:var(--txt3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.label-batch-tag{font-size:8px;color:var(--p3);border:1px solid rgba(167,139,250,.22);background:rgba(109,40,217,.10);padding:2px 6px;border-radius:999px;white-space:nowrap}
+.label-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.label-note{font-size:9.5px;color:var(--txt3);line-height:1.35;background:rgba(56,189,248,.055);border:1px solid rgba(56,189,248,.12);padding:8px 10px;border-radius:10px}
+
+.label-btn{margin-left:4px;width:22px;height:22px;border-radius:7px;border:1px solid rgba(167,139,250,.35);background:rgba(109,40,217,.16);color:var(--p3);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;font-size:12px;vertical-align:middle}
+.label-btn:hover{border-color:var(--p2);background:rgba(109,40,217,.28)}
+
+
+
+/* ── MOBILE HERO — desktop: oculto ── */
+#mob-hero{
+  display:none;
+  background:linear-gradient(145deg,var(--bg2),var(--bg3));
+  border:1px solid var(--border2);border-radius:16px;
+  padding:16px 16px 14px;flex-shrink:0;position:relative;overflow:hidden;
+}
+#mob-hero::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,#6d28d9,#8b5cf6,#06b6d4);}
+/* Faturamento — linha principal */
+.mh-fat-label{font-size:9px;color:var(--txt3);text-transform:uppercase;letter-spacing:.9px;font-weight:700;margin-bottom:3px;}
+.mh-fat-val{font-size:30px;font-weight:900;color:var(--txt);letter-spacing:-1.2px;line-height:1.05;}
+.mh-fat-cmp-wrap{display:flex;align-items:center;gap:6px;margin-top:5px;}
+.mh-badge{display:inline-flex;align-items:center;gap:3px;font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px;}
+.mh-badge.up{background:rgba(16,185,129,.15);color:var(--green2);}
+.mh-badge.dn{background:rgba(220,38,38,.12);color:var(--red2);}
+.mh-badge.eq{background:rgba(255,255,255,.06);color:var(--txt3);}
+/* Lucro — linha secundária */
+.mh-sep{height:1px;background:var(--border);margin:12px 0 10px;}
+.mh-luc-row{display:flex;align-items:center;justify-content:space-between;}
+.mh-luc-label{font-size:9px;color:var(--txt3);text-transform:uppercase;letter-spacing:.9px;font-weight:700;margin-bottom:2px;}
+.mh-luc-val{font-size:18px;font-weight:800;color:var(--green2);letter-spacing:-.5px;}
+/* MTD — faturamento do mês abaixo do lucro */
+.mh-mtd-row{display:flex;align-items:center;justify-content:space-between;margin-top:8px;padding-top:7px;border-top:1px solid rgba(255,255,255,.06);}
+.mh-mtd-label{font-size:9px;color:var(--txt3);text-transform:uppercase;letter-spacing:.9px;font-weight:700;}
+.mh-mtd-val{font-size:14px;font-weight:800;color:var(--txt2);letter-spacing:-.3px;}
+/* atualização */
+.mh-upd{font-size:8px;color:var(--txt3);margin-top:10px;display:flex;align-items:center;gap:4px;}
+/* card icon — visível só no mobile */
+.mcard-icon{display:none;font-size:18px;margin-bottom:4px;opacity:.8;}
+
+/* ===== MOBILE — SalesSync (único bloco, sem conflito) ===== */
+@media (max-width: 768px) {
+
+  /* BASE — scroll acontece no #content, não no body */
+  html, body { overflow: hidden; height: 100%; }
+  #app.on { position: fixed; inset: 0; }
+
+  /* TOPBAR — linha única, 54px, esconde métricas (ficam nos cards) */
+  #topbar {
+    position: absolute; top: 0; left: 0; right: 0;
+    height: 54px; padding: 0 12px; gap: 8px;
+    flex-wrap: nowrap; align-items: center;
   }
-}
+  .t-div { display: none; }
+  .t-metric { display: none; }          /* lucro/fat já aparecem nos cards */
+  .t-name { font-size: 15px; }
+  .t-r { margin-left: auto; gap: 4px; }
+  .t-chip { padding: 4px 8px; font-size: 10px; }
+  .t-btn { width: 30px; height: 30px; font-size: 15px; }
 
-
-// SalesSync v17 — schema de metas/snapshots com auto-correção de colunas antigas
-async function ensureSalesSyncSchema() {
-  try {
-    // Metas do usuário
-    await db.query(`CREATE TABLE IF NOT EXISTS user_goals (
-      id BIGSERIAL PRIMARY KEY,
-      user_id UUID NOT NULL UNIQUE
-    )`);
-    await db.query(`ALTER TABLE user_goals ADD COLUMN IF NOT EXISTS revenue_goal_enabled BOOLEAN NOT NULL DEFAULT FALSE`);
-    await db.query(`ALTER TABLE user_goals ADD COLUMN IF NOT EXISTS monthly_revenue_goal NUMERIC(14,2) NOT NULL DEFAULT 0`);
-    await db.query(`ALTER TABLE user_goals ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()`);
-
-    // Snapshot mensal consolidado
-    await db.query(`CREATE TABLE IF NOT EXISTS monthly_snapshots (
-      id BIGSERIAL PRIMARY KEY,
-      user_id UUID NOT NULL,
-      snapshot_month DATE NOT NULL,
-      gross_sales NUMERIC(14,2) NOT NULL DEFAULT 0,
-      net_profit NUMERIC(14,2) NOT NULL DEFAULT 0,
-      orders_count INTEGER NOT NULL DEFAULT 0,
-      avg_ticket NUMERIC(14,2) NOT NULL DEFAULT 0,
-      best_seller_product TEXT,
-      most_profitable_product TEXT,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      UNIQUE(user_id, snapshot_month)
-    )`);
-    await db.query(`ALTER TABLE monthly_snapshots ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()`);
-    await db.query(`CREATE INDEX IF NOT EXISTS idx_monthly_snapshots_user ON monthly_snapshots(user_id)`);
-    await db.query(`CREATE INDEX IF NOT EXISTS idx_monthly_snapshots_month ON monthly_snapshots(snapshot_month)`);
-
-    // Snapshot mensal por plataforma para gráficos comparativos.
-    // Seguro para rodar em tabelas já criadas: sempre usa IF NOT EXISTS.
-    await db.query(`CREATE TABLE IF NOT EXISTS platform_monthly_snapshots (
-      id BIGSERIAL PRIMARY KEY,
-      user_id UUID NOT NULL,
-      platform TEXT NOT NULL,
-      snapshot_month DATE NOT NULL,
-      gross_sales NUMERIC(14,2) NOT NULL DEFAULT 0,
-      orders_count INTEGER NOT NULL DEFAULT 0,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      UNIQUE(user_id, platform, snapshot_month)
-    )`);
-    await db.query(`ALTER TABLE platform_monthly_snapshots ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()`);
-    await db.query(`CREATE INDEX IF NOT EXISTS idx_platform_monthly_snapshots_user_month ON platform_monthly_snapshots(user_id, snapshot_month)`);
-    await db.query(`CREATE INDEX IF NOT EXISTS idx_platform_monthly_snapshots_platform ON platform_monthly_snapshots(platform)`);
-
-
-
-    // Rendimentos extras que entram no faturamento bruto do resumo.
-    // recurring=true soma todo mês; recurring=false soma somente no mês de starts_at.
-    await db.query(`CREATE TABLE IF NOT EXISTS additional_revenues (
-      id BIGSERIAL PRIMARY KEY,
-      user_id UUID NOT NULL,
-      name TEXT NOT NULL,
-      amount NUMERIC(14,2) NOT NULL DEFAULT 0,
-      recurring BOOLEAN NOT NULL DEFAULT FALSE,
-      starts_at DATE NOT NULL DEFAULT CURRENT_DATE,
-      is_active BOOLEAN NOT NULL DEFAULT TRUE,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMP NOT NULL DEFAULT NOW()
-    )`);
-    await db.query(`ALTER TABLE additional_revenues ADD COLUMN IF NOT EXISTS recurring BOOLEAN NOT NULL DEFAULT FALSE`);
-    await db.query(`ALTER TABLE additional_revenues ADD COLUMN IF NOT EXISTS starts_at DATE NOT NULL DEFAULT CURRENT_DATE`);
-    await db.query(`ALTER TABLE additional_revenues ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE`);
-    await db.query(`ALTER TABLE additional_revenues ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()`);
-    await db.query(`CREATE INDEX IF NOT EXISTS idx_additional_revenues_user_active ON additional_revenues(user_id, is_active)`);
-
-    console.log('✅ SalesSync schema OK: metas + snapshots mensais + plataformas + rendimentos extras');
-  } catch (e) {
-    console.error('[SalesSync schema]', e.message);
+  /* PLATBAR — logo abaixo da topbar */
+  #platbar {
+    position: absolute; top: 54px; left: 0; right: 0;
+    height: 38px; padding: 0 10px; overflow-x: auto;
   }
-}
+  #platbar::-webkit-scrollbar { display: none; }
+  .pfil { font-size: 10px; padding: 3px 10px; }
 
-function auth(req, res, next) {
-  // Aceita token pelo header Authorization ou pela query string.
-  // A query é necessária para abrir PDF direto em nova aba via window.open(),
-  // porque o navegador não envia header Authorization nesse caso.
-  const headerToken = req.headers.authorization?.startsWith('Bearer ')
-    ? req.headers.authorization.split(' ')[1]
-    : null;
-  const queryToken = req.query?.token ? String(req.query.token) : null;
-  const token = headerToken || queryToken;
-
-  if (!token) return res.status(401).json({ error: 'Token não fornecido' });
-
-  try {
-    req.user = jwt.verify(token, process.env.JWT_SECRET);
-    next();
-  } catch {
-    res.status(401).json({ error: 'Token inválido' });
+  /* PERIOD BAR — abaixo da platbar, largura total */
+  #periodbar {
+    position: absolute; top: 92px; left: 0; right: 0;
+    height: 40px; padding: 0 10px; overflow-x: auto;
   }
-}
+  #periodbar::-webkit-scrollbar { display: none; }
+  .sync-info { display: none; }
+  .pill { font-size: 10px; padding: 4px 11px; }
 
-// ── AUTH ──
-app.post('/api/auth/register', async (req, res) => {
-  const { name, email, password, cnpj } = req.body;
-  if (!name || !email || !password) return res.status(400).json({ error: 'name, email e password são obrigatórios' });
-  try {
-    const { rows } = await db.query(
-      `INSERT INTO users (name,email,password_hash,cnpj) VALUES ($1,$2,crypt($3,gen_salt('bf')),$4) RETURNING id,name,email,plan`,
-      [name, email, password, cnpj || null]
-    );
-    const token = jwt.sign({ id: rows[0].id, email }, process.env.JWT_SECRET, { expiresIn: '30d' });
-    res.json({ success: true, token, user: rows[0] });
-  } catch (e) {
-    if (e.code === '23505') return res.status(409).json({ error: 'E-mail já cadastrado' });
-    res.status(500).json({ error: e.message });
+  /* SIDEBAR → bottom nav */
+  #sidebar {
+    position: absolute; top: auto; left: 0; right: 0; bottom: 0;
+    width: 100%; height: 58px;
+    flex-direction: row; justify-content: space-around; align-items: center;
+    padding: 0 8px;
+    border-right: none; border-top: 1px solid var(--border);
+    background: rgba(6, 8, 24, 0.97);
+    z-index: 200;
   }
-});
+  .s-btn { width: 44px; height: 44px; border-radius: 12px; font-size: 22px; }
+  .s-tip, .s-ver, .s-sp { display: none !important; }
 
-app.post('/api/auth/login', async (req, res) => {
-  const { email, password } = req.body;
-  try {
-    const { rows } = await db.query(
-      `SELECT id,name,email,plan FROM users WHERE email=$1 AND password_hash=crypt($2,password_hash) AND is_active=true`,
-      [email, password]
-    );
-    if (!rows.length) return res.status(401).json({ error: 'E-mail ou senha incorretos' });
-    const token = jwt.sign({ id: rows[0].id, email }, process.env.JWT_SECRET, { expiresIn: '30d' });
-    res.json({ success: true, token, user: rows[0] });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
+  /* CONTENT — preenche entre period bar e bottom nav, scroll interno */
+  #content {
+    position: absolute;
+    top: 132px;   /* 54 topbar + 38 platbar + 40 periodbar */
+    left: 0;
+    right: 0;
+    bottom: 58px; /* altura do bottom nav */
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+    padding: 10px 10px 16px;
+    display: block;
+  }
 
-// ── CONTAS ──
-app.get('/api/accounts', auth, async (req, res) => {
-  try {
-    const { rows } = await db.query(
-      `SELECT id,platform,shop_name,seller_email,platform_shop_id,mode,is_active,last_sync_at,
-              (access_token IS NOT NULL) AS is_connected
-       FROM marketplace_accounts WHERE user_id=$1 AND is_active=true ORDER BY platform`,
-      [req.user.id]
-    );
-    res.json({ success: true, data: rows });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
+  /* DASHBOARD mobile — hero + grid estilo MetriZap */
+  #mob-hero { display: block; }
+  #c-pend-strip { display: none !important; }
+  .dash-main-row { grid-template-columns: 1fr; gap: 0; margin-bottom: 0; }
+  #ss-chart-panel { display: none !important; }
+  .dash-metrics { grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+  /* cards no mobile: ícone + label + valor */
+  .mcard, .mcard.sm { padding: 12px 12px 10px; }
+  .mcard-icon { display: block; }
+  .mcard-accent { height: 3px; border-radius: 3px 3px 0 0; }
+  .mcard-label { font-size: 9px; letter-spacing: .4px; margin-bottom: 3px; margin-top: 1px; }
+  .mcard-val, .mcard.sm .mcard-val { font-size: 15px; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mcard-sub { font-size: 8px; margin-top: 3px; }
+  .mcard-cmp { font-size: 9px; margin-top: 4px; }
+  .top-panel { width: 100%; min-width: 0; padding: 10px; margin-top: 0; }
+  .top-panel-head { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .ftabs, .ptabs { width: 100%; overflow-x: auto; flex-wrap: nowrap; padding-bottom: 2px; }
+  .ftabs::-webkit-scrollbar, .ptabs::-webkit-scrollbar { display: none; }
+  .ftab, .ptab { flex-shrink: 0; font-size: 10px; }
+  .prod-list { grid-template-columns: 1fr !important; max-height: none; }
+  .page-size-sel { display: none; }
 
-app.post('/api/accounts/:platform/disconnect', auth, async (req, res) => {
-  try {
-    await db.query(
-      `UPDATE marketplace_accounts SET access_token=NULL,refresh_token=NULL,token_expires_at=NULL,is_active=false,updated_at=NOW() WHERE user_id=$1 AND platform=$2`,
-      [req.user.id, req.params.platform]
-    );
-    Object.keys(CACHE).forEach(k => { if (k.startsWith(req.user.id)) delete CACHE[k]; });
-    res.json({ success: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
+  /* TABELA DE PEDIDOS → cards compactos */
+  .tbl-wrap { margin-top: 10px; border-radius: 16px; overflow: hidden; }
+  .tbl-head { flex-direction: column; align-items: stretch; gap: 10px; padding: 12px; }
+  .tbl-actions { width: 100%; display: grid; grid-template-columns: 1fr 34px; gap: 8px; }
+  .srch { width: 100%; height: 38px; font-size: 13px; }
+  #tbl-scroll { overflow: visible !important; max-height: none !important; padding: 10px; }
 
-// ── PRODUTOS ──
-function normPlatform(v) {
-  return String(v || 'geral').trim().toLowerCase();
+  table { display: block; width: 100%; border-collapse: separate; border-spacing: 0; }
+  thead { display: none !important; }
+  tbody { display: block; }
+
+  /* date-row separador */
+  tbody tr.date-row { display: flex; align-items: center; gap: 8px; margin: 12px 0 6px; background: transparent !important; border: none !important; box-shadow: none !important; border-radius: 0 !important; }
+  tbody tr.date-row td { display: block !important; background: transparent; border: none !important; padding: 0 !important; color: var(--p3); font-size: 10px; font-weight: 800; letter-spacing: .5px; text-transform: uppercase; }
+  tbody tr.date-row td::before { display: none !important; }
+  tbody tr.date-row td:not(:first-child) { display: none !important; }
+
+  /* CARD do pedido */
+  tbody tr:not(.date-row) {
+    display: grid;
+    grid-template-columns: 58px 1fr auto;
+    grid-template-rows: auto auto 1px auto;
+    background: var(--bg2);
+    border: 1px solid var(--border2);
+    border-radius: 14px;
+    margin-bottom: 10px;
+    overflow: hidden;
+    cursor: pointer;
+    box-shadow: 0 4px 16px rgba(0,0,0,.18);
+    transition: border-color .2s;
+  }
+  tbody tr:not(.date-row):hover { border-color: rgba(139,92,246,.35); }
+
+  /* Esconde todos os td por padrão */
+  tbody tr:not(.date-row) td { display: none; }
+  /* Remove pseudo-labels */
+  tbody td::before { display: none !important; content: '' !important; }
+
+  /* td[1] Foto — coluna esquerda, rows 1-2 */
+  tbody tr:not(.date-row) td:nth-child(1) {
+    display: flex; align-items: center; justify-content: center;
+    grid-column: 1; grid-row: 1 / 3;
+    padding: 12px 8px 12px 12px !important;
+  }
+  .row-img, .row-img-ph { width: 44px; height: 44px; border-radius: 10px; object-fit: cover; flex-shrink: 0; }
+
+  /* td[2] Produto — col 2, row 1 */
+  tbody tr:not(.date-row) td:nth-child(2) {
+    display: flex; flex-direction: column; justify-content: center;
+    grid-column: 2; grid-row: 1;
+    padding: 10px 8px 4px !important;
+    text-align: left !important; min-width: 0;
+  }
+  tbody tr:not(.date-row) td:nth-child(2) > div { max-width: 100% !important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* td[6] Status — col 3, row 1 */
+  tbody tr:not(.date-row) td:nth-child(6) {
+    display: flex; align-items: flex-start; justify-content: flex-end;
+    grid-column: 3; grid-row: 1;
+    padding: 10px 10px 4px 4px !important;
+  }
+
+  /* td[3] Conta — col 2, row 2 */
+  tbody tr:not(.date-row) td:nth-child(3) {
+    display: flex; align-items: center; gap: 4px;
+    grid-column: 2; grid-row: 2;
+    padding: 0 8px 10px !important;
+    font-size: 9px !important; color: var(--txt3) !important; font-weight: 600;
+    text-align: left !important; white-space: nowrap; overflow: hidden;
+  }
+
+  /* td[5] Data — col 3, row 2 */
+  tbody tr:not(.date-row) td:nth-child(5) {
+    display: flex; align-items: center; justify-content: flex-end;
+    grid-column: 3; grid-row: 2;
+    padding: 0 10px 10px 4px !important;
+    font-size: 9px !important; color: var(--txt3) !important;
+    white-space: nowrap;
+  }
+
+  /* Separador — row 3 (full width) */
+  tbody tr:not(.date-row) td:nth-child(7) {
+    display: block;
+    grid-column: 1 / 4; grid-row: 3;
+    height: 1px; background: var(--border);
+    padding: 0 !important; font-size: 0;
+  }
+
+  /* td[10] Total — col 1-2, row 4 */
+  tbody tr:not(.date-row) td:nth-child(10) {
+    display: flex; align-items: center; gap: 4px;
+    grid-column: 1 / 3; grid-row: 4;
+    padding: 9px 10px 9px 14px !important;
+    font-size: 14px !important; font-weight: 800; color: var(--txt);
+    text-align: left !important;
+  }
+  tbody tr:not(.date-row) td:nth-child(10)::after {
+    content: 'total'; font-size: 8px; color: var(--txt3); font-weight: 600;
+    text-transform: uppercase; letter-spacing: .4px; margin-left: 2px;
+  }
+
+  /* td[15] Lucro — col 3, row 4 */
+  tbody tr:not(.date-row) td:nth-child(15) {
+    display: flex; align-items: center; justify-content: flex-end;
+    grid-column: 3; grid-row: 4;
+    padding: 9px 12px 9px 4px !important;
+  }
+  .profit-pos, .profit-neg { font-size: 12px !important; font-weight: 800 !important; }
+
+  .tbl-foot { border-radius: 0 0 16px 16px; }
+
+  /* MODAIS */
+  .md, .md.wide { max-width: 96vw; max-height: 92dvh; border-radius: 18px; }
+  .mo { padding: 8px; align-items: flex-end; }
+  .mb, .mh { padding: 14px; }
+  .grid2, .date-grid { grid-template-columns: 1fr !important; }
+  .mp-stats { grid-template-columns: 1fr 1fr; }
+  .prod-cost-form, .prod-cost-card, .cost-create, .cost-card, .default-card { grid-template-columns: 1fr !important; }
+
+  /* TOAST — acima do bottom nav */
+  .toast { left: 12px; right: 12px; bottom: 70px; }
+
+  /* LOGIN — tela cheia no mobile */
+  .lcard { width: 92vw; padding: 28px 20px; }
 }
-function normSku(v) {
-  return String(v || '').trim();
+
+/* ═══════════════════════════════════════════
+   DAILY BRIEF POPUP
+═══════════════════════════════════════════ */
+@keyframes dbFadeIn{from{opacity:0}to{opacity:1}}
+@keyframes dbSlideUp{from{transform:translateY(28px);opacity:0}to{transform:translateY(0);opacity:1}}
+#daily-brief-overlay{
+  display:none;position:fixed;inset:0;z-index:9999;
+  background:rgba(0,0,0,.72);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  align-items:center;justify-content:center;padding:16px;
+  animation:dbFadeIn .35s ease;
 }
+#daily-brief-card{
+  background:linear-gradient(150deg,#130a28 0%,#0c1a2e 60%,#091221 100%);
+  border:1px solid rgba(139,92,246,.35);border-radius:24px;
+  padding:32px 28px 26px;max-width:448px;width:100%;
+  box-shadow:0 0 90px rgba(109,40,217,.22),0 24px 60px rgba(0,0,0,.7);
+  animation:dbSlideUp .4s ease;position:relative;overflow:hidden;
+}
+#daily-brief-card::before{
+  content:'';position:absolute;top:0;left:0;right:0;height:3px;
+  background:linear-gradient(90deg,#6d28d9,#8b5cf6,#06b6d4,#10b981);
+}
+.db-greeting{font-size:21px;font-weight:900;color:#fff;margin-bottom:3px;line-height:1.2;}
+.db-date-str{font-size:10px;color:rgba(148,163,184,.6);text-transform:uppercase;letter-spacing:.9px;font-weight:600;margin-bottom:26px;display:block;}
+/* Faturamento — grande */
+.db-fat-label{font-size:9px;color:rgba(148,163,184,.55);text-transform:uppercase;letter-spacing:.9px;font-weight:700;margin-bottom:4px;}
+.db-fat-val{font-size:46px;font-weight:900;color:#fff;letter-spacing:-2px;line-height:1;margin-bottom:22px;}
+/* Secundários */
+.db-secondary{display:flex;gap:0;margin-bottom:26px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07);border-radius:14px;overflow:hidden;}
+.db-sec-item{flex:1;padding:12px 16px;}
+.db-sec-item+.db-sec-item{border-left:1px solid rgba(255,255,255,.07);}
+.db-sec-label{font-size:9px;color:rgba(148,163,184,.5);text-transform:uppercase;letter-spacing:.8px;font-weight:700;margin-bottom:4px;}
+.db-sec-val{font-size:22px;font-weight:800;letter-spacing:-.5px;color:#e2e8f0;}
+.db-sec-sub{font-size:10px;color:rgba(148,163,184,.5);margin-top:1px;}
+/* Quote */
+.db-quote-wrap{
+  background:rgba(139,92,246,.09);border:1px solid rgba(139,92,246,.22);
+  border-radius:14px;padding:15px 18px;margin-bottom:22px;text-align:center;
+}
+.db-quote{font-family:'Caveat',cursive;font-size:23px;font-weight:700;line-height:1.35;color:#c4b5fd;}
+/* Botão */
+.db-cta-btn{
+  width:100%;padding:14px;
+  background:linear-gradient(135deg,#6d28d9,#8b5cf6);
+  border:none;border-radius:14px;color:#fff;
+  font-size:15px;font-weight:800;cursor:pointer;
+  font-family:'Inter',sans-serif;letter-spacing:.2px;
+  box-shadow:0 4px 24px rgba(109,40,217,.45);
+  transition:opacity .2s,transform .1s;
+}
+.db-cta-btn:hover{opacity:.9;transform:translateY(-1px);}
+.db-cta-btn:active{transform:translateY(0);}
+/* Fechamento suave */
+#daily-brief-overlay.db-hiding{animation:dbFadeIn .35s ease reverse forwards;}
 
-app.get('/api/products', auth, async (req, res) => {
-  try {
-    const { rows } = await db.query(
-      `SELECT id, sku, name, cost, COALESCE(platform,'geral') AS platform, tax_pct, fee_pct, shipping_fee, description, updated_at
-       FROM products
-       WHERE user_id=$1 AND is_active=true
-       ORDER BY platform, sku`,
-      [req.user.id]
-    );
-    res.json({ success: true, data: rows });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
+</style>
+</head>
+<body>
 
-app.post('/api/products', auth, async (req, res) => {
-  const sku = normSku(req.body.sku);
-  const platform = normPlatform(req.body.platform);
-  const { name, description } = req.body;
-  const cost = Number(req.body.cost || 0);
-  const taxPct = req.body.tax_pct === '' || req.body.tax_pct === undefined || req.body.tax_pct === null
-    ? null
-    : Number(req.body.tax_pct || 0);
-  const feePct = req.body.fee_pct === '' || req.body.fee_pct === undefined || req.body.fee_pct === null
-    ? null
-    : Number(req.body.fee_pct || 0);
-  const shippingFee = req.body.shipping_fee === '' || req.body.shipping_fee === undefined || req.body.shipping_fee === null
-    ? null
-    : Number(req.body.shipping_fee || 0);
-
-  if (!sku || !name) return res.status(400).json({ error: 'SKU e nome são obrigatórios' });
-
-  try {
-    const { rows } = await db.query(
-      `INSERT INTO products (user_id, platform, sku, name, cost, tax_pct, fee_pct, shipping_fee, description)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-       ON CONFLICT (user_id, platform, sku) DO UPDATE SET
-         name=EXCLUDED.name,
-         cost=EXCLUDED.cost,
-         tax_pct=EXCLUDED.tax_pct,
-         fee_pct=EXCLUDED.fee_pct,
-         shipping_fee=EXCLUDED.shipping_fee,
-         description=EXCLUDED.description,
-         is_active=true,
-         updated_at=NOW()
-       RETURNING *`,
-      [req.user.id, platform, sku, name, cost, taxPct, feePct, shippingFee, description || null]
-    );
-    Object.keys(CACHE).forEach(k => { if (k.startsWith(req.user.id)) delete CACHE[k]; });
-    res.json({ success: true, data: rows[0] });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// Compatível com o frontend antigo: PUT /api/products/:sku/cost com platform no body/query
-app.put('/api/products/:sku/cost', auth, async (req, res) => {
-  const sku = normSku(req.params.sku);
-  const platform = normPlatform(req.body.platform || req.query.platform);
-  const cost = Number(req.body.cost || 0);
-  const taxPct = req.body.tax_pct === '' || req.body.tax_pct === undefined || req.body.tax_pct === null ? null : Number(req.body.tax_pct || 0);
-  const feePct = req.body.fee_pct === '' || req.body.fee_pct === undefined || req.body.fee_pct === null ? null : Number(req.body.fee_pct || 0);
-  const shippingFee = req.body.shipping_fee === '' || req.body.shipping_fee === undefined || req.body.shipping_fee === null ? null : Number(req.body.shipping_fee || 0);
-  try {
-    const { rows } = await db.query(
-      `INSERT INTO products (user_id, platform, sku, name, cost, tax_pct, fee_pct, shipping_fee)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-       ON CONFLICT (user_id, platform, sku) DO UPDATE SET
-         cost=EXCLUDED.cost,
-         tax_pct=EXCLUDED.tax_pct,
-         fee_pct=EXCLUDED.fee_pct,
-         shipping_fee=EXCLUDED.shipping_fee,
-         is_active=true,
-         updated_at=NOW()
-       RETURNING *`,
-      [req.user.id, platform, sku, sku, cost, taxPct, feePct, shippingFee]
-    );
-
-    Object.keys(CACHE).forEach(k => { if (k.startsWith(req.user.id)) delete CACHE[k]; });
-    res.json({ success: true, data: rows[0] });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-
-// Apaga um SKU específico da aba de custos
-app.delete('/api/products/:id', auth, async (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isFinite(id)) return res.status(400).json({ error: 'ID inválido' });
-  try {
-    const { rowCount } = await db.query(
-      `DELETE FROM products WHERE id=$1 AND user_id=$2`,
-      [id, req.user.id]
-    );
-    Object.keys(CACHE).forEach(k => { if (k.startsWith(req.user.id)) delete CACHE[k]; });
-    res.json({ success: true, deleted: rowCount });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// Limpa todos os custos/configurações do usuário logado
-app.delete('/api/products', auth, async (req, res) => {
-  try {
-    const { rowCount } = await db.query(
-      `DELETE FROM products WHERE user_id=$1`,
-      [req.user.id]
-    );
-    Object.keys(CACHE).forEach(k => { if (k.startsWith(req.user.id)) delete CACHE[k]; });
-    res.json({ success: true, deleted: rowCount });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// Zera valores, mas mantém SKUs cadastrados
-app.post('/api/products/reset-values', auth, async (req, res) => {
-  try {
-    const { rowCount } = await db.query(
-      `UPDATE products
-       SET cost=0, tax_pct=NULL, fee_pct=NULL, shipping_fee=NULL, updated_at=NOW()
-       WHERE user_id=$1`,
-      [req.user.id]
-    );
-    Object.keys(CACHE).forEach(k => { if (k.startsWith(req.user.id)) delete CACHE[k]; });
-    res.json({ success: true, updated: rowCount });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// ── DEBUG MAGALU ──
-
-// Debug por token na query string (para abrir direto no browser)
-app.get('/debug/:platform', async (req, res, next) => {
-  const token = req.query.token;
-  if (!token) return next();
-  try {
-    req.user = require('jsonwebtoken').verify(token, process.env.JWT_SECRET);
-    next();
-  } catch { res.status(401).send('Token inválido'); }
-});
-app.get('/debug/magalu', auth, async (req, res) => {
-  const days = parseInt(req.query.days || '30');
-  try {
-    const { rows } = await db.query(
-      `SELECT * FROM marketplace_accounts WHERE user_id=$1 AND platform='magalu' AND is_active=true AND access_token IS NOT NULL LIMIT 1`,
-      [req.user.id]
-    );
-    if (!rows.length) return res.send('<h2 style="font-family:sans-serif;padding:20px;color:red">Magalu não conectado</h2>');
-    const acc   = rows[0];
-    const since = new Date(Date.now() - days * 86400000).toISOString();
-    let rawData = null, endpoint = '', error = '';
-    try {
-      const { data } = await axios.get('https://api.magalu.com/seller/v1/orders', {
-        params: { created_at__gte: since, _limit: 10, _sort: "created_at:desc" },
-        headers: { Authorization: `Bearer ${acc.access_token}` }
-      });
-      rawData = data; endpoint = 'https://api.magalu.com/seller/v1/orders';
-    } catch(e) { error = e.response?.status + ' ' + JSON.stringify(e.response?.data||e.message); }
-    const orders = rawData?.results || [];
-    const html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"/>
-<title>Debug Magalu</title>
-<style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:'Segoe UI',sans-serif;background:#0D1117;color:#e6edf3;padding:20px;}
-h1{color:#A855F7;margin-bottom:4px;}.sub{color:#64748B;font-size:13px;margin-bottom:20px;}
-.section{background:#161B26;border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:16px;margin-bottom:16px;}
-.section h2{font-size:13px;color:#94A3B8;text-transform:uppercase;letter-spacing:.6px;margin-bottom:12px;}
-pre{background:#0D1117;border-radius:8px;padding:12px;overflow-x:auto;font-size:11px;color:#38BDF8;border:1px solid rgba(255,255,255,.06);}
-.order-card{background:#1E2535;border-radius:8px;padding:12px;margin-bottom:10px;display:flex;gap:12px;}
-.order-img{width:60px;height:60px;border-radius:6px;object-fit:cover;flex-shrink:0;}
-.badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700;}
-.green{background:rgba(16,185,129,.15);color:#10B981;}.red{background:rgba(244,63,94,.12);color:#F43F5E;}
-.yellow{background:rgba(251,191,36,.12);color:#FBBF24;}.gray{background:rgba(100,116,139,.12);color:#64748B;}
-.info-row{display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.04);}
-.l{color:#64748B;}.v{color:#F8FAFC;font-weight:600;}</style></head><body>
-<h1>⚡ Debug Magalu</h1>
-<div class="sub">Endpoint: ${endpoint} · Últimos ${days} dias · ${new Date().toLocaleString('pt-BR')}</div>
-${error ? `<div style="background:rgba(244,63,94,.1);border:1px solid rgba(244,63,94,.3);border-radius:8px;padding:12px;color:#F43F5E;margin-bottom:16px">${error}</div>` : ''}
-<div class="section"><h2>Conta</h2>
-<div class="info-row"><span class="l">Shop ID</span><span class="v">${acc.platform_shop_id}</span></div>
-<div class="info-row"><span class="l">Nome</span><span class="v">${acc.shop_name}</span></div>
-<div class="info-row"><span class="l">Token expira</span><span class="v">${acc.token_expires_at ? new Date(acc.token_expires_at).toLocaleString('pt-BR') : '—'}</span></div>
+<div id="ld">
+  <div class="ld-logo">⚡</div>
+  <div class="ld-name">SalesSync</div>
+  <div class="ld-bar"><div class="ld-fill"></div></div>
+  <div class="ld-st" id="ld-st">Conectando...</div>
 </div>
-<div class="section"><h2>${orders.length} pedidos retornados</h2>
-${orders.map(o => {
-  const d    = o.deliveries?.[0] || {};
-  const item = d.items?.[0] || {};
-  const info = item.info || {};
-  const img  = info.images?.[0]?.url || null;
-  const norm = o.amounts?.normalizer || 100;
-  const total= (o.amounts?.total || 0) / norm;
-  const comm = (o.amounts?.commission?.total || 0) / norm;
-  const fret = (o.amounts?.freight?.total || 0) / norm;
-  const isTest = MAGALU_TEST_DOCUMENTS.includes(o.customer?.document_number);
-  const sc = {cancelled:'red',canceled:'red',finished:'green',approved:'yellow',shipped:'yellow',delivered:'green'}[o.status]||'gray';
-  return `<div class="order-card" style="${isTest?'border:1px solid #F43F5E;opacity:.6':''}">
-    ${img ? `<img class="order-img" src="${img}" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 1 1%22/>'"/>` : '<div style="width:60px;height:60px;border-radius:6px;background:#0D1117;display:flex;align-items:center;justify-content:center;font-size:24px;flex-shrink:0">📦</div>'}
-    <div style="flex:1">
-      <div style="font-weight:600;margin-bottom:4px">${info.name || info.description || '—'} ${isTest?'<span class="badge red">⚠ TESTE</span>':''}</div>
-      <div style="font-size:11px;color:#64748B;display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
-        <span>ID: ${o.code || o.id}</span>
-        <span>SKU: <strong style="color:#A855F7">${info.sku || '—'}</strong></span>
-        <span class="badge ${sc}">${o.status}</span>
-        <span>R$ ${total.toFixed(2)}</span>
-        <span>Comissão: R$ ${comm.toFixed(2)}</span>
-        <span>Frete: R$ ${fret.toFixed(2)}</span>
-        <span>${new Date(o.created_at).toLocaleDateString('pt-BR')}</span>
-        <span>Cliente: ${o.customer?.name}</span>
+
+<div class="toast" id="toast"><i class="ti ti-check"></i><span id="tmsg"></span></div>
+
+<!-- LOGIN -->
+<div id="ls">
+  <div class="lcard">
+    <div class="llogo"><div class="llogo-ico">⚡</div><div class="llogo-nm">SalesSync</div></div>
+    <div class="ltabs">
+      <div class="ltab on" onclick="setLTab('login',this)">Entrar</div>
+      <div class="ltab" onclick="setLTab('register',this)">Cadastrar</div>
+    </div>
+    <div id="tab-login" class="lf">
+      <div><label class="lfl">E-mail</label><input class="lfi" type="email" id="l-email" placeholder="seu@email.com"/></div>
+      <div><label class="lfl">Senha</label><input class="lfi" type="password" id="l-pass" placeholder="••••••••"/></div>
+      <div class="lerr" id="l-err"></div>
+      <button class="lbtn" onclick="doLogin()">Entrar</button>
+    </div>
+    <div id="tab-register" class="lf" style="display:none">
+      <div><label class="lfl">Nome da empresa</label><input class="lfi" type="text" id="r-name" placeholder="Minha Loja"/></div>
+      <div><label class="lfl">E-mail</label><input class="lfi" type="email" id="r-email" placeholder="seu@email.com"/></div>
+      <div><label class="lfl">Senha</label><input class="lfi" type="password" id="r-pass" placeholder="••••••••"/></div>
+      <div><label class="lfl">CNPJ (opcional)</label><input class="lfi" type="text" id="r-cnpj" placeholder="00.000.000/0001-00"/></div>
+      <div class="lerr" id="r-err"></div>
+      <button class="lbtn" onclick="doRegister()">Criar conta</button>
+    </div>
+  </div>
+</div>
+
+<!-- APP -->
+<div id="app">
+  <!-- TOPBAR -->
+  <div id="topbar">
+    <div class="t-logo">⚡</div>
+    <div class="t-name">SalesSync</div>
+    <div class="t-div"></div>
+    <div class="t-metric"><span>Faturamento</span><strong id="tb-fat">—</strong></div>
+    <div class="t-div"></div>
+    <div class="t-metric"><span>Lucro</span><strong id="tb-luc" style="color:var(--green2)">—</strong></div>
+    <div class="t-div"></div>
+    <div class="t-metric" onclick="ssOpenExtraRevenue()" style="cursor:pointer;opacity:.85;transition:opacity .15s" onmouseenter="this.style.opacity=1" onmouseleave="this.style.opacity='.85'" title="Clique para gerenciar rendimentos extras">
+      <span>Rendimentos extras</span>
+      <strong id="tb-addrev" style="color:var(--green2)">—</strong>
+    </div>
+    <div class="t-r">
+      <div class="t-chip" onclick="openMo('mo-mp')"><span class="online"></span><span id="tb-user">—</span></div>
+      <div class="t-btn" onclick="window.open(API+'/debug/magalu-expedicao?token='+encodeURIComponent(TOKEN),'_blank')" title="Debug Magalu Expedição"><i class="ti ti-truck-delivery"></i></div>
+      <div class="t-btn" onclick="window.open(API+'/debug/shopee?token='+encodeURIComponent(TOKEN)+'&days=30','_blank')" title="Debug Shopee"><i class="ti ti-brand-shopee" style="color:#EE4D2D"></i></div>
+      <div class="t-btn" onclick="doSync()" title="Sincronizar"><i class="ti ti-refresh" id="sync-ico"></i></div>
+      <div class="t-btn" id="eye-btn" onclick="toggleHide()"><i class="ti ti-eye"></i></div>
+      <div class="t-btn" onclick="doLogout()" title="Sair"><i class="ti ti-logout"></i></div>
+    </div>
+  </div>
+
+  <!-- PLATBAR -->
+  <div id="platbar">
+    <div class="pfil on" onclick="setPlatFilter('',this)">🌐 Todos</div>
+  </div>
+
+  <!-- SIDEBAR -->
+  <div id="sidebar">
+    <div class="s-btn on" onclick="setSbi(this)"><i class="ti ti-layout-dashboard"></i><span class="s-tip">Dashboard</span></div>
+    <div class="s-btn" onclick="openMo('mo-mp')"><i class="ti ti-layout-grid"></i><span class="s-tip">Marketplaces</span></div>
+    <div class="s-btn" onclick="openMo('mo-estoque')"><i class="ti ti-package"></i><span class="s-tip">Estoque</span></div>
+    <div class="s-btn" onclick="openMo('mo-nf')"><i class="ti ti-file-invoice"></i><span class="s-tip">Emissão de NF</span></div>
+    <div class="s-sp"></div>
+    <div class="s-btn" onclick="openMo('mo-acc')"><i class="ti ti-user-circle"></i><span class="s-tip">Conta</span></div>
+    <div class="s-ver">v5.2</div>
+  </div>
+
+  <!-- PERIOD BAR -->
+  <div id="periodbar">
+    <div class="pill on" onclick="setPeriod(this,1)">Hoje</div>
+    <div class="pill" onclick="setPeriodYesterday(this)">Ontem</div>
+    <div class="pill" onclick="setPeriod(this,7)">7 dias</div>
+    <div class="pill" onclick="setPeriod(this,30)">30 dias</div>
+    <div class="pill" onclick="setCustomPeriod(this)"><i class="ti ti-calendar"></i> Data personalizada</div>
+    <div class="sync-info"><i class="ti ti-clock" style="font-size:13px"></i> <span id="next-sync">15:00</span> · <span id="last-sync">—</span></div>
+  </div>
+
+  <!-- CONTENT — SCROLLA AQUI -->
+  <div id="content">
+
+    <!-- MOBILE HERO — faturamento + lucro (oculto no desktop) -->
+    <div id="mob-hero">
+      <div class="mh-fat-label">Faturamento</div>
+      <div class="mh-fat-val" id="mh-fat-val">—</div>
+      <div class="mh-fat-cmp-wrap">
+        <span class="mh-badge eq" id="mh-fat-cmp">— igual ao anterior</span>
+      </div>
+      <div class="mh-sep"></div>
+      <div class="mh-luc-row">
+        <div>
+          <div class="mh-luc-label">Lucro</div>
+          <div class="mh-luc-val" id="mh-luc-val">—</div>
+        </div>
+        <span class="mh-badge eq" id="mh-luc-cmp">—</span>
+      </div>
+      <div class="mh-mtd-row">
+        <span class="mh-mtd-label">Fat. do mês</span>
+        <span class="mh-mtd-val" id="mh-mtd-val">—</span>
+      </div>
+      <div id="mh-pend" style="display:none;align-items:center;gap:5px;margin-top:8px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.2);border-radius:7px;padding:5px 10px;"></div>
+      <div class="mh-upd"><i class="ti ti-refresh" style="font-size:9px"></i> Última atualização: <span id="mh-upd-time">—</span></div>
+    </div>
+
+    <!-- DASHBOARD: linha 1 — métricas + gráfico -->
+    <div class="dash-main-row">
+      <!-- Métricas em 2 linhas × 4 colunas -->
+      <div class="dash-metrics">
+        <!-- Linha 1: principais (big) -->
+        <div class="mcard"><div class="mcard-accent" style="--ca:linear-gradient(90deg,#6d28d9,#8b5cf6)"></div>
+          <i class="ti ti-shopping-bag mcard-icon" style="color:#a78bfa"></i>
+          <div class="mcard-label">Pedidos</div>
+          <div class="mcard-val" id="c-ped">—</div>
+          <div class="mcard-sub" id="c-ped2"></div>
+          <div id="cmp-ped"></div>
+        </div>
+        <div class="mcard"><div class="mcard-accent" style="--ca:linear-gradient(90deg,#0284c7,#38bdf8)"></div>
+          <i class="ti ti-receipt mcard-icon" style="color:#38bdf8"></i>
+          <div class="mcard-label">Ticket Médio</div>
+          <div class="mcard-val" id="c-tkt">—</div>
+          <div id="cmp-tkt"></div>
+        </div>
+        <div class="mcard"><div class="mcard-accent" style="--ca:linear-gradient(90deg,#059669,#10b981)"></div>
+          <i class="ti ti-trending-up mcard-icon" style="color:#10b981"></i>
+          <div class="mcard-label">Lucro Total</div>
+          <div class="mcard-val" id="c-luc" style="color:var(--green2)">—</div>
+          <div class="mcard-sub" id="c-marg"></div>
+          <div id="cmp-luc"></div>
+        </div>
+        <div class="mcard"><div class="mcard-accent" style="--ca:linear-gradient(90deg,#dc2626,#f87171)"></div>
+          <i class="ti ti-circle-x mcard-icon" style="color:#f87171"></i>
+          <div class="mcard-label">Cancelados</div>
+          <div class="mcard-val" id="c-can" style="color:var(--red2)">—</div>
+          <div id="cmp-can"></div>
+        </div>
+        <!-- Faixa pendentes (desktop) — aparece só quando tem pedidos aguardando -->
+        <div id="c-pend-strip" style="display:none;grid-column:1/-1;align-items:center;gap:10px;background:rgba(251,191,36,.07);border:1px solid rgba(251,191,36,.2);border-radius:9px;padding:7px 14px;"></div>
+        <!-- Linha 2: secundárias (sm) -->
+        <div class="mcard sm"><div class="mcard-accent" style="--ca:linear-gradient(90deg,#ea580c,#fb923c)"></div>
+          <i class="ti ti-coin mcard-icon" style="color:#fb923c"></i>
+          <div class="mcard-label">Custos</div>
+          <div class="mcard-val" id="c-cust" style="color:var(--orange2)">—</div>
+          <div class="mcard-sub" id="c-custp"></div>
+        </div>
+        <div class="mcard sm"><div class="mcard-accent" style="--ca:linear-gradient(90deg,#475569,#94a3b8)"></div>
+          <i class="ti ti-percentage mcard-icon" style="color:#94a3b8"></i>
+          <div class="mcard-label">Tarifas</div>
+          <div class="mcard-val" id="c-tar">—</div>
+          <div class="mcard-sub" id="c-tarp"></div>
+        </div>
+        <div class="mcard sm"><div class="mcard-accent" style="--ca:linear-gradient(90deg,#0284c7,#38bdf8)"></div>
+          <i class="ti ti-building-bank mcard-icon" style="color:#38bdf8"></i>
+          <div class="mcard-label">Impostos</div>
+          <div class="mcard-val" id="c-imp" style="color:var(--blue2)">—</div>
+          <div class="mcard-sub" id="c-impp"></div>
+        </div>
+        <div class="mcard sm"><div class="mcard-accent" style="--ca:linear-gradient(90deg,#d97706,#fbbf24)"></div>
+          <i class="ti ti-truck mcard-icon" style="color:#fbbf24"></i>
+          <div class="mcard-label">Frete</div>
+          <div class="mcard-val" id="c-fre" style="color:var(--yellow2)">—</div>
+          <div class="mcard-sub" id="c-frep"></div>
+        </div>
+      </div>
+
+      <!-- Gráfico de barras — coluna direita -->
+      <div class="top-panel" id="ss-chart-panel" style="display:flex;flex-direction:column;min-width:0;padding:12px 14px 10px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">
+          <div style="display:flex;align-items:center;gap:6px;">
+            <span style="width:8px;height:8px;border-radius:50%;background:var(--p3);flex-shrink:0;display:inline-block;"></span>
+            <span style="font-size:10.5px;font-weight:700;color:var(--txt2)">Valor Faturado</span>
+          </div>
+          <div id="ss-chart-tabs" style="display:flex;gap:1px;">
+            <button class="ctab active" data-p="0"   onclick="ssChartSetPeriod(0)">Mês</button>
+            <button class="ctab"        data-p="7"   onclick="ssChartSetPeriod(7)">7D</button>
+            <button class="ctab"        data-p="30"  onclick="ssChartSetPeriod(30)">30D</button>
+            <button class="ctab"        data-p="90"  onclick="ssChartSetPeriod(90)">3M</button>
+            <button class="ctab"        data-p="365" onclick="ssChartSetPeriod(365)">12M</button>
+          </div>
+        </div>
+        <div id="ss-chart-total" style="font-size:20px;font-weight:800;color:var(--txt);letter-spacing:-0.5px;margin-bottom:10px;min-height:26px;">R$ —</div>
+        <div id="ss-chart-wrap" style="position:relative;flex:1;min-height:90px;">
+          <canvas id="ss-daily-canvas" style="display:block;"></canvas>
+          <div id="ss-chart-tip" style="display:none;position:absolute;pointer-events:none;background:var(--bg2);border:1px solid var(--border2);border-radius:10px;padding:8px 11px;font-size:11px;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,.4);z-index:10;min-width:160px;max-width:220px;"></div>
+        </div>
       </div>
     </div>
-  </div>`;
-}).join('')}
-</div>
-<div class="section"><h2>JSON de cada pedido (clique para expandir)</h2>
-${orders.map((o, i) => {
-  const d = o.deliveries?.[0] || {};
-  const item = d.items?.[0] || {};
-  const info = item.info || {};
-  const norm = o.amounts?.normalizer || 100;
-  const total = (o.amounts?.total || 0) / norm;
-  const commO = (o.amounts?.commission?.total || 0) / norm;
-  const commD = (d.amounts?.commission?.total || 0) / (d.amounts?.normalizer || norm);
-  const fretO = (o.amounts?.freight?.total || 0) / norm;
-  const fretD = (d.amounts?.freight?.total || 0) / (d.amounts?.normalizer || norm);
-  const nDel = o.deliveries?.length || 0;
-  return `<details style="margin-bottom:8px;background:#0D1117;border:1px solid rgba(255,255,255,.07);border-radius:8px;overflow:hidden">
-  <summary style="padding:10px 14px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:10px;font-size:12px">
-    <span style="color:#A855F7;font-weight:700">#${i+1}</span>
-    <span style="color:#F8FAFC;font-weight:600">${info.name || info.description || '—'}</span>
-    <span style="color:#64748B">${o.code || o.id}</span>
-    <span style="color:#FBBF24">${o.status} / delivery:${d.status||'?'}</span>
-    <span style="color:#38BDF8">R$${total.toFixed(2)}</span>
-    <span style="color:#F87171">CommOrder:${commO.toFixed(2)} CommDeliv:${commD.toFixed(2)}</span>
-    <span style="color:#34D399">FretOrder:${fretO.toFixed(2)} FretDeliv:${fretD.toFixed(2)}</span>
-    <span style="color:#94A3B8">${nDel} entrega(s)</span>
-    <span style="color:#64748B">${new Date(o.created_at).toLocaleDateString('pt-BR')}</span>
-  </summary>
-  <pre style="margin:0;border-radius:0;border-top:1px solid rgba(255,255,255,.06)">${JSON.stringify(o, null, 2)}</pre>
-</details>`;
-}).join('')}
-</div>
-</body></html>`;
-    res.send(html);
-  } catch(e) { res.send(`<pre style="padding:20px;color:red">${e.message}\n${e.stack}</pre>`); }
-});
 
-// Diagnóstico: busca pedido específico por código e exibe amounts completo
-app.get('/debug/magalu-order', auth, async (req, res) => {
-  const code = (req.query.code || '').trim();
-  if (!code) return res.send('<pre style="padding:20px;color:orange">Passe ?code=CODIGO_DO_PEDIDO</pre>');
-  try {
-    const { rows } = await db.query(
-      `SELECT * FROM marketplace_accounts WHERE user_id=$1 AND platform='magalu' AND is_active=true AND access_token IS NOT NULL LIMIT 1`,
-      [req.user.id]
-    );
-    if (!rows.length) return res.send('<pre style="padding:20px;color:red">Magalu não conectado</pre>');
-    const acc = rows[0];
-    const headers = { Authorization: `Bearer ${acc.access_token}` };
-
-    // Tenta buscar pelo código direto
-    let order = null;
-    try {
-      const r = await axios.get(`https://api.magalu.com/seller/v1/orders/${encodeURIComponent(code)}`, { headers, validateStatus: () => true });
-      if (r.status === 200) order = r.data;
-    } catch(_) {}
-
-    // Se não encontrou, busca na listagem recente pelo code
-    if (!order) {
-      const r2 = await axios.get('https://api.magalu.com/seller/v1/orders', {
-        params: { _limit: 50, _sort: 'created_at:desc' },
-        headers, validateStatus: () => true
-      });
-      order = (r2.data?.results || []).find(o => String(o.code || o.id) === code) || null;
-    }
-
-    if (!order) return res.send(`<pre style="padding:20px;color:red">Pedido ${code} não encontrado na Magalu API</pre>`);
-
-    const norm = order.amounts?.normalizer || 100;
-    const dNorm = order.deliveries?.[0]?.amounts?.normalizer || norm;
-    const d = order.deliveries?.[0] || {};
-
-    // Monta breakdown legível dos amounts
-    function fmtAmt(obj, n) {
-      if (!obj || typeof obj !== 'object') return String(obj || 0);
-      return Object.entries(obj).map(([k,v]) => {
-        if (typeof v === 'object' && v !== null) return `${k}: {${fmtAmt(v, n)}}`;
-        if (typeof v === 'number') return `${k}: R$${(v/n).toFixed(2)}`;
-        return `${k}: ${v}`;
-      }).join(' | ');
-    }
-
-    const css = `*{box-sizing:border-box;margin:0;padding:0;}body{font-family:'Segoe UI',sans-serif;background:#0D1117;color:#e6edf3;padding:20px;}
-h1{color:#A855F7;margin-bottom:16px;}h2{color:#94A3B8;font-size:13px;text-transform:uppercase;letter-spacing:.6px;margin:20px 0 10px;}
-pre{background:#0D1117;border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:14px;overflow-x:auto;font-size:11px;color:#38BDF8;line-height:1.6;}
-.card{background:#161B26;border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:16px;margin-bottom:14px;}
-.row{display:flex;justify-content:space-between;font-size:12px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.04);}
-.l{color:#64748B;}.v{color:#F8FAFC;font-weight:600;}.neg{color:#F87171;}.pos{color:#34D399;}`;
-
-    function amtRow(label, val, n=norm) {
-      const r = (val||0)/n;
-      const cls = r < 0 ? 'neg' : r > 0 ? 'pos' : 'v';
-      return `<div class="row"><span class="l">${label}</span><span class="${cls}">R$ ${r.toFixed(2)}</span></div>`;
-    }
-
-    const events = order.amounts?.events || d.amounts?.events || [];
-
-    res.send(`<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"/><title>Debug Pedido ${code}</title><style>${css}</style></head><body>
-<h1>Pedido ${code}</h1>
-<div class="card">
-  <h2>Resumo</h2>
-  <div class="row"><span class="l">Status pedido</span><span class="v">${order.status}</span></div>
-  <div class="row"><span class="l">Status delivery</span><span class="v">${d.status||'—'}</span></div>
-  <div class="row"><span class="l">Cliente</span><span class="v">${order.customer?.name||'—'}</span></div>
-  <div class="row"><span class="l">Produto</span><span class="v">${d.items?.[0]?.info?.name||'—'}</span></div>
-</div>
-
-<div class="card">
-  <h2>Amounts — ORDER level (normalizer: ${norm})</h2>
-  ${amtRow('total', order.amounts?.total)}
-  ${amtRow('commission.total', order.amounts?.commission?.total)}
-  ${amtRow('commission.intermediation', order.amounts?.commission?.intermediation)}
-  ${amtRow('commission.financial (MDR)', order.amounts?.commission?.financial)}
-  ${amtRow('commission.technology', order.amounts?.commission?.technology)}
-  ${amtRow('freight.total', order.amounts?.freight?.total)}
-  ${amtRow('freight.customer', order.amounts?.freight?.customer)}
-  ${amtRow('freight.seller', order.amounts?.freight?.seller)}
-  ${amtRow('tax.total', order.amounts?.tax?.total)}
-  ${amtRow('discount.total', order.amounts?.discount?.total)}
-  ${amtRow('discount.coupon', order.amounts?.discount?.coupon)}
-  ${amtRow('discount.promotional', order.amounts?.discount?.promotional)}
-  ${amtRow('other.total', order.amounts?.other?.total)}
-  ${amtRow('net', order.amounts?.net)}
-  ${amtRow('liquid', order.amounts?.liquid)}
-  ${amtRow('seller_net', order.amounts?.seller_net)}
-  ${amtRow('seller_liquid', order.amounts?.seller_liquid)}
-  <h2 style="margin-top:10px">Todos os campos do amounts (order):</h2>
-  <pre>${JSON.stringify(order.amounts, null, 2)}</pre>
-</div>
-
-<div class="card">
-  <h2>Amounts — DELIVERY level (normalizer: ${dNorm})</h2>
-  ${amtRow('total', d.amounts?.total, dNorm)}
-  ${amtRow('commission.total', d.amounts?.commission?.total, dNorm)}
-  ${amtRow('freight.total', d.amounts?.freight?.total, dNorm)}
-  ${amtRow('discount.total', d.amounts?.discount?.total, dNorm)}
-  ${amtRow('other.total', d.amounts?.other?.total, dNorm)}
-  ${amtRow('net', d.amounts?.net, dNorm)}
-  ${amtRow('seller_net', d.amounts?.seller_net, dNorm)}
-  <h2 style="margin-top:10px">Todos os campos do amounts (delivery):</h2>
-  <pre>${JSON.stringify(d.amounts, null, 2)}</pre>
-</div>
-
-${events.length ? `<div class="card"><h2>Events (${events.length} entradas)</h2><pre>${JSON.stringify(events, null, 2)}</pre></div>` : ''}
-
-<div class="card"><h2>JSON completo do pedido</h2>
-<pre>${JSON.stringify(order, null, 2)}</pre></div>
-</body></html>`);
-  } catch(e) { res.send(`<pre style="padding:20px;color:red">${e.message}\n${e.stack}</pre>`); }
-});
-
-
-// ── DEBUG SHOPEE ──
-app.get('/debug/shopee', auth, async (req, res) => {
-  const days = parseInt(req.query.days || '30');
-  const css = `*{box-sizing:border-box;margin:0;padding:0;}body{font-family:'Segoe UI',sans-serif;background:#0D1117;color:#e6edf3;padding:20px;}
-h1{color:#EE4D2D;margin-bottom:4px;}.sub{color:#64748B;font-size:13px;margin-bottom:20px;}
-.section{background:#161B26;border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:16px;margin-bottom:16px;}
-.section h2{font-size:13px;color:#94A3B8;text-transform:uppercase;letter-spacing:.6px;margin-bottom:12px;}
-pre{background:#0D1117;border-radius:8px;padding:12px;overflow-x:auto;font-size:11px;color:#38BDF8;border:1px solid rgba(255,255,255,.06);}
-.row{display:flex;justify-content:space-between;font-size:12px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.04);}
-.l{color:#64748B;}.v{color:#F8FAFC;font-weight:600;}
-.ok{color:#10B981;}.err{color:#F43F5E;}.warn{color:#FBBF24;}
-.step{background:#1E2535;border-radius:8px;padding:12px;margin-bottom:10px;}
-.step h3{font-size:12px;color:#A855F7;margin-bottom:8px;}`;
-
-  const html = (body) => `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"/><title>Debug Shopee</title><style>${css}</style></head><body>${body}</body></html>`;
-
-  try {
-    // 1. Busca conta no banco
-    const { rows } = await db.query(
-      `SELECT * FROM marketplace_accounts WHERE user_id=$1 AND platform='shopee' AND is_active=true LIMIT 1`,
-      [req.user.id]
-    );
-    if (!rows.length) return res.send(html(`<h1>🛑 Shopee não conectada</h1><p style="color:#F43F5E;padding:20px">Nenhuma conta Shopee ativa encontrada no banco para este usuário.</p>`));
-
-    const acc = rows[0];
-    const pid  = SHOPEE_PID();
-    const key  = SHOPEE_KEY();
-    const mode = process.env.SHOPEE_ENV === 'test' ? 'SANDBOX' : 'PRODUÇÃO';
-
-    let steps = `<h1>🛒 Debug Shopee</h1>
-<div class="sub">Modo: <strong style="color:${mode==='PRODUÇÃO'?'#10B981':'#FBBF24'}">${mode}</strong> · Base: ${SHOPEE_BASE} · ${new Date().toLocaleString('pt-BR')}</div>
-
-<div class="section"><h2>1. Conta no banco</h2>
-<div class="row"><span class="l">DB ID</span><span class="v">${acc.id}</span></div>
-<div class="row"><span class="l">platform_shop_id</span><span class="v">${acc.platform_shop_id}</span></div>
-<div class="row"><span class="l">shop_name (no banco)</span><span class="v">${acc.shop_name || '<span class="warn">vazio</span>'}</span></div>
-<div class="row"><span class="l">access_token</span><span class="v">${acc.access_token ? '✅ presente ('+acc.access_token.slice(0,12)+'...)' : '<span class="err">❌ AUSENTE</span>'}</span></div>
-<div class="row"><span class="l">refresh_token</span><span class="v">${acc.refresh_token ? '✅ presente' : '<span class="warn">⚠ ausente</span>'}</span></div>
-<div class="row"><span class="l">token_expires_at</span><span class="v">${acc.token_expires_at ? new Date(acc.token_expires_at).toLocaleString('pt-BR') : '—'}</span></div>
-<div class="row"><span class="l">Partner ID (env)</span><span class="v">${pid || '<span class="err">❌ SHOPEE_PARTNER_ID não definido</span>'}</span></div>
-</div>`;
-
-    // 2. Testa GET /api/v2/shop/get_shop_info
-    let token = acc.access_token;
-    const shopId = String(acc.platform_shop_id);
-
-    const testEndpoint = async (label, path, extraParams = {}) => {
-      const ts   = Math.floor(Date.now() / 1000);
-      const sign = shopeeSign(pid, path, ts, key, token, shopId);
-      const params = { partner_id: pid, shop_id: shopId, access_token: token, timestamp: ts, sign, ...extraParams };
-      try {
-        const { data } = await axios.get(`${SHOPEE_BASE}${path}`, { params });
-        return { ok: true, label, path, data, params: { ...params, access_token: '***', sign: sign.slice(0,8)+'...' } };
-      } catch(e) {
-        return { ok: false, label, path, error: e.response?.data || e.message, status: e.response?.status, params: { ...params, access_token: '***', sign: sign.slice(0,8)+'...' } };
-      }
-    };
-
-    // 2a. Shop info
-    const shopInfo = await testEndpoint('GET /api/v2/shop/get_shop_info', '/api/v2/shop/get_shop_info');
-    steps += `<div class="section"><h2>2. Shop Info (nome da loja)</h2>
-<div class="row"><span class="l">Status</span><span class="v ${shopInfo.ok?'ok':'err'}">${shopInfo.ok ? '✅ OK' : '❌ ERRO '+shopInfo.status}</span></div>`;
-    if (shopInfo.ok) {
-      const si = shopInfo.data?.response || shopInfo.data || {};
-      steps += `<div class="row"><span class="l">shop_name</span><span class="v ok">${si.shop_name || si.name || '—'}</span></div>
-<div class="row"><span class="l">shop_id</span><span class="v">${si.shop_id || shopId}</span></div>
-<div class="row"><span class="l">status</span><span class="v">${si.status || '—'}</span></div>
-<div class="row"><span class="l">region</span><span class="v">${si.region || '—'}</span></div>`;
-
-      // Atualiza nome no banco automaticamente se estiver vazio
-      const name = si.shop_name || si.name;
-      if (name && (!acc.shop_name || acc.shop_name.startsWith('Shopee Loja'))) {
-        await db.query(`UPDATE marketplace_accounts SET shop_name=$1, updated_at=NOW() WHERE id=$2`, [name, acc.id]);
-        steps += `<div class="row"><span class="l">✅ Nome atualizado no banco</span><span class="v ok">${name}</span></div>`;
-      }
-    } else {
-      steps += `<pre>${JSON.stringify(shopInfo.error, null, 2)}</pre>`;
-    }
-    steps += `<details style="margin-top:8px"><summary style="cursor:pointer;color:#64748B;font-size:11px">JSON completo</summary><pre>${JSON.stringify(shopInfo.data||shopInfo.error, null, 2)}</pre></details></div>`;
-
-    // 2b. Order list — testa múltiplas combinações para achar o que funciona
-    const nowDebug = Math.floor(Date.now() / 1000);
-    const W = 15 * 86400;
-    steps += `<div class="section"><h2>3. Order List — diagnóstico completo</h2>`;
-
-    // Testa variações de time_range_field e janelas
-    // order_status: 'ALL' é INVÁLIDO na Shopee — omitir o parâmetro retorna todos os status
-    const combos = [
-      { label: 'create_time · últimos 7 dias',   field: 'create_time', from: nowDebug - 7*86400,  to: nowDebug },
-      { label: 'create_time · últimos 15 dias',  field: 'create_time', from: nowDebug - W,         to: nowDebug },
-      { label: 'create_time · 15-30 dias atrás', field: 'create_time', from: nowDebug - W*2,       to: nowDebug - W },
-      { label: 'create_time · 30-45 dias atrás', field: 'create_time', from: nowDebug - W*3,       to: nowDebug - W*2 },
-      { label: 'update_time · últimos 15 dias',  field: 'update_time', from: nowDebug - W,         to: nowDebug },
-      { label: 'update_time · 15-30 dias atrás', field: 'update_time', from: nowDebug - W*2,       to: nowDebug - W },
-    ];
-
-    let orders = [], firstWindowOk = null;
-    for (const c of combos) {
-      const r = await testEndpoint(c.label, '/api/v2/order/get_order_list', {
-        time_range_field: c.field, time_from: c.from, time_to: c.to, page_size: 10
-        // order_status omitido = retorna todos os status
-      });
-      const list = r.data?.response?.order_list || [];
-      // Mostra JSON RAW completo (não só .response) para ver error/message do topo
-      const rawFull = JSON.stringify(r.data || r.error || {}, null, 2);
-      steps += `<div class="row">
-        <span class="l" style="font-size:10px">${c.label}</span>
-        <span class="v ${r.ok ? (list.length ? 'ok' : 'warn') : 'err'}" style="font-size:10px">
-          ${r.ok ? `${list.length} pedido(s)` : '❌ HTTP '+r.status}
-        </span>
+    <!-- DASHBOARD: linha 2 — produtos (full width) -->
+    <div class="top-panel prod-panel-full">
+      <div class="top-panel-head">
+        <div class="ftabs">
+          <div class="ftab on" onclick="setFTab(this,'all')">Todos</div>
+          <div class="ftab" onclick="setFTab(this,'normal')">🏪 Normal</div>
+          <div class="ftab" onclick="setFTab(this,'full')">📦 Full</div>
+        </div>
+        <div class="ptabs">
+          <div class="ptab on" onclick="setPTab(this,'fat')">Faturamento</div>
+          <div class="ptab" onclick="setPTab(this,'lucro')">Lucro</div>
+          <div class="ptab" onclick="setPTab(this,'vendas')">Vendas</div>
+          <div class="ptab" onclick="setPTab(this,'canceladas')">Canceladas</div>
+        </div>
       </div>
-      <details style="margin-bottom:6px"><summary style="cursor:pointer;color:#475569;font-size:10px;padding:2px 8px">▶ ver JSON completo</summary>
-      <pre style="font-size:10px;max-height:200px;overflow:auto">${rawFull}</pre></details>`;
-      if (r.ok && list.length && !orders.length) { orders = list; firstWindowOk = r; }
-    }
+      <div class="prod-list" id="prod-list"><div class="empty"><div class="spin"></div></div></div>
+    </div>
 
-    const more = firstWindowOk?.data?.response?.more;
-    if (orders.length) {
-        steps += `<div class="row"><span class="l">✅ Primeiro order_sn encontrado</span><span class="v ok">${orders[0].order_sn}</span></div>
-<div class="row"><span class="l">Tem mais páginas na janela?</span><span class="v">${more ? 'Sim' : 'Não'}</span></div>`;
+    <!-- TABLE -->
+    <div class="tbl-wrap">
+      <div class="tbl-head">
+        <div class="tbl-title"><i class="ti ti-package" style="font-size:16px"></i> Pedidos</div>
+        <div class="tbl-actions">
+          <input class="srch" id="srch" placeholder="Buscar título, SKU..." oninput="filterTable(this.value)"/>
+          <div class="ic-btn" onclick="exportCSV()" title="Exportar CSV"><i class="ti ti-download"></i></div>
+        </div>
+      </div>
+      <div id="tbl-scroll">
+        <table>
+          <thead><tr>
+            <th>Foto</th>
+            <th>Título / ID</th>
+            <th>Conta</th>
+            <th>SKU</th>
+            <th>Data</th>
+            <th>Status</th>
+            <th>Envio</th>
+            <th>Tipo</th>
+            <th>Qtde</th>
+            <th>Valor</th>
+            <th>Tarifa</th>
+            <th>Frete</th>
+            <th>Imposto</th>
+            <th>Custo Prod.</th>
+            <th>Lucro</th>
+          </tr></thead>
+          <tbody id="orders-body"><tr><td colspan="15"><div class="empty"><div class="spin"></div><p>Carregando...</p></div></td></tr></tbody>
+        </table>
+      </div>
+      <div class="tbl-foot">
+        <span style="font-size:10px;color:var(--txt3)" id="orders-count">—</span>
+        <div class="page-size-sel">
+          <span>Exibir</span>
+          <select id="page-size-select" onchange="setPageSize(+this.value)">
+            <option value="10">10</option>
+            <option value="20" selected>20</option>
+            <option value="50">50</option>
+          </select>
+          <span>por página</span>
+        </div>
+        <div style="display:flex;gap:4px;align-items:center;">
+          <div class="page-btn" onclick="changePage(-1)"><i class="ti ti-chevron-left"></i></div>
+          <span style="font-size:10px;color:var(--txt2);padding:0 8px" id="page-info">1 de 1</span>
+          <div class="page-btn" onclick="changePage(1)"><i class="ti ti-chevron-right"></i></div>
+        </div>
+      </div>
+    </div>
+  </div><!-- /content -->
+</div><!-- /app -->
 
-        // Pega o primeiro pedido NÃO cancelado para ter dados financeiros reais
-        const nonCancelledSn = orders.find(x => !String(x.order_sn).startsWith(''))?.order_sn || orders[0].order_sn;
-        // Busca detalhes de todos os order_sn encontrados para achar um não-cancelado
-        const allSnsList = [...new Set([...orders.map(x=>x.order_sn)])].slice(0,5).join(',');
-        const orderDetailAll = await testEndpoint('GET /api/v2/order/get_order_detail (lote)', '/api/v2/order/get_order_detail', {
-          order_sn_list: allSnsList,
-          response_optional_fields: 'buyer_username,pay_time,item_list,actual_shipping_fee,actual_shipping_fee_confirmed,commission_fee,service_fee,escrow_amount,buyer_total_amount,payment_method,checkout_shipping_carrier,reverse_shipping_fee'
-        });
-        const allDetailOrders = orderDetailAll.data?.response?.order_list || [];
-        // Prefere pedido COMPLETED ou SHIPPED para ter dados financeiros
-        const bestOrder = allDetailOrders.find(x => ['COMPLETED','SHIPPED','TO_CONFIRM_RECEIVE','PROCESSED'].includes(x.order_status))
-                       || allDetailOrders.find(x => x.order_status !== 'CANCELLED')
-                       || allDetailOrders[0] || {};
-        const firstSn = bestOrder.order_sn || orders[0].order_sn;
+<!-- AI ASSISTANT PANEL -->
+<div id="ai-panel" style="
+  position:fixed;top:0;right:0;bottom:0;width:360px;
+  background:var(--bg2);border-left:1px solid var(--border2);
+  display:flex;flex-direction:column;z-index:500;
+  transform:translateX(100%);transition:transform .28s cubic-bezier(.4,0,.2,1);
+  box-shadow:-8px 0 40px rgba(0,0,0,.5);
+">
+  <!-- Header -->
+  <div style="display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--border);flex-shrink:0;background:var(--bg3);">
+    <div style="width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,#6d28d9,#a78bfa);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">🤖</div>
+    <div>
+      <div style="font-size:13px;font-weight:800;letter-spacing:-.3px">Assistente IA</div>
+      <div style="font-size:9px;color:var(--txt3)">Powered by GPT-4o mini · dados reais da conta</div>
+    </div>
+    <button onclick="ssCloseAI()" style="margin-left:auto;width:28px;height:28px;border-radius:8px;background:var(--bg4);border:1px solid var(--border);color:var(--txt3);cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;">×</button>
+  </div>
 
-        steps += `</div><div class="section"><h2>4. Order Detail — pedido: ${firstSn} (${bestOrder.order_status||'?'})</h2>
-<div class="row"><span class="l">Status HTTP</span><span class="v ${orderDetailAll.ok?'ok':'err'}">${orderDetailAll.ok ? '✅ OK' : '❌ '+orderDetailAll.status}</span></div>`;
-        const o = bestOrder;
-        steps += `
-<div class="row"><span class="l">order_status</span><span class="v">${o.order_status||'—'}</span></div>
-<div class="row"><span class="l">buyer_username</span><span class="v">${o.buyer_username||'—'}</span></div>
-<div class="row"><span class="l">buyer_total_amount</span><span class="v ${o.buyer_total_amount!=null?'ok':'warn'}">${o.buyer_total_amount??'❌ ausente'}</span></div>
-<div class="row"><span class="l">commission_fee</span><span class="v ${o.commission_fee!=null?'ok':'warn'}">${o.commission_fee??'❌ ausente'}</span></div>
-<div class="row"><span class="l">service_fee</span><span class="v ${o.service_fee!=null?'ok':'warn'}">${o.service_fee??'❌ ausente'}</span></div>
-<div class="row"><span class="l">actual_shipping_fee</span><span class="v ${o.actual_shipping_fee!=null?'ok':'warn'}">${o.actual_shipping_fee??'❌ ausente'}</span></div>
-<div class="row"><span class="l">actual_shipping_fee_confirmed</span><span class="v">${o.actual_shipping_fee_confirmed??'—'}</span></div>
-<div class="row"><span class="l">escrow_amount</span><span class="v ${o.escrow_amount!=null?'ok':'warn'}">${o.escrow_amount??'❌ ausente'}</span></div>
-<div class="row"><span class="l">reverse_shipping_fee</span><span class="v">${o.reverse_shipping_fee??'—'}</span></div>
-<div class="row"><span class="l">item_name</span><span class="v">${o.item_list?.[0]?.item_name||'—'}</span></div>
-<div class="row"><span class="l">model_sku</span><span class="v">${o.item_list?.[0]?.model_sku||'—'}</span></div>
-<div class="row"><span class="l">image_info.image_url</span><span class="v ok">${o.item_list?.[0]?.image_info?.image_url ? '✅ presente' : '❌ ausente'}</span></div>
-<details style="margin-top:8px"><summary style="cursor:pointer;color:#64748B;font-size:11px">JSON completo do pedido</summary><pre>${JSON.stringify(o, null, 2)}</pre></details>`;
+  <!-- Sugestões rápidas -->
+  <div id="ai-suggestions" style="padding:12px;display:flex;flex-wrap:wrap;gap:6px;border-bottom:1px solid var(--border);flex-shrink:0;">
+    <div style="font-size:9px;color:var(--txt3);width:100%;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:2px">Perguntas rápidas</div>
+    <button class="ai-sug" onclick="ssAISend('Qual é a previsão de faturamento e lucro para este mês?')">📈 Previsão do mês</button>
+    <button class="ai-sug" onclick="ssAISend('Quais produtos estão com margem ruim e o que devo ajustar?')">⚠️ Margem ruim</button>
+    <button class="ai-sug" onclick="ssAISend('Analise minhas devoluções e dê dicas para reduzir.')">↩️ Devoluções</button>
+    <button class="ai-sug" onclick="ssAISend('Qual produto devo focar em vender mais este mês?')">🚀 Foco do mês</button>
+    <button class="ai-sug" onclick="ssAISend('Como estão minhas tarifas e impostos? Estão altos?')">💸 Taxas</button>
+    <button class="ai-sug" onclick="ssAISend('Gera uma planilha CSV com todos os pedidos da tela, incluindo produto, valor, lucro e status.')">📥 Exportar planilha</button>
+    <button class="ai-sug" onclick="ssAISend('Adicionar faturamento de R$ ')">💰 Add receita</button>
+    <button class="ai-sug" onclick="ssAISend('Listar meus rendimentos extras')">📋 Ver receitas</button>
+  </div>
 
-        // 4b. Testa v2.payment.get_escrow_detail (dados financeiros reais pós-entrega)
-        const escrowDetail = await testEndpoint('GET /api/v2/payment/get_escrow_detail', '/api/v2/payment/get_escrow_detail', {
-          order_sn: firstSn
-        });
-        steps += `</div><div class="section"><h2>4b. Escrow/Payment Detail (${firstSn})</h2>
-<div class="row"><span class="l">Status</span><span class="v ${escrowDetail.ok?'ok':'err'}">${escrowDetail.ok ? '✅ OK' : '❌ ERRO '+escrowDetail.status}</span></div>`;
-        if (escrowDetail.ok) {
-          const ed  = escrowDetail.data?.response || {};
-          const oi  = ed.order_income || {};  // campos financeiros ficam em order_income
-          const bpi = ed.buyer_payment_info || {};
-          const ok  = v => v != null && v !== '' ? 'ok' : 'warn';
-          const fmt = v => v != null ? `<span class="v ${ok(v)}">${v}</span>` : `<span class="v warn">❌ ausente</span>`;
-          steps += `
-<div class="row"><span class="l">buyer_total_amount</span>${fmt(oi.buyer_total_amount ?? bpi.buyer_total_amount)}</div>
-<div class="row"><span class="l">actual_shipping_fee</span>${fmt(oi.actual_shipping_fee)}</div>
-<div class="row"><span class="l">buyer_paid_shipping_fee</span>${fmt(oi.buyer_paid_shipping_fee)}</div>
-<div class="row"><span class="l">commission_fee</span>${fmt(oi.commission_fee)}</div>
-<div class="row"><span class="l">service_fee</span>${fmt(oi.service_fee)}</div>
-<div class="row"><span class="l">net_commission_fee</span>${fmt(oi.net_commission_fee)}</div>
-<div class="row"><span class="l">net_service_fee</span>${fmt(oi.net_service_fee)}</div>
-<div class="row"><span class="l">escrow_amount</span>${fmt(oi.escrow_amount)}</div>
-<div class="row"><span class="l">voucher_from_shopee</span>${fmt(oi.voucher_from_shopee)}</div>
-<div class="row"><span class="l">shopee_shipping_rebate</span>${fmt(oi.shopee_shipping_rebate)}</div>
-<details style="margin-top:8px"><summary style="cursor:pointer;color:#64748B;font-size:11px">JSON completo escrow</summary><pre>${JSON.stringify(ed, null, 2)}</pre></details>`;
-        } else {
-          steps += `<pre>${JSON.stringify(escrowDetail.data||escrowDetail.error, null, 2)}</pre>`;
-        }
-        steps += `</div>`;
-      } else {
-        steps += `<div style="color:#FBBF24;padding:8px 0">⚠ Nenhum pedido encontrado nas últimas 3 janelas de 15 dias (45 dias no total).</div>`;
-      }
-    steps += `</div>`;
+  <!-- Mensagens -->
+  <div id="ai-messages" style="flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px;">
+    <div class="ai-msg bot" style="align-self:flex-start;">
+      <div class="ai-bubble bot">Olá! Sou seu assistente de vendas. Tenho acesso aos seus dados reais — faturamento, lucro, produtos, devoluções e previsões. Como posso ajudar? 😊</div>
+    </div>
+  </div>
 
-    // 3. Parâmetros usados
-    steps += `<div class="section"><h2>5. Configuração</h2>
-<div class="row"><span class="l">SHOPEE_BASE</span><span class="v">${SHOPEE_BASE}</span></div>
-<div class="row"><span class="l">SHOPEE_ENV</span><span class="v">${process.env.SHOPEE_ENV || '(não definido = produção)'}</span></div>
-<div class="row"><span class="l">SHOPEE_PARTNER_ID</span><span class="v">${pid}</span></div>
-<div class="row"><span class="l">SHOPEE_REDIRECT_URI</span><span class="v">${process.env.SHOPEE_REDIRECT_URI||'—'}</span></div>
-<div class="row"><span class="l">shop_id no banco</span><span class="v">${shopId}</span></div>
-<div class="row"><span class="l">Token expira</span><span class="v">${acc.token_expires_at ? new Date(acc.token_expires_at).toLocaleString('pt-BR') : '—'}</span></div>
-</div>`;
+  <!-- Input -->
+  <div style="padding:12px;border-top:1px solid var(--border);flex-shrink:0;background:var(--bg3);">
+    <div style="display:flex;gap:8px;align-items:flex-end;">
+      <textarea id="ai-input" placeholder="Pergunte algo sobre seu negócio..." rows="2"
+        style="flex:1;background:var(--bg4);border:1px solid var(--border2);border-radius:10px;color:var(--txt);padding:9px 12px;font-size:12px;font-family:'Inter',sans-serif;resize:none;outline:none;line-height:1.45;max-height:100px;"
+        onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();ssAISendInput()}"></textarea>
+      <button onclick="ssAISendInput()" id="ai-send-btn" style="width:38px;height:38px;border-radius:10px;background:linear-gradient(135deg,var(--p),var(--p2));border:none;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;box-shadow:0 4px 12px var(--glow);transition:opacity .15s;">
+        <i class="ti ti-send"></i>
+      </button>
+    </div>
+    <div style="font-size:9px;color:var(--txt3);margin-top:6px;text-align:center">Enter para enviar · Shift+Enter para nova linha</div>
+  </div>
+</div>
 
-    res.send(html(steps));
-  } catch(e) {
-    res.send(`<pre style="padding:20px;color:red">${e.message}\n${e.stack}</pre>`);
+<!-- Botão flutuante para abrir AI -->
+<div id="ai-fab" onclick="ssToggleAI()" style="
+  position:fixed;bottom:80px;right:16px;
+  width:48px;height:48px;border-radius:14px;
+  background:linear-gradient(135deg,#6d28d9,#a78bfa);
+  display:none;align-items:center;justify-content:center;
+  font-size:22px;cursor:pointer;z-index:499;
+  box-shadow:0 8px 24px rgba(109,40,217,.5);
+  transition:transform .15s,box-shadow .15s;
+" title="Assistente IA">🤖</div>
+
+<!-- MODAIS -->
+<div class="mo" id="mo-order" onclick="closeBg(event,'mo-order')">
+  <div class="md wide"><div class="mh"><div class="mh-left"><div class="mh-ico"><i class="ti ti-receipt"></i></div><div><div class="mh-title" id="od-title">Pedido</div><div class="mh-sub" id="od-sub">—</div></div></div><div class="mh-close" onclick="closeMo('mo-order')"><i class="ti ti-x"></i></div></div>
+  <div class="mb" id="od-body"><div class="empty"><div class="spin"></div></div></div></div>
+</div>
+
+<div class="mo" id="mo-mp" onclick="closeBg(event,'mo-mp')">
+  <div class="md"><div class="mh"><div class="mh-left"><div class="mh-ico"><i class="ti ti-layout-grid"></i></div><div><div class="mh-title">Marketplaces</div></div></div><div class="mh-close" onclick="closeMo('mo-mp')"><i class="ti ti-x"></i></div></div>
+  <div class="mb" id="mp-body"><div class="empty"><div class="spin"></div></div></div></div>
+</div>
+
+<div class="mo" id="mo-cst" onclick="closeBg(event,'mo-cst')">
+  <div class="md wide"><div class="mh"><div class="mh-left"><div class="mh-ico"><i class="ti ti-building-bank"></i></div><div><div class="mh-title">Custos por SKU</div><div class="mh-sub">Imposto padrão por plataforma + custo individual por SKU</div></div></div><div class="mh-close" onclick="closeMo('mo-cst')"><i class="ti ti-x"></i></div></div>
+  <div class="mb">
+    <div class="cost-panel">
+      <div class="cost-defaults">
+        <div class="cost-defaults-title"><strong><i class="ti ti-percentage"></i> Padrões da plataforma</strong><div class="cost-tools"><span>Imposto padrão aplica em todos os SKUs sem imposto próprio.</span><button class="cost-mini-btn" onclick="resetProductValues()"><i class="ti ti-eraser"></i> Zerar valores</button><button class="cost-mini-btn danger" onclick="deleteAllProducts()"><i class="ti ti-trash"></i> Apagar tudo</button></div></div>
+        <div class="default-grid" id="platform-defaults"><div class="empty"><div class="spin"></div></div></div>
+        <div class="auto-note"><span class="auto-badge">ML automático</span> Mercado Livre agora puxa tarifa real do campo <b>sale_fee</b> e frete do <b>payments.shipping_cost</b>. Só preencha Tarifa/Frete padrão se quiser sobrescrever.</div>
+      </div>
+      <div class="cost-create" style="grid-template-columns:150px 1fr 1.4fr 120px 42px;">
+        <select class="plat-select" id="new-platform">
+          <option value="mercadolivre">Mercado Livre</option>
+          <option value="magalu">Magalu</option>
+          <option value="shopee">Shopee</option>
+          <option value="geral">Geral</option>
+        </select>
+        <input id="new-sku" placeholder="SKU"/>
+        <input id="new-name" placeholder="Nome do produto"/>
+        <input id="new-cost" placeholder="Custo R$" type="number" step="0.01"/>
+        <button class="btn primary" style="width:42px;height:34px;padding:0;" onclick="addProduct()"><i class="ti ti-plus"></i></button>
+      </div>
+      <div class="cost-help">Agora o normal é cadastrar só o SKU + custo do produto. Imposto vem do padrão da plataforma. Se um SKU precisar imposto/tarifa/frete diferente, edite diretamente na linha dele.</div>
+      <div class="cost-list" id="products-list"><div class="empty"><div class="spin"></div></div></div>
+    </div>
+  </div></div>
+</div>
+
+<div class="mo" id="mo-calc" onclick="closeBg(event,'mo-calc')">
+  <div class="md"><div class="mh"><div class="mh-left"><div class="mh-ico"><i class="ti ti-calculator"></i></div><div><div class="mh-title">Calculadora</div></div></div><div class="mh-close" onclick="closeMo('mo-calc')"><i class="ti ti-x"></i></div></div>
+  <div class="mb"><div class="grid2">
+    <div class="fi"><label>Preço venda (R$)</label><input type="number" id="cp" value="299.90" oninput="calc()"/></div>
+    <div class="fi"><label>Custo produto (R$)</label><input type="number" id="cc" value="120" oninput="calc()"/></div>
+    <div class="fi"><label>Tarifa (%)</label><input type="number" id="ct" value="12" oninput="calc()"/></div>
+    <div class="fi"><label>Imposto (%)</label><input type="number" id="ci2" value="6" oninput="calc()"/></div>
+    <div class="fi"><label>Frete (R$)</label><input type="number" id="cfr" value="15" oninput="calc()"/></div>
+    <div class="fi"><label>Ads (R$)</label><input type="number" id="cads" value="0" oninput="calc()"/></div>
+  </div>
+  <div class="calc-result">
+    <div class="cr-row"><span class="l">Receita</span><span class="v" id="rr">—</span></div>
+    <div class="cr-row"><span class="l">− Tarifa</span><span class="v" style="color:var(--red2)" id="rt">—</span></div>
+    <div class="cr-row"><span class="l">− Imposto</span><span class="v" style="color:var(--blue2)" id="ri">—</span></div>
+    <div class="cr-row"><span class="l">− Frete</span><span class="v" style="color:var(--yellow2)" id="rfr">—</span></div>
+    <div class="cr-row"><span class="l">− Custo</span><span class="v" style="color:var(--orange2)" id="rc">—</span></div>
+    <div class="cr-row" style="border-top:1px solid rgba(109,40,217,.2);margin-top:6px;padding-top:8px"><span class="l" style="font-weight:700;font-size:13px;color:var(--txt)">Lucro líquido</span><span class="v" id="rl" style="font-size:16px">—</span></div>
+    <div class="cr-row"><span class="l">Margem</span><span class="v" id="rm">—</span></div>
+    <div class="cr-row"><span class="l">ROAS</span><span class="v" id="rroas">—</span></div>
+  </div></div></div>
+</div>
+
+
+<!-- MODAL DATA PERSONALIZADA -->
+<div class="mo" id="mo-date" onclick="closeBg(event,'mo-date')">
+  <div class="md" style="max-width:430px;">
+    <div class="mh">
+      <div class="mh-left">
+        <div class="mh-ico"><i class="ti ti-calendar"></i></div>
+        <div>
+          <div class="mh-title">Data personalizada</div>
+          <div class="mh-sub">Selecione um período de até 45 dias</div>
+        </div>
+      </div>
+      <div class="mh-close" onclick="closeMo('mo-date')"><i class="ti ti-x"></i></div>
+    </div>
+    <div class="mb">
+      <div class="grid2">
+        <div class="fi">
+          <label>Data inicial</label>
+          <input type="date" id="custom-date-from" onchange="syncCustomDateLimits()"/>
+        </div>
+        <div class="fi">
+          <label>Data final</label>
+          <input type="date" id="custom-date-to"/>
+        </div>
+      </div>
+      <div class="note"><i class="ti ti-info-circle"></i> O limite é de 45 dias para evitar sobrecarga nas APIs dos marketplaces.</div>
+      <button class="btn primary" onclick="applyCustomDate()"><i class="ti ti-check"></i> Aplicar filtro</button>
+    </div>
+  </div>
+</div>
+
+<div class="mo" id="mo-dre" onclick="closeBg(event,'mo-dre')">
+  <div class="md"><div class="mh"><div class="mh-left"><div class="mh-ico"><i class="ti ti-chart-bar"></i></div><div><div class="mh-title">DRE</div><div class="mh-sub" id="dre-per">—</div></div></div><div class="mh-close" onclick="closeMo('mo-dre')"><i class="ti ti-x"></i></div></div>
+  <div class="mb" id="dre-body"><div class="empty"><div class="spin"></div></div></div></div>
+</div>
+
+<div class="mo" id="mo-acc" onclick="closeBg(event,'mo-acc')">
+  <div class="md" style="max-width:380px;"><div class="mh"><div class="mh-left"><div class="mh-ico"><i class="ti ti-user-circle"></i></div><div><div class="mh-title">Minha Conta</div></div></div><div class="mh-close" onclick="closeMo('mo-acc')"><i class="ti ti-x"></i></div></div>
+  <div class="mb">
+    <div style="display:flex;align-items:center;gap:14px;background:var(--bg3);border:1px solid var(--border2);border-radius:14px;padding:14px 16px;">
+      <div style="width:50px;height:50px;border-radius:50%;background:linear-gradient(135deg,var(--p),var(--p2));display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:800;box-shadow:0 4px 16px var(--glow);" id="acc-ava">?</div>
+      <div><div style="font-size:15px;font-weight:700;" id="acc-name">—</div><div style="font-size:11px;color:var(--txt3);margin-top:2px;" id="acc-email">—</div>
+        <div style="margin-top:6px;"><span style="background:rgba(109,40,217,.15);color:var(--p3);font-size:9px;font-weight:700;padding:2px 9px;border-radius:20px;border:1px solid rgba(109,40,217,.25);" id="acc-plan">—</span></div>
+      </div>
+    </div>
+    <button class="btn primary" onclick="ssOpenGoalSettings()"><i class="ti ti-target-arrow"></i> Meta de faturamento</button>
+    <div class="ss-account-main-actions">
+      <button class="btn ghost" onclick="ssOpenAnalytics()"><i class="ti ti-chart-bar"></i> Resumo</button>
+      <button class="btn ghost" onclick="ssOpenExtraRevenue()"><i class="ti ti-plus"></i> Adicionar faturamento</button>
+    </div>
+
+    <!-- CUSTOS POR SKU -->
+    <div onclick="closeMo('mo-acc');openMo('mo-cst')" style="display:flex;align-items:center;justify-content:space-between;background:var(--bg3);border:1px solid var(--border2);border-radius:10px;padding:10px 14px;cursor:pointer;transition:border-color .2s;" onmouseover="this.style.borderColor='var(--p2)'" onmouseout="this.style.borderColor='var(--border2)'">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <i class="ti ti-building-bank" style="font-size:18px;color:var(--p3)"></i>
+        <div>
+          <div style="font-size:12px;font-weight:700;color:var(--txt1)">Custos por SKU</div>
+          <div style="font-size:10px;color:var(--txt3);margin-top:1px">Imposto, tarifa e custo por produto</div>
+        </div>
+      </div>
+      <i class="ti ti-chevron-right" style="color:var(--txt3);font-size:14px"></i>
+    </div>
+
+    <!-- CERTIFICADO DIGITAL -->
+    <label style="display:flex;align-items:center;gap:10px;background:rgba(2,132,199,.07);border:1px solid rgba(2,132,199,.2);border-radius:10px;padding:12px 14px;cursor:pointer;transition:border-color .2s" onmouseover="this.style.borderColor='#38bdf8'" onmouseout="this.style.borderColor='rgba(2,132,199,.2)'">
+      <div style="width:36px;height:36px;border-radius:9px;background:rgba(2,132,199,.15);display:flex;align-items:center;justify-content:center;flex-shrink:0"><i class="ti ti-certificate" style="font-size:18px;color:var(--blue2)"></i></div>
+      <div style="flex:1">
+        <div style="font-size:12px;font-weight:700;color:var(--txt1)">Certificado Digital A1</div>
+        <div style="font-size:10px;color:var(--txt3);margin-top:1px" id="acc-cert-info">Clique para enviar seu .pfx</div>
+      </div>
+      <i class="ti ti-upload" style="color:var(--blue2);font-size:16px"></i>
+      <input type="file" accept=".pfx,.p12" style="display:none" onchange="accUploadCert(this)"/>
+    </label>
+
+    <!-- MODO DIA/NOITE -->
+    <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg3);border:1px solid var(--border2);border-radius:10px;padding:10px 14px;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <i class="ti ti-sun" id="theme-icon" style="font-size:18px;color:#f59e0b"></i>
+        <div>
+          <div style="font-size:12px;font-weight:700;color:var(--txt1)" id="theme-label">Modo claro</div>
+          <div style="font-size:10px;color:var(--txt3);margin-top:1px">Alternar tema escuro / claro</div>
+        </div>
+      </div>
+      <div onclick="toggleTheme()" id="theme-toggle-btn" style="width:40px;height:22px;border-radius:11px;background:var(--bg4);border:1px solid var(--border2);cursor:pointer;position:relative;transition:background .2s;flex-shrink:0;">
+        <div id="theme-toggle-knob" style="width:16px;height:16px;border-radius:50%;background:var(--txt3);position:absolute;top:2px;left:2px;transition:all .2s;"></div>
+      </div>
+    </div>
+
+    <!-- DEBUG TOGGLE -->
+    <div id="debug-toggle-row" style="display:flex;align-items:center;justify-content:space-between;background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.15);border-radius:10px;padding:10px 14px;">
+      <div>
+        <div style="font-size:11px;font-weight:700;color:var(--red2);display:flex;align-items:center;gap:6px;"><i class="ti ti-bug"></i> Modo Debug</div>
+        <div style="font-size:9px;color:var(--txt3);margin-top:2px">Exibe informações técnicas nas colunas</div>
+      </div>
+      <div onclick="ssToggleDebug()" id="debug-toggle-btn" style="width:40px;height:22px;border-radius:11px;background:var(--bg4);border:1px solid var(--border2);cursor:pointer;position:relative;transition:background .2s;flex-shrink:0;">
+        <div id="debug-toggle-knob" style="width:16px;height:16px;border-radius:50%;background:var(--txt3);position:absolute;top:2px;left:2px;transition:all .2s;"></div>
+      </div>
+    </div>
+    <button class="btn ghost" onclick="doLogout()"><i class="ti ti-logout"></i> Sair da conta</button>
+  </div></div>
+</div>
+
+<script>
+// SalesSync v2.8
+const API='https://salesync-backend.onrender.com';
+let TOKEN=localStorage.getItem('ss_token')||'';
+let USER=JSON.parse(localStorage.getItem('ss_user')||'null');
+let ALL=[],FILTERED=[],PAGE=1,PERIOD=1,HIDDEN=false,PTAB='fat',FTAB='all',PLAT='',CUSTOM_FROM='',CUSTOM_TO='';
+let ACCOUNTS=[],DASH={},CD=300;
+window.SS_DEBUG=localStorage.getItem('ss_debug')==='1';
+function ssToggleDebug(){
+  window.SS_DEBUG=!window.SS_DEBUG;
+  localStorage.setItem('ss_debug',window.SS_DEBUG?'1':'0');
+  const btn=document.getElementById('debug-toggle-btn');
+  const knob=document.getElementById('debug-toggle-knob');
+  if(btn)btn.style.background=window.SS_DEBUG?'rgba(239,68,68,.6)':'var(--bg4)';
+  if(knob){knob.style.left=window.SS_DEBUG?'22px':'2px';knob.style.background=window.SS_DEBUG?'#fff':'var(--txt3)';}
+  renderOrders(); // re-renderiza tabela com/sem debug
+  if(window.SS_DEBUG)toast('🐛 Debug ON — colunas técnicas visíveis');
+  else toast('Debug OFF');
+}
+function ssInitDebugToggle(){
+  const btn=document.getElementById('debug-toggle-btn');
+  const knob=document.getElementById('debug-toggle-knob');
+  if(btn)btn.style.background=window.SS_DEBUG?'rgba(239,68,68,.6)':'var(--bg4)';
+  if(knob){knob.style.left=window.SS_DEBUG?'22px':'2px';knob.style.background=window.SS_DEBUG?'#fff':'var(--txt3)';}
+}
+
+const STATUS_PT={paid:'Pago',pending:'Ag. Pgto',shipped:'Em Rota',delivered:'Entregue',cancelled:'Cancelado',approved:'Aprovado',new:'Novo',processing:'Processando',invoiced:'Faturado',finished:'Finalizado'};
+const STATUS_CLR={paid:'#10b981',pending:'#fbbf24',invoiced:'#f59e0b',shipped:'#38bdf8',delivered:'#a78bfa',cancelled:'#f87171',approved:'#10b981',finished:'#a78bfa'};
+const STATUS_BG={paid:'rgba(16,185,129,.1)',pending:'rgba(251,191,36,.1)',invoiced:'rgba(245,158,11,.12)',shipped:'rgba(56,189,248,.1)',delivered:'rgba(167,139,250,.1)',cancelled:'rgba(248,113,113,.1)',approved:'rgba(16,185,129,.1)',finished:'rgba(167,139,250,.1)'};
+
+const f = v => {
+  if (HIDDEN) return 'R$ ●●●';
+  return Number(v || 0).toLocaleString('pt-BR', {
+    style: 'currency',
+    currency: 'BRL'
+  });
+};
+const pct = v => parseFloat(v || 0).toFixed(1) + '%';
+const fdt = s => {
+  if (!s) return '—';
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return '—';
+  return d.toLocaleString('pt-BR', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+};
+
+const PBADGE={mercadolivre:'<span class="plat-ml">ML</span>',shopee:'<span class="plat-sp">SHP</span>',magalu:'<span class="plat-mg">MG</span>',tiktok:'<span class="plat-tk">TK</span>'};
+
+const SHIP_PT={ready_to_ship:'Pronto p/ enviar',handling:'Preparando',not_delivered:'Pago · não enviado',paid_not_shipped:'Pago · não enviado',invoiced:'NF Emitida<br>ag. envio',shipped:'Enviado',delivered:'Entregue',cancelled:'Cancelado',pending:'Pendente',unknown:'—'};
+const SHIP_CLS={ready_to_ship:'ready',handling:'handling',not_delivered:'not_delivered',paid_not_shipped:'paid_not_shipped',invoiced:'invoiced',shipped:'shipped',delivered:'delivered',cancelled:'cancelled',pending:'ready',unknown:''};
+function shipBadge(o){
+  let st=o.ml_shipping_status;
+  // Magalu: usa o status do pedido quando não há shipping_status próprio
+  if(!st && o.platform==='magalu') st=o.status==='invoiced'?'invoiced':o.status==='shipped'?'shipped':o.status==='delivered'?'delivered':o.status==='cancelled'?'cancelled':null;
+  st=st||'unknown';
+  const label=o.ml_shipping_status_label||SHIP_PT[st]||st||'—';
+  return `<span class="ship-badge ${SHIP_CLS[st]||st}"><i class="ti ti-truck-delivery"></i>${label}</span>`;
+}
+function labelUrl(o){return o.platform==='mercadolivre'&&o.ml_shipping_id?`${API}/api/mercadolivre/shipments/${encodeURIComponent(o.ml_shipping_id)}/label?token=${encodeURIComponent(TOKEN)}`:'';}
+function labelButton(o){
+  if(!o) return '';
+
+  if(o.platform === 'magalu'){
+    const did = o.magalu_delivery_id || o.delivery_id || o.shipping_id;
+    const isFull = o.fulfillment_type === 'full';
+    const st = String(o.status || '').toLowerCase();
+    const can = !!did && !isFull && !['cancelled','delivered','finished','shipped'].includes(st);
+    if(!can) return '';
+    return `<button class="label-btn" title="Imprimir etiqueta Magalu"
+      onclick="event.stopPropagation();openMagaluLabelModal('${encodeURIComponent(did)}')">
+      <i class="ti ti-printer"></i>
+    </button>`;
   }
+
+  if(o.platform !== 'mercadolivre') return '';
+
+  const tags = Array.isArray(o.tags) ? o.tags : [];
+  const isFull = o.fulfillment_type === 'full';
+  const isSent = ['shipped','delivered'].includes(String(o.shipping_status || '').toLowerCase()) ||
+                 tags.includes('shipped') ||
+                 tags.includes('delivered') ||
+                 o.status === 'delivered';
+
+  const sid = o.shipping_id || o.ml_shipping_id;
+  const can = o.can_print_label === true ||
+              (!!sid && !isFull && !isSent && (o.status === 'paid' || o.status === 'invoiced' || tags.includes('paid') || tags.includes('not_delivered')));
+
+  if(!can) return '';
+
+  return `<button class="label-btn" title="Baixar etiqueta ML"
+    onclick="event.stopPropagation();window.open(API+'/api/ml/label/${encodeURIComponent(sid)}?token='+encodeURIComponent(TOKEN),'_blank')">
+    <i class="ti ti-printer"></i>
+  </button>`;
+};
+
+function closeMagaluLabelModal(){const m=document.getElementById('magalu-label-modal');if(m)m.remove();}
+function magaluPrintableOrdersWithin7Days(currentDid){
+  const now=Date.now();
+  const seven=7*86400000;
+  const seen=new Set();
+  return (ALL||[]).filter(o=>{
+    if(!o||o.platform!=='magalu')return false;
+    const did=o.magalu_delivery_id||o.delivery_id||o.shipping_id;
+    if(!did||seen.has(did))return false;
+    const st=String(o.status||'').toLowerCase();
+    const isFull=o.fulfillment_type==='full';
+    const dt=new Date(o.order_date||o.purchased_at||0).getTime();
+    if(!Number.isFinite(dt)||now-dt>seven||dt>now+60000)return false;
+    if(isFull||['cancelled','delivered','finished'].includes(st))return false;
+    seen.add(did);
+    return true;
+  }).sort((a,b)=>new Date(b.order_date)-new Date(a.order_date));
+}
+function magaluOrderMiniLine(o){
+  const name=(o.buyer_name||o.customer_name||o.recipient_name||'Cliente').toString();
+  const code=(o.platform_order_id||o.order_code||o.id||'').toString();
+  const nf=(o.invoice_number||o.nfe_number||o.magalu_invoice_number||'').toString();
+  const sku=(o.item_sku||'').toString();
+  const title=(o.item_title||'').toString();
+  return {name,code,nf,sku,title};
+}
+function openMagaluLabelModal(encodedDeliveryId){
+  const did=decodeURIComponent(encodedDeliveryId||'');
+  if(!did)return;
+  closeMagaluLabelModal();
+  const printable=magaluPrintableOrdersWithin7Days(did);
+  const currentFirst=[...printable].sort((a,b)=>((a.magalu_delivery_id||a.delivery_id||a.shipping_id)===did?-1:0));
+  const list=currentFirst.map(o=>{
+    const oid=o.magalu_delivery_id||o.delivery_id||o.shipping_id;
+    const m=magaluOrderMiniLine(o);
+    const checked=oid===did?'checked':'';
+    const tag=oid===did?'Atual':'7 dias';
+    return `<label class="label-batch-item">
+      <input type="checkbox" class="mg-label-check" value="${escAttr(oid)}" ${checked}/>
+      <span>
+        <div class="label-batch-name">${escAttr(m.name)}</div>
+        <div class="label-batch-sub">Pedido ${escAttr(m.code||'—')}${m.nf?' · NF '+escAttr(m.nf):''}${m.sku?' · '+escAttr(m.sku):''}</div>
+      </span>
+      <span class="label-batch-tag">${tag}</span>
+    </label>`;
+  }).join('');
+  const m=document.createElement('div');
+  m.id='magalu-label-modal';
+  m.className='label-modal-backdrop';
+  m.innerHTML=`
+    <div class="label-modal" onclick="event.stopPropagation()">
+      <div class="label-modal-head">
+        <div><strong>Imprimir Magalu</strong><span>Zebra PDF: etiqueta oficial + DANFE simples, uma página cada</span></div>
+        <button class="label-modal-close" onclick="closeMagaluLabelModal()"><i class="ti ti-x"></i></button>
+      </div>
+      <div class="label-modal-body">
+        <div class="label-note"><b>Padrão Zebra sempre:</b> o SalesSync mantém a etiqueta oficial da Magalu e cria somente a página do DANFE simplificado. A impressão sai: etiqueta 1, DANFE 1, etiqueta 2, DANFE 2.</div>
+        <div class="label-batch">
+          <div class="label-batch-title"><span>Também imprimir?</span><small>últimos 7 dias</small></div>
+          <div class="label-batch-list">${list||'<div class="label-note">Nenhuma outra venda Magalu imprimível encontrada nos últimos 7 dias.</div>'}</div>
+        </div>
+        <div class="label-actions">
+          <button class="label-choice" onclick="printMagaluSelectedLabels('zebra-completo','pdf')">
+            <span><b>Zebra PDF completo</b><small>Etiqueta Magalu + DANFE criado, uma página cada</small></span><i class="ti ti-printer"></i>
+          </button>
+          <button class="label-choice" onclick="printMagaluSelectedLabels('full','zpl')">
+            <span><b>ZPL oficial / Zebra</b><small>Arquivo térmico oficial da Magalu</small></span><i class="ti ti-barcode"></i>
+          </button>
+          <button class="label-choice" onclick="printMagaluSelectedLabels('danfe-zebra','pdf')">
+            <span><b>Só DANFE Zebra PDF</b><small>1 DANFE por página 10x15 / 4x6</small></span><i class="ti ti-file-description"></i>
+          </button>
+        </div>
+      </div>
+    </div>`;
+  m.onclick=closeMagaluLabelModal;
+  document.body.appendChild(m);
+}
+function selectedMagaluDeliveryIds(){
+  return [...document.querySelectorAll('.mg-label-check:checked')].map(x=>x.value).filter(Boolean);
+}
+function magaluPrintUrl(ids,type='full',format='pdf'){
+  const idParam=encodeURIComponent(ids.join(','));
+  if(type==='zebra-completo'){
+    return API+'/api/magalu/labels/zebra-completo?token='+encodeURIComponent(TOKEN)+'&ids='+idParam;
+  }
+  if(type==='danfe-zebra'){
+    return API+'/api/magalu/labels/danfe-simplificado?token='+encodeURIComponent(TOKEN)+'&ids='+idParam+'&size=zebra';
+  }
+  // Etiqueta: sempre oficial da Magalu, sem redesenhar nem mexer no layout.
+  return API+'/api/magalu/labels/official?token='+encodeURIComponent(TOKEN)+'&ids='+idParam+'&type='+encodeURIComponent(type)+'&format='+encodeURIComponent(format);
+}
+function printMagaluSelectedLabels(type='full',format='pdf'){
+  const ids=selectedMagaluDeliveryIds();
+  if(!ids.length){toast('Selecione ao menos uma venda');return;}
+  window.open(magaluPrintUrl(ids,type,format),'_blank');
+  closeMagaluLabelModal();
+}
+function printMagaluLabel(encodedDeliveryId,type='full',format='pdf'){
+  const did=decodeURIComponent(encodedDeliveryId||'');
+  if(!did)return;
+  window.open(magaluPrintUrl([did],type,format),'_blank');
+  closeMagaluLabelModal();
+}
+
+const $id=id=>document.getElementById(id);
+const setText=(id,val)=>{const el=$id(id);if(el)el.textContent=val;};
+const setHTML=(id,val)=>{const el=$id(id);if(el)el.innerHTML=val;};
+function clampPeriod(v){v=parseInt(v||7,10);if(!Number.isFinite(v)||v<1)v=7;return Math.min(v,365);}
+function inSelectedPeriod(o){
+  const raw=o?.order_date;
+  if(!raw)return true;
+  // Converte a data do pedido para string local yyyy-mm-dd (timezone do browser)
+  const d=new Date(raw);
+  if(!Number.isFinite(d.getTime()))return true;
+  // yyyy-mm-dd no fuso local
+  const localStr=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+  if(CUSTOM_FROM&&CUSTOM_TO){
+    return localStr>=CUSTOM_FROM && localStr<=CUSTOM_TO;
+  }
+  // PERIOD=1 → só hoje; PERIOD>1 → últimos N dias
+  const hoje=new Date();
+  const hojeStr=hoje.getFullYear()+'-'+String(hoje.getMonth()+1).padStart(2,'0')+'-'+String(hoje.getDate()).padStart(2,'0');
+  const inicio=new Date(hoje);inicio.setDate(hoje.getDate()-(PERIOD-1));
+  const inicioStr=inicio.getFullYear()+'-'+String(inicio.getMonth()+1).padStart(2,'0')+'-'+String(inicio.getDate()).padStart(2,'0');
+  return localStr>=inicioStr && localStr<=hojeStr;
+}
+/* Ontem — usa data LOCAL (não UTC) para evitar shift de timezone */
+function localDateStr(d){
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+function setPeriodYesterday(el){
+  const y=new Date();
+  y.setDate(y.getDate()-1);
+  const s=localDateStr(y); // ex: "2026-06-09" no fuso local
+  CUSTOM_FROM=s;CUSTOM_TO=s;PERIOD=null;
+  document.querySelectorAll('.pill').forEach(p=>p.classList.remove('on'));
+  el.classList.add('on');
+  loadData();
+}
+const fday=s=>{
+  if(!s)return'';
+  const d=new Date(s),t=new Date(),y=new Date();
+  t.setHours(0,0,0,0);y.setHours(0,0,0,0);y.setDate(y.getDate()-1);
+  const dd=new Date(d);dd.setHours(0,0,0,0);
+  if(dd.getTime()===t.getTime())return'📅 Hoje — '+t.toLocaleDateString('pt-BR',{day:'2-digit',month:'long'});
+  if(dd.getTime()===y.getTime())return'📅 Ontem — '+y.toLocaleDateString('pt-BR',{day:'2-digit',month:'long'});
+  return'📅 '+d.toLocaleDateString('pt-BR',{weekday:'long',day:'2-digit',month:'long'});
+};
+
+async function api(path,opts={}){
+  const r=await fetch(API+path,{...opts,headers:{'Content-Type':'application/json',...(TOKEN?{Authorization:'Bearer '+TOKEN}:{})}});
+  const d=await r.json();if(!r.ok)throw new Error(d.error||'Erro');return d;
+}
+
+window.addEventListener('load',async()=>{
+  document.getElementById('ld-st').textContent='Verificando API...';
+  try{await fetch(API+'/health');document.getElementById('ld-st').textContent='✓ Online';}
+  catch{document.getElementById('ld-st').textContent='⚠ Offline';}
+  await new Promise(r=>setTimeout(r,500));
+  document.getElementById('ld').style.opacity='0';document.getElementById('ld').style.transition='opacity .4s';
+  setTimeout(()=>{document.getElementById('ld').style.display='none';TOKEN&&USER?showApp():document.getElementById('ls').classList.add('on');},400);
+  calc();
+  const p=new URLSearchParams(location.search);
+  if(p.get('connected'))setTimeout(()=>toast('✓ '+p.get('connected')+' conectado!'),2500);
+  if(p.get('error'))setTimeout(()=>toast('Erro: '+p.get('error')),2500);
+  if(p.get('connected')||p.get('error'))history.replaceState({},'','/');
 });
 
-// ── REFRESH TOKEN ML ──
-async function refreshMLToken(account) {
-  try {
-    const { data } = await axios.post('https://api.mercadolibre.com/oauth/token',
-      new URLSearchParams({
-        grant_type: 'refresh_token',
-        client_id: process.env.ML_CLIENT_ID,
-        client_secret: process.env.ML_CLIENT_SECRET,
-        refresh_token: account.refresh_token
-      }),
-      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
-    );
-    await db.query(
-      `UPDATE marketplace_accounts SET access_token=$1, refresh_token=$2, token_expires_at=$3, updated_at=NOW() WHERE id=$4`,
-      [data.access_token, data.refresh_token, new Date(Date.now() + data.expires_in * 1000), account.id]
-    );
-    console.log('[ML] 🔄 Token renovado para', account.shop_name);
-    return data.access_token;
-  } catch(e) {
-    console.error('[ML Refresh]', e.response?.data || e.message);
-    return null;
-  }
+function setLTab(tab,el){document.querySelectorAll('.ltab').forEach(t=>t.classList.remove('on'));el.classList.add('on');document.getElementById('tab-login').style.display=tab==='login'?'flex':'none';document.getElementById('tab-register').style.display=tab==='register'?'flex':'none';}
+async function doLogin(){
+  const email=document.getElementById('l-email').value.trim(),pass=document.getElementById('l-pass').value;
+  document.getElementById('l-err').textContent='';
+  if(!email||!pass)return document.getElementById('l-err').textContent='Preencha todos os campos';
+  try{const d=await api('/api/auth/login',{method:'POST',body:JSON.stringify({email,password:pass})});TOKEN=d.token;USER=d.user;localStorage.setItem('ss_token',TOKEN);localStorage.setItem('ss_user',JSON.stringify(USER));document.getElementById('ls').classList.remove('on');showApp();}
+  catch(e){document.getElementById('l-err').textContent=e.message;}
 }
-
-// ── FETCH ML ──
-function mlShippingStatus(o, shipment) {
-  const tags = Array.isArray(o.tags) ? o.tags : [];
-  const st = String(shipment?.status || o.shipping?.status || '').toLowerCase();
-  const sub = String(shipment?.substatus || '').toLowerCase();
-
-  if (o.status === 'cancelled' || tags.includes('cancelled') || st === 'cancelled') return 'cancelled';
-  if (tags.includes('delivered') || st === 'delivered') return 'delivered';
-  if (tags.includes('not_delivered')) {
-    if (st === 'ready_to_ship') return 'ready_to_ship';
-    if (st === 'handling') return 'handling';
-    if (st === 'shipped') return 'shipped';
-    return 'not_delivered';
-  }
-  if (st) return st;
-  if (tags.includes('paid')) return 'paid_not_shipped';
-  return 'unknown';
+async function doRegister(){
+  const name=document.getElementById('r-name').value.trim(),email=document.getElementById('r-email').value.trim(),pass=document.getElementById('r-pass').value,cnpj=document.getElementById('r-cnpj').value.trim();
+  document.getElementById('r-err').textContent='';
+  if(!name||!email||!pass)return document.getElementById('r-err').textContent='Preencha nome, e-mail e senha';
+  try{const d=await api('/api/auth/register',{method:'POST',body:JSON.stringify({name,email,password:pass,cnpj})});TOKEN=d.token;USER=d.user;localStorage.setItem('ss_token',TOKEN);localStorage.setItem('ss_user',JSON.stringify(USER));document.getElementById('ls').classList.remove('on');showApp();}
+  catch(e){document.getElementById('r-err').textContent=e.message;}
 }
+function doLogout(){TOKEN='';USER=null;clearInterval(window._ct);localStorage.removeItem('ss_token');localStorage.removeItem('ss_user');document.getElementById('app').classList.remove('on');closeMo('mo-acc');document.getElementById('ls').classList.add('on');}
 
-function mlShippingStatusLabel(status) {
-  const map = {
-    ready_to_ship: 'Pronto p/ enviar',
-    handling: 'Preparando',
-    not_delivered: 'Pago · não enviado',
-    paid_not_shipped: 'Pago · não enviado',
-    shipped: 'Enviado',
-    delivered: 'Entregue',
-    cancelled: 'Cancelado',
-    pending: 'Pendente',
-    unknown: '—'
-  };
-  return map[status] || status || '—';
-}
-
-async function fetchMLShipmentDetails(token, shipmentId) {
-  if (!shipmentId) return null;
-  const headers = { Authorization: `Bearer ${token}` };
-  try {
-    const { data } = await axios.get(`https://api.mercadolibre.com/shipments/${shipmentId}`, { headers });
-    return data || null;
-  } catch (e) {
-    console.error('[ML shipment]', shipmentId, e.response?.status || '', e.response?.data || e.message);
-    return null;
-  }
-}
-
-async function fetchMLShipmentCosts(token, shipmentId) {
-  if (!shipmentId) return null;
-  const headers = { Authorization: `Bearer ${token}` };
-  const urls = [
-    `https://api.mercadolibre.com/shipments/${shipmentId}/costs`,
-    `https://api.mercadolibre.com/shipments/${shipmentId}/payments`,
-  ];
-  for (const url of urls) {
-    try {
-      const { data } = await axios.get(url, { headers });
-      return data || null;
-    } catch (e) {
-      const st = e.response?.status;
-      if (st && ![403, 404, 405].includes(Number(st))) {
-        console.warn('[ML shipment costs]', shipmentId, st, e.response?.data || e.message);
-      }
+async function checkShopeeKeyStatus(){
+  try{
+    const d=await api('/api/shopee/key-status');
+    if(d.level==='expired'||d.level==='critical'||d.level==='warning'){
+      const bg=d.level==='expired'?'rgba(244,63,94,.18)':d.level==='critical'?'rgba(239,68,68,.15)':'rgba(251,191,36,.12)';
+      const border=d.level==='expired'?'#f43f5e':d.level==='critical'?'#ef4444':'#fbbf24';
+      const icon=d.level==='expired'?'⛔':d.level==='critical'?'🚨':'⚠️';
+      const existing=document.getElementById('shopee-key-alert');
+      if(existing)existing.remove();
+      const bar=document.createElement('div');
+      bar.id='shopee-key-alert';
+      bar.style.cssText=`position:fixed;top:0;left:0;right:0;z-index:99999;background:${bg};border-bottom:2px solid ${border};padding:8px 16px;display:flex;align-items:center;gap:10px;font-size:12px;font-weight:700;color:#f1f5f9;backdrop-filter:blur(8px);`;
+      const modeLabel=d.mode==='test'?'SANDBOX':'PRODUÇÃO';
+      bar.innerHTML=`<span>${icon}</span><span><strong>Shopee API Key [${modeLabel}]:</strong> ${d.message} — Expira: ${d.expiresFormatted}</span><a href="https://open.shopee.com/api-docs" target="_blank" style="margin-left:auto;color:inherit;font-size:11px;border:1px solid currentColor;border-radius:6px;padding:2px 8px;text-decoration:none;">Renovar agora</a><span onclick="this.parentElement.remove()" style="cursor:pointer;font-size:16px;margin-left:8px;opacity:.6">✕</span>`;
+      document.body.prepend(bar);
     }
-  }
-  return null;
+  }catch(e){console.warn('[Shopee Key Check]',e.message);}
 }
 
-function pickNumberDeep(obj, paths=[]) {
-  for (const path of paths) {
-    const val = path.split('.').reduce((acc, key) => acc && acc[key], obj);
-    const n = Number(val);
-    if (Number.isFinite(n) && n > 0) return n;
-  }
-  return 0;
+function showApp(){
+  document.getElementById('app').classList.add('on');
+  document.getElementById('tb-user').textContent=USER?.name||USER?.email||'—';
+  document.getElementById('acc-ava').textContent=(USER?.name||'?')[0].toUpperCase();
+  document.getElementById('acc-name').textContent=USER?.name||'—';
+  document.getElementById('acc-email').textContent=USER?.email||'—';
+  document.getElementById('acc-plan').textContent='Plano '+(USER?.plan||'free');
+  loadAccounts().then(()=>{loadData();setTimeout(()=>doSync().catch(()=>{}),2000);setTimeout(ssDailyBrief,1200);});
+  setTimeout(()=>checkShopeeKeyStatus().catch(()=>{}),3000);
+  startCD();
+  document.removeEventListener('visibilitychange',window._visSync);
+  window._visSync=()=>{if(document.visibilityState==='visible'&&TOKEN&&USER)loadData();};
+  document.addEventListener('visibilitychange',window._visSync);
+  // Auto-refresh a cada 60s quando aba visível
+  if(window._autoRefreshInterval)clearInterval(window._autoRefreshInterval);
+  window._autoRefreshInterval=setInterval(()=>{
+    if(document.visibilityState==='visible'&&TOKEN&&USER)loadData();
+  },60000);
 }
 
-function resolveMLShippingFee({ order, shipment, shipmentCosts, totalAmount, paidAmount }) {
-  const payments = Array.isArray(order?.payments) ? order.payments : [];
+async function doQuickSync(){
+  try{
+    await Promise.all((ACCOUNTS||[]).filter(x=>x.is_connected).map(a=>
+      fetch(`${API}/api/sync/quick?platform=${a.platform}`,{headers:{Authorization:`Bearer ${TOKEN}`}}).catch(()=>null)
+    ));
+  }catch(e){}
+}
 
-  // ATENÇÃO ML:
-  // Para saber o frete cobrado do vendedor, o campo mais confiável é:
-  // GET /shipments/{shipment_id}/costs -> senders[].cost
-  // payment.shipping_cost costuma representar frete do pagamento/comprador e pode não bater com o financeiro do vendedor.
-  const senderCost = Array.isArray(shipmentCosts?.senders)
-    ? shipmentCosts.senders.reduce((sum, x) => sum + Number(x?.cost || x?.amount || x?.user_cost || 0), 0)
-    : 0;
+function startCD(){CD=300;clearInterval(window._ct);window._ct=setInterval(async()=>{CD--;const m=Math.floor(CD/60),s=CD%60;setText('next-sync',`${m}:${String(s).padStart(2,'0')}`);if(CD<=0){await doQuickSync();loadData();startCD();}},1000);}
 
-  const paymentShippingFee = payments.reduce((sum, p) => sum + Number(p?.shipping_cost || p?.shipping_amount || p?.shipment_cost || 0), 0);
-  const orderShippingFee = Number(order?.shipping_cost || order?.shipping?.cost || order?.shipping?.amount || 0);
-  const shipmentCost = pickNumberDeep(shipment || {}, [
-    'shipping_option.cost', 'shipping_option.list_cost', 'shipping_option.base_cost',
-    'cost', 'base_cost', 'list_cost', 'receiver_cost'
-  ]);
-  const costsEndpointFee = senderCost || pickNumberDeep(shipmentCosts || {}, [
-    'sender.cost', 'sender.amount',
-    'receiver.cost', 'receiver.amount', 'receiver.user_cost',
-    'shipping_option.cost', 'gross_amount', 'amount', 'cost', 'list_cost', 'base_cost'
-  ]);
-  const paidDiff = Math.max(0, Number(paidAmount || 0) - Number(totalAmount || 0));
+async function loadData(){
+  if($id('sync-ico'))$id('sync-ico').style.animation='spin .6s linear infinite';
+  setText('last-sync','...');
+  try{
+    if(!CUSTOM_FROM||!CUSTOM_TO) PERIOD=clampPeriod(PERIOD);
+    const qs=CUSTOM_FROM&&CUSTOM_TO
+      ? `date_from=${encodeURIComponent(CUSTOM_FROM)}&date_to=${encodeURIComponent(CUSTOM_TO)}`
+      : `period=${PERIOD}`;
+    const{data}=await api(`/api/orders?${qs}${PLAT?'&platform='+PLAT:''}`);
+    ALL=(data||[]).filter(inSelectedPeriod);
+    window._SS_CHART_CACHE={}; // limpa cache do gráfico ao recarregar
+    window._PREV_DASH=null;
+    // Abate estoque automaticamente pelos pedidos carregados
+    if(typeof estoqueAbaterPedidos==='function') estoqueAbaterPedidos(ALL);
+    applyFilters();
+    ssDrawDailyChart();
+    // Carrega comparação e rendimentos extras em paralelo
+    loadCompare().then(()=>{ if(window._PREV_DASH)computeDash(); }).catch(()=>{});
+    ssLoadAddRevTotal();
+    setText('last-sync',new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}));
+  }catch(e){document.getElementById('orders-body').innerHTML=`<tr><td colspan="15"><div class="empty"><i class="ti ti-wifi-off"></i><p>${e.message}</p></div></td></tr>`;}
+  if($id('sync-ico'))$id('sync-ico').style.animation='';
+}
 
-  // Prioridade: custo real do vendedor (senders.cost da API /shipments/{id}/costs) primeiro.
-  // payment_shipping_cost = o que o comprador pagou, pode ser subsidiado ou diferente do custo do vendedor.
-  const candidates = [
-    ['shipment_costs_senders_cost', senderCost],
-    ['shipment_costs_endpoint', costsEndpointFee],
-    ['shipment_shipping_option', shipmentCost],
-    ['payment_shipping_cost', paymentShippingFee],
-    ['order_shipping_cost', orderShippingFee],
-    ['paid_minus_total', paidDiff],
-  ];
-  const found = candidates.find(([, v]) => Number.isFinite(Number(v)) && Number(v) > 0);
-  return {
-    value: found ? Number(found[1]) : 0,
-    source: found ? found[0] : 'not_found',
-    payment_shipping_fee: Number(paymentShippingFee || 0),
-    order_shipping_fee: Number(orderShippingFee || 0),
-    shipment_cost: Number(shipmentCost || 0),
-    costs_endpoint_fee: Number(costsEndpointFee || 0),
-    sender_cost: Number(senderCost || 0),
-    paid_diff: Number(paidDiff || 0)
+function applyFilters(){
+  let d=[...ALL];
+  if(FTAB!=='all')d=d.filter(o=>o.fulfillment_type===FTAB);
+  FILTERED=d;PAGE=1;computeDash();renderOrders();renderProds();
+}
+
+async function doSync(){
+  toast('Sincronizando...');
+  await Promise.all((ACCOUNTS||[]).filter(x=>x.is_connected).map(a=>api('/api/sync/'+a.platform).catch(()=>null)));
+  await loadData();startCD();toast('✓ Sincronizado!');
+}
+
+function computeDash(){
+  // pending excluído do faturamento/meta
+  const paid=FILTERED.filter(o=>o.status!=='cancelled'&&o.status!=='pending');
+  const can=FILTERED.filter(o=>o.status==='cancelled');
+  const pend=FILTERED.filter(o=>o.status==='pending');
+  const sum=(arr,k)=>arr.reduce((s,o)=>s+parseFloat(o[k]||0),0);
+  const fat=sum(paid,'total_amount'),luc=sum(paid,'profit'),marg=fat>0?(luc/fat*100):0;
+  DASH={total_orders:paid.length,cancelados:can.length,faturamento:fat,lucro:luc,tarifas:sum(paid,'platform_fee'),frete:sum(paid,'shipping_fee'),impostos:sum(paid,'tax_amount'),custos:sum(paid,'total_cost'),ticket:paid.length?fat/paid.length:0,marg};
+  setText('tb-fat',f(fat));
+  setText('tb-luc',f(luc));
+  setText('c-ped',paid.length);
+  // Badge cancelados + pendentes
+  const pedBadges=(can.length?`<span class="badge red">${can.length} cancelados</span> `:'')
+    +(pend.length?`<span class="badge" style="background:rgba(251,191,36,.15);color:#fbbf24">${pend.length} pendentes</span>`:'');
+  setHTML('c-ped2',pedBadges);
+  /* Aguardando pagamento — strip (desktop) e hero (mobile) */
+  const pendVal=sum(pend,'total_amount');
+  const pendEl=document.getElementById('c-pend-strip');
+  if(pendEl){
+    if(pend.length>0){
+      pendEl.style.display='flex';
+      pendEl.innerHTML=`<i class="ti ti-clock-hour4" style="color:#fbbf24;font-size:15px;flex-shrink:0"></i>
+        <div style="display:flex;flex-direction:column;gap:0">
+          <span style="font-size:8px;color:var(--txt3);text-transform:uppercase;letter-spacing:.6px;font-weight:700">Aguardando pagamento</span>
+          <span style="font-size:15px;font-weight:800;color:#fbbf24;letter-spacing:-.3px;line-height:1.2">${f(pendVal)}</span>
+        </div>
+        <span style="font-size:8px;color:var(--txt3);margin-left:auto;align-self:center">${pend.length} pedido${pend.length!==1?'s':''}</span>`;
+    }else{pendEl.style.display='none';}
+  }
+  /* Mobile hero — aguardando */
+  const mhPendEl=document.getElementById('mh-pend');
+  if(mhPendEl){
+    if(pend.length>0){
+      mhPendEl.style.display='flex';
+      mhPendEl.innerHTML=`<i class="ti ti-clock-hour4" style="color:#fbbf24;font-size:12px"></i>
+        <span style="font-size:9px;color:#fbbf24;font-weight:700">Ag. pgto: ${f(pendVal)} <span style="font-size:8px;opacity:.7">(${pend.length} ped.)</span></span>`;
+    }else{mhPendEl.style.display='none';}
+  }
+  setText('c-tkt',f(DASH.ticket));
+  setText('c-luc',f(luc));
+  setHTML('c-marg',`<span class="badge green">${pct(marg)} margem</span>`);
+  setText('c-can',can.length);
+  setText('c-cust',f(DASH.custos));
+  setText('c-tar',f(DASH.tarifas));
+  setText('c-imp',f(DASH.impostos));
+  setText('c-fre',f(DASH.frete));
+  if(fat>0){
+    setText('c-custp',pct(DASH.custos/fat*100)+' do fat.');
+    setText('c-tarp',pct(DASH.tarifas/fat*100));
+    setText('c-impp',pct(DASH.impostos/fat*100));
+    setText('c-frep',pct(DASH.frete/fat*100));
+  }
+  /* Setas de comparação com período anterior */
+  const P=window._PREV_DASH;
+  const cmp=(cur,prev,id,positivo=true,fmt=null)=>{
+    const el=document.getElementById(id);if(!el||!P)return;
+    const diff=cur-prev,pctDiff=prev>0?(Math.abs(diff)/prev*100):0;
+    if(Math.abs(diff)<0.001){el.innerHTML=`<span class="mcard-cmp eq"><i class="ti ti-minus" style="font-size:7px"></i> igual ao anterior</span>`;return;}
+    const up=diff>0,good=positivo?up:!up;
+    const icon=up?'ti-arrow-up':'ti-arrow-down',cls=good?'up':'dn';
+    const label=fmt?fmt(Math.abs(diff)):pctDiff.toFixed(0)+'%';
+    const desc=up?'↑':'↓';
+    el.innerHTML=`<span class="mcard-cmp ${cls}" title="${label} ${up?'a mais':'a menos'} que o período anterior"><i class="ti ${icon}" style="font-size:7px"></i> ${label} ${desc} anterior</span>`;
   };
-}
-async function ssMapLimit(items, limit, worker) {
-  const arr = Array.isArray(items) ? items : [];
-  const out = [];
-  for (let i = 0; i < arr.length; i += limit) {
-    const part = arr.slice(i, i + limit);
-    out.push(...await Promise.all(part.map(worker)));
+  if(P){
+    cmp(paid.length,P.ped,'cmp-ped',true,v=>Math.round(v)+' pedido'+(Math.round(v)!==1?'s':''));
+    cmp(DASH.ticket,P.ticket,'cmp-tkt',true,v=>f(v));
+    cmp(luc,P.luc,'cmp-luc',true,v=>f(v));
+    cmp(can.length,P.can,'cmp-can',false,v=>Math.round(v)+' cancelado'+(Math.round(v)!==1?'s':''));
   }
-  return out;
-}
-
-
-async function fetchMLItemDetails(token, itemId) {
-  if (!itemId) return null;
-
-  async function normalize(data) {
-    const image = data?.pictures?.[0]?.secure_url || data?.pictures?.[0]?.url || data?.secure_thumbnail || data?.thumbnail || null;
-    return {
-      item_id: String(itemId),
-      image_url: image,
-      title: data?.title || '',
-      seller_sku: data?.seller_custom_field || data?.seller_sku || ''
-    };
-  }
-
-  // Alguns apps ML bloqueiam /items com Authorization por PolicyAgent.
-  // Primeiro tenta público SEM token. Se não der, tenta com token. Nenhuma falha de imagem deve quebrar pedidos.
-  try {
-    const { data } = await axios.get(`https://api.mercadolibre.com/items/${itemId}`);
-    return normalize(data);
-  } catch (publicErr) {
-    try {
-      const { data } = await axios.get(`https://api.mercadolibre.com/items/${itemId}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      return normalize(data);
-    } catch (authErr) {
-      const st = authErr.response?.status || publicErr.response?.status || '';
-      const code = authErr.response?.data?.code || publicErr.response?.data?.code || '';
-      console.warn('[ML item image skipped]', itemId, st, code || authErr.message || publicErr.message);
-      return null;
-    }
-  }
-}
-
-async function getMLItemDetailsCached(token, itemIds=[]) {
-  const ids = [...new Set((itemIds || []).map(x => String(x || '').trim()).filter(Boolean))];
-  if (!ids.length) return {};
-  const out = {};
-  try {
-    const { rows } = await db.query(
-      `SELECT item_id, image_url, title, seller_sku FROM marketplace_item_images WHERE platform='mercadolivre' AND item_id = ANY($1::text[])`,
-      [ids]
-    );
-    for (const r of rows) out[String(r.item_id)] = { image_url:r.image_url, title:r.title, seller_sku:r.seller_sku };
-  } catch(e) {
-    console.warn('[ML item cache read]', e.message);
-  }
-
-  const missing = ids.filter(id => !out[id]?.image_url);
-  // Limita para não deixar a sincronização pesada. O resto entra na próxima atualização.
-  await Promise.all(missing.slice(0, 120).map(async id => {
-    const det = await fetchMLItemDetails(token, id);
-    if (!det) return;
-    out[id] = { image_url:det.image_url, title:det.title, seller_sku:det.seller_sku };
-    try {
-      await db.query(
-        `INSERT INTO marketplace_item_images (platform, item_id, image_url, title, seller_sku, updated_at)
-         VALUES ('mercadolivre',$1,$2,$3,$4,NOW())
-         ON CONFLICT (platform, item_id) DO UPDATE SET
-           image_url=COALESCE(EXCLUDED.image_url, marketplace_item_images.image_url),
-           title=COALESCE(NULLIF(EXCLUDED.title,''), marketplace_item_images.title),
-           seller_sku=COALESCE(NULLIF(EXCLUDED.seller_sku,''), marketplace_item_images.seller_sku),
-           updated_at=NOW()`,
-        [id, det.image_url || null, det.title || null, det.seller_sku || null]
-      );
-    } catch(e) { console.warn('[ML item cache write]', e.message); }
-  }));
-  return out;
-}
-
-async function fetchML(acc, days) {
-  let token = acc.access_token;
-  if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 5*60*1000)) {
-    console.log('[ML] Token expirando, renovando...');
-    const newToken = await refreshMLToken(acc);
-    if (newToken) token = newToken;
-  }
-
-  const safeDays = Math.max(1, Math.min(parseInt(days || 30, 10), 220));
-  const since = new Date(Date.now() - safeDays * 86400000).toISOString();
-  const headers = { Authorization: `Bearer ${token}` };
-
-  // ML retorna no máximo uma página por chamada. Antes estava buscando só limit=50,
-  // então, se houvesse muitas vendas, parava no dia 17 ou em qualquer data onde a primeira página acabasse.
-  const results = [];
-  const limit = 50;
-  const maxPages = 20; // até 1000 pedidos por sincronização
-
-  for (let page = 0; page < maxPages; page++) {
-    const offset = page * limit;
-    const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
-      params: {
-        seller: acc.platform_shop_id,
-        sort: 'date_desc',
-        'order.date_created.from': since,
-        limit,
-        offset
-      },
-      headers
-    });
-
-    const pageResults = Array.isArray(data.results) ? data.results : [];
-    results.push(...pageResults);
-
-    const total = Number(data.paging?.total || 0);
-    const returned = Number(data.paging?.limit || limit);
-    const currentOffset = Number(data.paging?.offset || offset);
-
-    if (!pageResults.length) break;
-    if (total && currentOffset + returned >= total) break;
-    if (pageResults.length < limit) break;
-  }
-
-  // Segurança contra duplicidade entre páginas.
-  const seenOrders = new Set();
-  const uniqueResults = results.filter(o => {
-    const id = String(o?.id || '');
-    if (!id || seenOrders.has(id)) return false;
-    seenOrders.add(id);
-    return true;
-  });
-
-  // Puxa detalhes de envio em lote leve. Se der 403/erro, o pedido continua funcionando.
-  const shipmentIds = [...new Set(uniqueResults.map(o => o.shipping?.id).filter(Boolean))];
-  const shipmentMap = {};
-  await ssMapLimit(shipmentIds, 8, async id => {
-    const det = await fetchMLShipmentDetails(token, id);
-    if (det) shipmentMap[String(id)] = det;
-  });
-
-  // Frete do ML pode vir em locais diferentes dependendo do tipo de envio/pagamento.
-  const shipmentCostMap = {};
-  await ssMapLimit(shipmentIds, 8, async id => {
-    const det = await fetchMLShipmentCosts(token, id);
-    if (det) shipmentCostMap[String(id)] = det;
-  });
-
-  // Foto do produto: orders/search não traz imagem. Busca /items/{item_id}, salva URL no SQL
-  // e nas próximas cargas usa o cache marketplace_item_images para não ficar lento.
-  const itemIdsForImages = [...new Set(uniqueResults.map(o => o.order_items?.[0]?.item?.id).filter(Boolean))];
-  const itemImageMap = await getMLItemDetailsCached(token, itemIdsForImages);
-
-  const statusMap = {
-    paid:'paid', payment_required:'pending', pending:'pending',
-    confirmed:'paid', shipped:'shipped', delivered:'delivered',
-    cancelled:'cancelled', invalid:'cancelled',
+  /* ── Mobile Hero ── */
+  const el_=id=>document.getElementById(id);
+  if(el_('mh-fat-val'))el_('mh-fat-val').textContent=HIDDEN?'R$ ••••':f(fat);
+  if(el_('mh-luc-val'))el_('mh-luc-val').textContent=HIDDEN?'R$ ••••':f(luc);
+  if(el_('mh-upd-time'))el_('mh-upd-time').textContent=new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
+  const mhBadge=(elId,cur,prev)=>{
+    const el=el_(elId); if(!el)return;
+    if(!P||Math.abs(cur-prev)<0.01){el.className='mh-badge eq';el.textContent='igual ao anterior';return;}
+    const up=cur>prev,pct=(Math.abs(cur-prev)/Math.max(prev,0.01)*100).toFixed(0)+'%';
+    el.className=`mh-badge ${up?'up':'dn'}`;
+    el.innerHTML=`<i class="ti ${up?'ti-arrow-up':'ti-arrow-down'}" style="font-size:9px"></i> ${pct} ${up?'a mais':'a menos'}`;
   };
-
-  return uniqueResults.map(o => {
-    const item = o.order_items?.[0] || {};
-    const mlItemId = item?.item?.id || null;
-    const itemDetails = mlItemId ? itemImageMap[String(mlItemId)] : null;
-    const shipmentId = o.shipping?.id || null;
-    const shipment = shipmentId ? shipmentMap[String(shipmentId)] : null;
-    const qty = parseFloat(item?.quantity || 1);
-    const totalAmount = parseFloat(o.total_amount || 0);
-    const paidAmount = parseFloat(o.paid_amount || o.payments?.[0]?.total_paid_amount || 0);
-
-    // Tarifa real do ML: vem em order_items[].sale_fee.
-    const platformFee = (o.order_items || []).reduce((sum, it) => {
-      return sum + (parseFloat(it.sale_fee || 0) * parseFloat(it.quantity || 1));
-    }, 0);
-
-    const shippingInfo = resolveMLShippingFee({
-      order: o,
-      shipment,
-      shipmentCosts: shipmentId ? shipmentCostMap[String(shipmentId)] : null,
-      totalAmount,
-      paidAmount
-    });
-    const shippingFee = shippingInfo.value;
-    const paymentShippingFee = shippingInfo.payment_shipping_fee;
-
-    const payment = o.payments?.[0] || {};
-    const mlShipStatus = mlShippingStatus(o, shipment);
-
-    return {
-      id:               String(o.id),
-      platform:         'mercadolivre',
-      platform_order_id:String(o.id),
-      shipping_id:      o.shipping?.id || null,
-      tags:             Array.isArray(o.tags) ? o.tags : [],
-      shop_name:        acc.shop_name,
-      fulfillment_type: (shipment?.logistic_type || o.shipping?.logistic_type) === 'fulfillment' ? 'full' : 'normal',
-      status:           statusMap[o.status] || o.status,
-      buyer_name:       o.buyer?.nickname || '',
-      buyer_id:         o.buyer?.id || null,
-      seller_id:        o.seller?.id || acc.platform_shop_id,
-      total_amount:     totalAmount,
-      paid_amount:      paidAmount,
-      platform_fee:     platformFee,
-      shipping_fee:     shippingFee,
-      shipping_fee_source: shippingInfo.source,
-      payment_shipping_fee: paymentShippingFee,
-      order_shipping_fee: shippingInfo.order_shipping_fee,
-      shipment_shipping_fee: shippingInfo.shipment_cost,
-      shipment_costs_fee: shippingInfo.costs_endpoint_fee,
-      shipment_sender_cost: shippingInfo.sender_cost,
-      paid_minus_total_shipping: shippingInfo.paid_diff,
-      tax_amount:       0,
-      quantity:         qty,
-      order_date:       o.date_created,
-      date_closed:      o.date_closed || null,
-      date_last_updated:o.date_last_updated || o.last_updated || null,
-      item_title:       item?.item?.title || itemDetails?.title || payment.reason || '',
-      item_image:       itemDetails?.image_url || null,
-      item_sku:         item?.item?.seller_sku || item?.item?.seller_custom_field || itemDetails?.seller_sku || '',
-      item_id:          mlItemId,
-      category_id:      item?.item?.category_id || null,
-      unit_price:       parseFloat(item?.unit_price || 0),
-      gross_price:      parseFloat(item?.gross_price || item?.unit_price || 0),
-      listing_type_id:  item?.listing_type_id || '',
-      sale_fee:         platformFee,
-      coupon_amount:    parseFloat(o.coupon?.amount || payment.coupon_amount || 0),
-      payment_method:   payment.payment_method_id || '',
-      payment_type:     payment.payment_type || '',
-      installments:     payment.installments || 1,
-      payment_status:   payment.status || '',
-      payment_status_detail: payment.status_detail || '',
-      status_detail:     o.status_detail || payment.status_detail || '',
-      tags:             Array.isArray(o.tags) ? o.tags : [],
-      ml_shipping_id:   shipmentId,
-      ml_shipping_status: mlShipStatus,
-      ml_shipping_status_label: mlShippingStatusLabel(mlShipStatus),
-      ml_shipping_mode: shipment?.mode || shipment?.shipping_mode || o.shipping?.mode || '',
-      ml_logistic_type: shipment?.logistic_type || o.shipping?.logistic_type || '',
-      ml_tracking_number: shipment?.tracking_number || shipment?.tracking?.number || '',
-      ml_tracking_method: shipment?.tracking_method || shipment?.tracking?.method || '',
-      ml_receiver_name: shipment?.receiver_address?.receiver_name || '',
-      ml_receiver_city: shipment?.receiver_address?.city?.name || '',
-      ml_receiver_state: shipment?.receiver_address?.state?.name || '',
-      ml_receiver_zip: shipment?.receiver_address?.zip_code || '',
-      ml_label_available: Boolean(shipmentId) && !['cancelled','delivered'].includes(mlShipStatus),
-    };
-  });
+  mhBadge('mh-fat-cmp',fat,P?P.fat||0:fat);
+  mhBadge('mh-luc-cmp',luc,P?P.luc||0:luc);
+  renderDRE();
 }
 
-// ── SHOPEE ──
-// Render está nos EUA → usar endpoint US (.com.br) em produção.
-// Sandbox: sempre .shopee.sg (único domínio sandbox disponível para todos).
-// Referência: https://open.shopee.com/documents/v2/v2.getting_started?module=87&type=2
-const SHOPEE_BASE = process.env.SHOPEE_ENV === 'test'
-  ? 'https://openplatform.sandbox.test-stable.shopee.sg'
-  : (process.env.SHOPEE_API_BASE || 'https://openplatform.shopee.com.br');
-const SHOPEE_PID  = () => String(process.env.SHOPEE_PARTNER_ID || '');
-const SHOPEE_KEY  = () => String(process.env.SHOPEE_PARTNER_KEY || '');
+/* Carrega total de rendimentos extras do mês atual */
+async function ssLoadAddRevTotal(){
+  try{
+    const j=await ssFetchJson(`${API}/api/additional-revenues`);
+    const total=parseFloat(j.total||0);
+    const val=total>0?f(total):'R$ 0,00';
+    const el=document.getElementById('c-addrev');if(el)el.textContent=val;
+    const tb=document.getElementById('tb-addrev');if(tb)tb.textContent=val;
+  }catch(e){
+    const tb=document.getElementById('tb-addrev');if(tb)tb.textContent='—';
+  }
+}
 
-// ── ALERTA DE EXPIRAÇÃO DA KEY SHOPEE ──
-(function checkShopeeKeyExpiry() {
-  const expiresAt = process.env.SHOPEE_KEY_EXPIRES_AT;
-  const mode = process.env.SHOPEE_ENV === 'test' ? 'TEST' : 'PRODUÇÃO';
-  if (!expiresAt) {
-    console.warn(`[Shopee] ⚠ SHOPEE_KEY_EXPIRES_AT não definido! Configure a data de expiração da key (modo: ${mode}).`);
+/* Carrega dados do período anterior para comparação */
+async function loadCompare(){
+  try{
+    const days=CUSTOM_FROM&&CUSTOM_TO?null:clampPeriod(PERIOD);
+    if(!days)return; // sem comparação para período customizado
+    const hoje=new Date();
+    const toD=new Date(hoje);toD.setDate(hoje.getDate()-days);
+    const frD=new Date(toD);frD.setDate(toD.getDate()-days+1);
+    const fmt=d=>localDateStr(d);
+    const{data}=await api(`/api/orders?date_from=${fmt(frD)}&date_to=${fmt(toD)}${PLAT?'&platform='+PLAT:''}`);
+    const paid=(data||[]).filter(o=>o.status!=='cancelled'&&o.status!=='pending'),can=(data||[]).filter(o=>o.status==='cancelled');
+    const sum=(arr,k)=>arr.reduce((s,o)=>s+parseFloat(o[k]||0),0);
+    const fat=sum(paid,'total_amount');
+    window._PREV_DASH={ped:paid.length,fat,luc:sum(paid,'profit'),can:can.length,ticket:paid.length?fat/paid.length:0};
+  }catch(e){window._PREV_DASH=null;}
+}
+
+window.PAGE_SIZE = window.PAGE_SIZE || 20;
+function setPageSize(n){
+  window.PAGE_SIZE=n;PAGE=1;
+  const sel=document.getElementById('page-size-select');
+  if(sel)sel.value=String(n);
+  renderOrders();
+}
+function renderOrders(){
+  const pp = window.PAGE_SIZE || 20;
+  const total = Array.isArray(FILTERED) ? FILTERED.length : 0;
+  const pages = Math.max(1, Math.ceil(total / pp));
+  PAGE = Math.min(PAGE || 1, pages);
+
+  const slice = (Array.isArray(FILTERED) ? FILTERED : []).slice((PAGE - 1) * pp, PAGE * pp);
+
+  if (!slice.length) {
+    document.getElementById('orders-body').innerHTML =
+      '<tr><td colspan="15"><div class="empty"><i class="ti ti-package-off"></i><p>Nenhum pedido encontrado</p></div></td></tr>';
+    document.getElementById('orders-count').textContent = '0 pedidos';
+    document.getElementById('page-info').textContent = PAGE + ' de ' + pages;
     return;
   }
-  const expDate = new Date(expiresAt);
-  const now = new Date();
-  const daysLeft = Math.ceil((expDate - now) / 86400000);
-  if (daysLeft <= 0) {
-    console.error(`[Shopee] ❌ API Key EXPIRADA em ${expDate.toLocaleDateString('pt-BR')} (modo: ${mode})! Renove imediatamente no Shopee Partner Center.`);
-  } else if (daysLeft <= 7) {
-    console.error(`[Shopee] 🚨 URGENTE: API Key expira em ${daysLeft} dia(s) — ${expDate.toLocaleDateString('pt-BR')} (modo: ${mode})! Renove agora.`);
-  } else if (daysLeft <= 30) {
-    console.warn(`[Shopee] ⚠ API Key expira em ${daysLeft} dia(s) — ${expDate.toLocaleDateString('pt-BR')} (modo: ${mode}). Renove em breve.`);
-  } else {
-    console.log(`[Shopee] ✅ API Key OK — expira em ${daysLeft} dia(s) (${expDate.toLocaleDateString('pt-BR')}) · modo: ${mode}`);
-  }
-})();
 
-// Assinatura Shopee v2:
-// - Partner-level (sem shop): pid + path + ts
-// - Shop-level (com shop): pid + path + ts + access_token + shop_id
-function shopeeSign(pid, path, ts, key, accessToken = '', shopId = '') {
-  const base = accessToken && shopId
-    ? `${pid}${path}${ts}${accessToken}${shopId}`
-    : `${pid}${path}${ts}`;
-  return crypto.createHmac('sha256', key).update(base).digest('hex');
-}
+  let lastDay = '';
+  let html = '';
 
-function shopeeParams(path, acc, extra = {}) {
-  const ts      = Math.floor(Date.now() / 1000);
-  const pid     = SHOPEE_PID();
-  const key     = SHOPEE_KEY();
-  const shopId  = String(acc.platform_shop_id);
-  const token   = acc.access_token || '';
-  const sign    = shopeeSign(pid, path, ts, key, token, shopId);
-  return { partner_id: pid, shop_id: shopId, access_token: token, timestamp: ts, sign, ...extra };
-}
+  slice.forEach((o) => {
+    o = o || {};
 
-async function refreshShopeeToken(account) {
-  try {
-    const ts   = Math.floor(Date.now() / 1000);
-    const path = '/api/v2/auth/access_token/get';
-    const pid  = SHOPEE_PID();
-    const sign = shopeeSign(pid, path, ts, SHOPEE_KEY());
-    const { data } = await axios.post(
-      `${SHOPEE_BASE}${path}?partner_id=${pid}&timestamp=${ts}&sign=${sign}`,
-      { refresh_token: account.refresh_token, partner_id: parseInt(pid), shop_id: parseInt(account.platform_shop_id) },
-      { headers: { 'Content-Type': 'application/json' } }
-    );
-    if (!data.access_token) throw new Error(JSON.stringify(data));
-    const expiresAt = new Date(Date.now() + (data.expire_in || 14400) * 1000);
-    await db.query(
-      `UPDATE marketplace_accounts SET access_token=$1, refresh_token=COALESCE($2,refresh_token), token_expires_at=$3, updated_at=NOW() WHERE id=$4`,
-      [data.access_token, data.refresh_token || null, expiresAt, account.id]
-    );
-    console.log('[Shopee] Token renovado');
-    return data.access_token;
-  } catch(e) {
-    console.error('[Shopee refresh]', e.response?.data || e.message);
-    return null;
-  }
-}
-
-const SHOPEE_STATUS = {
-  UNPAID: 'pending', READY_TO_SHIP: 'paid', PROCESSED: 'paid',
-  RETRY_SHIP: 'paid', SHIPPED: 'shipped', TO_CONFIRM_RECEIVE: 'shipped',
-  COMPLETED: 'delivered', CANCELLED: 'cancelled', IN_CANCEL: 'cancelled', TO_RETURN: 'cancelled',
-};
-
-// Detecta erros de token inválido da Shopee e marca conta como desconectada no banco.
-// Cobre sandbox→produção, token revogado, partner_id trocado, etc.
-const SHOPEE_INVALID_TOKEN_ERRORS = ['invalid_access_token', 'invalid_acceess_token', 'access_denied', 'token_expired', 'invalid_token'];
-async function shopeeHandleInvalidToken(account, errData) {
-  const errCode = String(errData?.error || errData?.message || errData || '').toLowerCase();
-  const isInvalid = SHOPEE_INVALID_TOKEN_ERRORS.some(e => errCode.includes(e));
-  if (isInvalid) {
-    console.warn(`[Shopee] ⚠ Token inválido para conta ${account.id} (shop ${account.platform_shop_id}) — limpando tokens. Causa: ${errCode}`);
-    await db.query(
-      `UPDATE marketplace_accounts
-       SET access_token=NULL, refresh_token=NULL, token_expires_at=NULL,
-           shop_name=COALESCE(NULLIF(shop_name,''),'Shopee (reconectar)'),
-           updated_at=NOW()
-       WHERE id=$1`,
-      [account.id]
-    ).catch(e => console.error('[Shopee] Erro ao limpar token:', e.message));
-    return true;
-  }
-  return false;
-}
-
-async function fetchShopee(acc, days) {
-  // Renova token se necessário
-  let token = acc.access_token;
-  if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 300000)) {
-    token = await refreshShopeeToken(acc);
-    if (!token) {
-      await shopeeHandleInvalidToken(acc, 'token_expired');
-      throw new Error('TOKEN_INVALID:Token Shopee expirado — reconecte a loja');
+    const day = fday(o.order_date);
+    if (day !== lastDay) {
+      html += `<tr class="date-row"><td colspan="15">${day}</td></tr>`;
+      lastDay = day;
     }
-    acc = { ...acc, access_token: token };
-  }
 
-  // Shopee limita get_order_list a janelas de 15 dias por request.
-  // Para períodos maiores, divide em blocos de 15 dias e concatena.
-  const SHOPEE_WINDOW_DAYS = 15;
-  const nowTs    = Math.floor(Date.now() / 1000);
-  const sinceTs  = Math.floor((Date.now() - days * 86400000) / 1000);
-  const listPath = '/api/v2/order/get_order_list';
+    const luc = o.status === 'cancelled' ? null : parseFloat(o.profit || 0);
+    const marg = luc != null && parseFloat(o.total_amount || 0) > 0
+      ? (luc / parseFloat(o.total_amount || 0) * 100)
+      : 0;
 
-  // Helper: faz GET e detecta token inválido automaticamente
-  async function shopeeGet(path, extraParams) {
-    const params = shopeeParams(path, acc, extraParams);
+    const lbdg = o.status === 'cancelled'
+      ? '<span class="profit-neg">Cancelado</span>'
+      : luc >= 0
+        ? `<span class="profit-pos">${f(luc)} · ${pct(marg)}</span>`
+        : `<span class="profit-neg">${f(luc)}</span>`;
+
+    const img = o.item_image
+      ? `<img class="row-img" src="${o.item_image}" loading="lazy" onerror="this.outerHTML='<span class=row-img-ph>📦</span>'">`
+      : '<span class="row-img-ph">📦</span>';
+
+    const sc = STATUS_PT[o.status] || o.status || '—';
+    const sclr = STATUS_CLR[o.status] || 'var(--txt3)';
+    const sbg = STATUS_BG[o.status] || 'transparent';
+
+    const ftype = o.fulfillment_type === 'full'
+      ? '<span class="type-full">FULL</span>'
+      : '<span class="type-normal">Normal</span>';
+
+    const safeOrder = JSON.stringify(o).replace(/"/g, '&quot;');
+
+    let envioCell = '—';
     try {
-      const { data } = await axios.get(`${SHOPEE_BASE}${path}`, { params });
-      if (data?.error && SHOPEE_INVALID_TOKEN_ERRORS.some(e => String(data.error).toLowerCase().includes(e))) {
-        await shopeeHandleInvalidToken(acc, data);
-        throw new Error(`TOKEN_INVALID:${data.message || data.error}`);
-      }
-      return data;
+      envioCell = `${shipBadge(o)}${labelButton(o)}`;
     } catch(e) {
-      if (e.message?.startsWith('TOKEN_INVALID:')) throw e;
-      const errData = e.response?.data;
-      const invalidated = await shopeeHandleInvalidToken(acc, errData);
-      if (invalidated) throw new Error(`TOKEN_INVALID:${errData?.message || 'Token inválido'}`);
-      throw e;
+      envioCell = '<span class="type-normal">—</span>';
     }
-  }
 
-  // Gera janelas de 15 dias do mais recente para o mais antigo
-  const windows = [];
-  let winEnd = nowTs;
-  while (winEnd > sinceTs) {
-    const winStart = Math.max(sinceTs, winEnd - SHOPEE_WINDOW_DAYS * 86400);
-    windows.push({ from: winStart, to: winEnd });
-    winEnd = winStart;
-  }
-
-  // 1. Busca lista de order_sn em todas as janelas
-  const allSns = [];
-  const seenSns = new Set();
-  for (const win of windows) {
-    let cursor = '';
-    for (let page = 0; page < 20; page++) {
-      const data = await shopeeGet(listPath, {
-        time_range_field: 'create_time', time_from: win.from, time_to: win.to,
-        page_size: 50, cursor,
-        // order_status omitido = retorna TODOS os status (ALL não é valor válido na API Shopee)
-      });
-      const list = data.response?.order_list || [];
-      for (const o of list) {
-        if (!seenSns.has(o.order_sn)) { seenSns.add(o.order_sn); allSns.push(o.order_sn); }
-      }
-      if (!data.response?.more || !list.length) break;
-      cursor = data.response.next_cursor || '';
-    }
-  }
-  console.log(`[Shopee] ${allSns.length} order_sn coletados em ${windows.length} janela(s) de ${SHOPEE_WINDOW_DAYS} dias`);
-
-  if (!allSns.length) return [];
-
-  // 2. Busca detalhes dos pedidos em lotes de 50
-  const detailPath = '/api/v2/order/get_order_detail';
-  const optFields  = [
-    'buyer_user_id', 'buyer_username', 'pay_time', 'item_list',
-    'recipient_address', 'actual_shipping_fee', 'actual_shipping_fee_confirmed',
-    'seller_discount', 'shopee_discount', 'voucher_from_seller', 'voucher_from_shopee',
-    'payment_method', 'checkout_shipping_carrier', 'package_list',
-    'invoice_data', 'reverse_shipping_fee'
-  ].join(',');
-  const allOrders  = [];
-
-  for (let i = 0; i < allSns.length; i += 50) {
-    const batch = allSns.slice(i, i + 50);
-    const data = await shopeeGet(detailPath, {
-      order_sn_list: batch.join(','),
-      response_optional_fields: optFields,
-    });
-    allOrders.push(...(data.response?.order_list || []));
-  }
-
-  // 3. Busca dados financeiros via get_escrow_detail (único endpoint BR que retorna
-  //    commission_fee, service_fee, escrow_amount, buyer_total_amount)
-  //    Os campos ficam dentro de data.response.order_income
-  const escrowPath = '/api/v2/payment/get_escrow_detail';
-  const escrowMap  = {};  // order_sn → order_income
-
-  for (const sn of allSns) {
+    let unitCost = 0;
     try {
-      const data = await shopeeGet(escrowPath, { order_sn: sn });
-      const oi = data?.response?.order_income;
-      if (oi) escrowMap[sn] = oi;
-    } catch (e) {
-      // TOKEN_INVALID deve propagar; outros erros (pedido sem escrow) ignoramos
-      if (e.message?.startsWith('TOKEN_INVALID:')) throw e;
-      console.warn(`[Shopee] get_escrow_detail falhou para ${sn}:`, e.message);
-    }
-  }
-  console.log(`[Shopee] escrow obtido para ${Object.keys(escrowMap).length}/${allSns.length} pedidos`);
+      unitCost = parseFloat((o.unit_cost ?? ((o.total_cost || 0) / (o.quantity || 1))) || 0);
+    } catch(e) {}
 
-  return allOrders.map(o => {
-    const item      = o.item_list?.[0] || {};
-    const status    = SHOPEE_STATUS[o.order_status] || 'paid';
-    const oi        = escrowMap[o.order_sn] || {};  // order_income do escrow
-
-    // Imagem: API BR retorna dentro de image_info.image_url (não item_thumbnail)
-    const itemImage = item.image_info?.image_url || item.item_thumbnail || null;
-
-    // Data: pay_time é null em cancelados/não pagos — usa create_time como fallback
-    const orderTs = o.pay_time || o.create_time || 0;
-    const orderDate = new Date(orderTs * 1000).toISOString();
-
-    // Preço catálogo × qtd = valor de venda
-    const catalogPrice = parseFloat(item.model_discounted_price ?? item.model_original_price ?? item.item_price ?? 0);
-    const qty          = parseInt(item.model_quantity_purchased ?? item.quantity_purchased ?? 1, 10);
-    const totalAmount  = catalogPrice * qty;
-
-    // Dados financeiros: vêm do get_escrow_detail (order_income), não do get_order_detail
-    // actual_shipping_fee_confirmed é boolean (true/false), não um valor numérico!
-    const shippingFee        = parseFloat(oi.actual_shipping_fee ?? o.actual_shipping_fee ?? 0);
-    const buyerPaid          = parseFloat(oi.buyer_total_amount ?? 0);
-    const commission         = parseFloat(oi.commission_fee ?? 0);
-    const serviceFee         = parseFloat(oi.service_fee ?? 0);
-    const platformFee        = commission + serviceFee;
-    const escrow             = parseFloat(oi.escrow_amount ?? 0);
-    const reverseShippingFee = parseFloat(oi.reverse_shipping_fee ?? o.reverse_shipping_fee ?? 0);
-    const sellerDiscount     = parseFloat(oi.voucher_from_seller ?? o.seller_discount ?? o.voucher_from_seller ?? 0);
-    const shopeeDiscount     = parseFloat(oi.voucher_from_shopee ?? o.shopee_discount ?? o.voucher_from_shopee ?? 0);
-
-    return {
-      id:                   o.order_sn,
-      platform:             'shopee',
-      platform_order_id:    o.order_sn,
-      shop_name:            acc.shop_name,
-      fulfillment_type:     'normal',
-      status,
-      buyer_name:           o.buyer_username || '',
-      total_amount:         totalAmount,          // preço catálogo × qtd (valor de venda)
-      paid_amount:          buyerPaid || totalAmount, // o que o cliente pagou (fallback p/ totalAmount)
-      platform_fee:         platformFee,          // commission_fee + service_fee (do escrow)
-      shipping_fee:         shippingFee,          // frete real do vendedor (do escrow)
-      reverse_shipping_fee: reverseShippingFee,   // frete devolução
-      tax_amount:           0,                    // Shopee BR não retém imposto — usuário configura
-      discount_amount:      sellerDiscount,
-      shopee_discount:      shopeeDiscount,
-      shopee_escrow:        escrow,               // valor real depositado na conta (do escrow)
-      shopee_commission:    commission,
-      shopee_service_fee:   serviceFee,
-      quantity:             qty,
-      order_date:           orderDate,
-      // Produto
-      item_title:           item.item_name || 'Produto Shopee',
-      item_image:           itemImage,
-      item_sku:             item.model_sku || item.item_sku || '',
-      item_id:              String(item.item_id || ''),
-      model_id:             String(item.model_id || ''),
-      model_name:           item.model_name || '',
-      // Pagamento / envio
-      payment_method:       o.payment_method || '',
-      shipping_type:        o.checkout_shipping_carrier || '',
-      tracking_url:         '',
-      // Peso (útil pra cálculo de frete)
-      weight_kg:            parseFloat(item.weight ?? 0),
+    const metric = (field, type, fallback) => {
+      try { return editableMetric(o, field, type, fallback); }
+      catch(e) { return `<span style="color:var(--txt3)">${type === 'percent' ? pct(0) : f(fallback || 0)}</span>`; }
     };
+
+    html += `<tr onclick="openOrder('${safeOrder}')">
+      <td data-label="Foto">${img}</td>
+
+      <td data-label="Produto" style="max-width:160px">
+        <div style="font-weight:600;color:var(--txt);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px">
+          ${o.item_title || '—'}
+        </div>
+        <div style="font-size:9px;color:var(--txt3);margin-top:2px">
+          ${PBADGE[o.platform] || ''} ${o.platform_order_id || ''}
+        </div>
+      </td>
+
+      <td data-label="Conta" style="font-size:10px;color:var(--txt2)">${o.shop_name || '—'}</td>
+      <td data-label="SKU" style="color:var(--p3);font-weight:700;font-size:10px">${o.item_sku || '—'}</td>
+      <td data-label="Data" style="font-size:9px;white-space:nowrap;color:var(--txt3)">${fdt(o.order_date)}</td>
+
+      <td data-label="Status">
+        <span style="font-size:9px;font-weight:700;padding:2px 8px;border-radius:20px;background:${sbg};color:${sclr}">
+          ${sc}
+        </span>
+      </td>
+
+      <td data-label="Envio">${envioCell}</td>
+      <td data-label="Tipo">${ftype}</td>
+      <td data-label="Qtde" style="color:var(--txt2)">${o.quantity || 1}</td>
+
+      <td data-label="Total" style="font-weight:700">${f(o.total_amount)}</td>
+      <td data-label="Tarifa">${metric('fee_pct','percent',o.platform_fee)}</td>
+      <td data-label="Frete">${metric('shipping_fee','money',o.shipping_fee)}</td>
+      <td data-label="Imposto">${metric('tax_pct','percent',o.tax_amount)}</td>
+      <td data-label="Custo">${metric('cost','money',unitCost)}</td>
+
+      <td data-label="Lucro">${lbdg}</td>
+      <td data-label="NF" style="white-space:nowrap">${o.status!=='cancelled'&&o.fulfillment_type!=='full'?`<button onclick="event.stopPropagation();nfEmitirPedido('${o.id}')" title="Emitir NF de saída" style="background:${NF_EMITIDAS&&NF_EMITIDAS[o.id]?'rgba(16,185,129,.1)':'rgba(2,132,199,.1)'};border:1px solid ${NF_EMITIDAS&&NF_EMITIDAS[o.id]?'rgba(16,185,129,.25)':'rgba(2,132,199,.25)'};border-radius:7px;padding:3px 8px;cursor:pointer;font-size:10px;font-weight:700;color:${NF_EMITIDAS&&NF_EMITIDAS[o.id]?'var(--green2)':'var(--blue2)'}"><i class="ti ti-file-invoice"></i> ${NF_EMITIDAS&&NF_EMITIDAS[o.id]?'NF ✓':'NF'}</button>`:'<span style="font-size:10px;color:var(--txt3)">—</span>'}</td>
+    </tr>`;
   });
+
+  document.getElementById('orders-body').innerHTML = html;
+  document.getElementById('orders-count').textContent = total + ' pedidos';
+  document.getElementById('page-info').textContent = PAGE + ' de ' + pages;
 }
 
-// ── FETCH MAGALU — estrutura real confirmada pelo debug ──
-async function refreshMagaluToken(account) {
-  try {
-    if (!account.refresh_token) throw new Error('Conta Magalu sem refresh_token');
+function renderProds(){
+  const list=document.getElementById('prod-list');
+  const src=PTAB==='canceladas'?FILTERED.filter(o=>o.status==='cancelled'):FILTERED.filter(o=>o.status!=='cancelled');
+  const map={};
+  src.forEach(o=>{const k=o.item_title||o.shop_name||o.platform;const v=PTAB==='fat'?parseFloat(o.total_amount||0):PTAB==='lucro'?parseFloat(o.profit||0):1;if(!map[k])map[k]={t:k,img:o.item_image,v:0,c:0};map[k].v+=v;map[k].c++;});
+  const arr=Object.values(map).sort((a,b)=>b.v-a.v);
+  const tot=arr.reduce((s,x)=>s+x.v,0)||1;
+  const colors=['#8b5cf6','#38bdf8','#10b981','#fb923c','#fbbf24','#f87171'];
+  if(!arr.length){list.innerHTML='<div class="empty"><i class="ti ti-package-off"></i><p>Sem dados</p></div>';return;}
+  list.innerHTML=arr.slice(0,5).map((item,i)=>{
+    const p=(item.v/tot*100).toFixed(1),color=colors[i%colors.length];
+    const circ=Math.PI*2*14,dash=(p/100)*circ;
+    const img=item.img?`<img class="prod-img" src="${item.img}" loading="lazy" onerror="this.outerHTML='<div class=prod-img-ph>📦</div>'">`:'<div class="prod-img-ph">📦</div>';
+    return`<div class="prod-item">
+      <svg width="38" height="38" viewBox="0 0 36 36"><circle cx="18" cy="18" r="14" fill="none" stroke="var(--bg5)" stroke-width="5"/>
+        <circle cx="18" cy="18" r="14" fill="none" stroke="${color}" stroke-width="5" stroke-dasharray="${dash} ${circ-dash}" stroke-dashoffset="${circ/4}" transform="rotate(-90 18 18)"/>
+        <text x="18" y="22" text-anchor="middle" fill="${color}" font-size="8" font-weight="700">${p}%</text></svg>
+      ${img}
+      <div class="prod-title" title="${item.t}">${item.t}</div>
+      <div class="prod-right"><div class="v" style="color:${color}">${PTAB==='vendas'||PTAB==='canceladas'?item.c+' un.':f(item.v)}</div><div class="p">${p}%</div></div>
+    </div>`;
+  }).join('');
+}
 
-    const { data } = await axios.post('https://id.magalu.com/oauth/token',
-      new URLSearchParams({
-        grant_type: 'refresh_token',
-        refresh_token: account.refresh_token,
-        client_id: process.env.MAGALU_CLIENT_ID,
-        client_secret: process.env.MAGALU_CLIENT_SECRET
-      }),
-      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
-    );
+/* ── Chart: period state ── */
+window._SS_CHART_CACHE  = window._SS_CHART_CACHE  || {};
+window._SS_CHART_PERIOD = window._SS_CHART_PERIOD ?? 0; // 0 = mês atual
 
-    await db.query(
-      `UPDATE marketplace_accounts
-       SET access_token=$1, refresh_token=COALESCE($2, refresh_token), token_expires_at=$3, updated_at=NOW()
-       WHERE id=$4`,
-      [data.access_token, data.refresh_token || null, new Date(Date.now() + (data.expires_in || 7200) * 1000), account.id]
-    );
+function ssChartSetPeriod(p){
+  window._SS_CHART_PERIOD=p;
+  document.querySelectorAll('.ctab').forEach(b=>{
+    b.classList.toggle('active',+b.dataset.p===p);
+  });
+  ssDrawDailyChart();
+}
 
-    console.log('[Magalu] 🔄 Token renovado');
-    return data.access_token;
-  } catch(e) {
-    const status = e.response?.status;
-    const body = e.response?.data || e.message;
-    console.error('[Magalu Refresh]', status || '', body);
+function ssDrawDailyChart(){
+  const canvas=document.getElementById('ss-daily-canvas');
+  const tip=document.getElementById('ss-chart-tip');
+  const totalEl=document.getElementById('ss-chart-total');
+  if(!canvas)return;
+  const period=window._SS_CHART_PERIOD??0; // 0 = mês atual
+  const brl=v=>Number(v).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
 
-    // 400/401 normalmente significa refresh_token inválido/expirado ou app/scope diferente.
-    // Limpa os tokens para parar o loop de erro; depois é só reconectar Magalu no painel.
-    if (status === 400 || status === 401 || String(body).includes('refresh')) {
-      await db.query(
-        `UPDATE marketplace_accounts
-         SET access_token=NULL, refresh_token=NULL, token_expires_at=NULL, updated_at=NOW()
-         WHERE id=$1`,
-        [account.id]
-      ).catch(() => {});
+  /* ── Agrupa pedidos em buckets ── */
+  const buildBuckets=(orders,addRevItems=[])=>{
+    const ok=(orders||[]).filter(o=>o.status!=='cancelled'&&o.status!=='pending');
+    const hoje=new Date();
+    let buckets=[];
+
+    // period=0 → mês atual (dia 1 até hoje)
+    const isMonthMode=period===0;
+    const dailyDays=isMonthMode?hoje.getDate():period;
+
+    if(isMonthMode||period<=30){
+      /* Buckets diários */
+      for(let i=dailyDays-1;i>=0;i--){
+        const d=new Date(hoje);d.setDate(hoje.getDate()-i);d.setHours(0,0,0,0);
+        const label=d.toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'});
+        buckets.push({label,fat:0,lucro:0,vendas:0,orders:[],addrevs:[]});
+      }
+      ok.forEach(o=>{
+        const d=new Date(o.order_date);
+        if(isMonthMode&&(d.getMonth()!==hoje.getMonth()||d.getFullYear()!==hoje.getFullYear()))return;
+        const label=d.toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'});
+        const slot=buckets.find(b=>b.label===label);
+        if(!slot)return;
+        slot.fat+=parseFloat(o.total_amount||0);
+        slot.lucro+=parseFloat(o.profit||0);
+        slot.vendas++;slot.orders.push(o);
+      });
+      // Distribui rendimentos extras pelo dia exato do starts_at
+      addRevItems.forEach(r=>{
+        if(!r.starts_at)return;
+        const dateStr=String(r.starts_at).slice(0,10); // yyyy-mm-dd seguro
+        const d=new Date(dateStr+'T12:00:00');
+        if(!Number.isFinite(d.getTime()))return;
+        const label=d.toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'});
+        const slot=buckets.find(b=>b.label===label);
+        if(!slot)return;
+        slot.fat+=parseFloat(r.amount||0);
+        slot.addrevs.push(r);
+      });
+    } else {
+      /* Buckets mensais */
+      const numMeses=period<=90?3:12;
+      const map={};
+      ok.forEach(o=>{
+        const d=new Date(o.order_date);
+        const sk=d.getFullYear()*100+d.getMonth();
+        const label=d.toLocaleDateString('pt-BR',{month:'short',year:'2-digit'})
+          .replace('. ','/').replace('.','').replace(' /','/');
+        if(!map[sk])map[sk]={label,sk,fat:0,lucro:0,vendas:0,orders:[],addrevs:[]};
+        map[sk].fat+=parseFloat(o.total_amount||0);
+        map[sk].lucro+=parseFloat(o.profit||0);
+        map[sk].vendas++;map[sk].orders.push(o);
+      });
+      // Monta buckets mensais (garante todos os meses, com ou sem pedidos)
+      for(let i=numMeses-1;i>=0;i--){
+        const d=new Date(hoje.getFullYear(),hoje.getMonth()-i,1);
+        const sk=d.getFullYear()*100+d.getMonth();
+        const label=d.toLocaleDateString('pt-BR',{month:'short',year:'2-digit'})
+          .replace('. ','/').replace('.','').replace(' /','/');
+        if(!map[sk])map[sk]={label,sk,fat:0,lucro:0,vendas:0,orders:[],addrevs:[]};
+        buckets.push(map[sk]);
+      }
+      // Rendimentos extras no mês exato do starts_at
+      addRevItems.forEach(r=>{
+        if(!r.starts_at)return;
+        const dateStr=String(r.starts_at).slice(0,10);
+        const d=new Date(dateStr+'T12:00:00');
+        if(!Number.isFinite(d.getTime()))return;
+        const sk=d.getFullYear()*100+d.getMonth();
+        const slot=buckets.find(b=>b.sk===sk);
+        if(!slot)return; // fora do range visível
+        slot.fat+=parseFloat(r.amount||0);
+        slot.addrevs.push(r);
+      });
     }
-    return null;
-  }
-}
-
-async function fetchMagalu(acc, days) {
-  let token = acc.access_token;
-  if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date()) {
-    token = await refreshMagaluToken(acc);
-    if (!token) throw new Error('Token Magalu expirado');
-  }
-
-  const since = new Date(Date.now() - days * 86400000).toISOString();
-  const allOrders = [];
-  let offset = 0;
-  const limit = 50;
-
-  // Pagina todos os resultados
-  while (true) {
-    const { data } = await axios.get('https://api.magalu.com/seller/v1/orders', {
-      params: { created_at__gte: since, _limit: limit, _offset: offset, _sort: "created_at:desc" },
-      headers: { Authorization: `Bearer ${token}` }
-    });
-
-    const page = data.results || [];
-    allOrders.push(...page);
-
-    console.log(`[Magalu] página offset=${offset}: ${page.length} pedidos`);
-
-    // Para se não tem próxima página
-    if (!data.meta?.links?.next || page.length < limit) break;
-    offset += limit;
-    if (offset > 500) break; // segurança
-  }
-
-  console.log(`[Magalu] Total: ${allOrders.length} pedidos`);
-
-  const statusMap = {
-    new:        'pending',    // aguardando pagamento
-    approved:   'paid',       // aprovado / pago
-    processing: 'paid',       // em processamento
-    invoiced:   'invoiced',   // NF aprovada, aguardando envio (era 'shipped' — errado)
-    shipped:    'shipped',    // em rota de entrega
-    delivered:  'delivered',  // entregue
-    finished:   'delivered',  // finalizado
-    cancelled:  'cancelled',  // cancelado
-    canceled:   'cancelled',
+    return buckets;
   };
 
-  const brlFmt = v => 'R$' + Number(v).toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  /* ── Renderiza canvas ── */
+  let _chartBuckets=[];
+  const render=(orders,addRevItems=[])=>{
+    const buckets=buildBuckets(orders,addRevItems);
+    _chartBuckets=buckets;
+    const total=buckets.reduce((s,b)=>s+b.fat,0);
+    if(totalEl)totalEl.textContent=brl(total);
+    /* Atualiza MTD no mobile hero quando gráfico está em modo Mês */
+    if(period===0){const mtdEl=document.getElementById('mh-mtd-val');if(mtdEl)mtdEl.textContent=brl(total);}
 
-  return allOrders
-    // Filtra pedidos de teste da Magalu
-    .filter(o => !MAGALU_TEST_DOCUMENTS.includes(o.customer?.document_number))
-    .map(o => {
-      const delivery = o.deliveries?.[0] || {};
-      const item     = delivery.items?.[0] || {};
-      const info     = item.info || {};
-      const norm     = o.amounts?.normalizer || 100;
-      const dNorm    = delivery.amounts?.normalizer || norm;
+    requestAnimationFrame(()=>{
+      const wrap=canvas.parentElement;
+      const cw=wrap.clientWidth||400;
+      const ch=wrap.clientHeight||110;
+      const dpr=window.devicePixelRatio||1;
+      canvas.width=cw*dpr; canvas.height=ch*dpr;
+      canvas.style.width=cw+'px'; canvas.style.height=ch+'px';
+      const ctx=canvas.getContext('2d');
+      ctx.scale(dpr,dpr);
 
-      // ── Amounts order-level ──
-      const paidByCustomer     = (o.amounts?.total             || 0) / norm;
-      const uNorm              = item.unit_price?.normalizer || norm;
-      const unitPriceCatalog   = (item.unit_price?.value      || 0) / uNorm;
-      const qty                = item.quantity || 1;
-      // total_amount = preço de venda real (catálogo × qtd), não o valor pago após desconto
-      const total              = unitPriceCatalog > 0 ? unitPriceCatalog * qty : paidByCustomer;
-      const orderCommission    = (o.amounts?.commission?.total || 0) / norm;
-      const orderFreight       = (o.amounts?.freight?.total    || 0) / norm;
-      const orderDiscount      = (o.amounts?.discount?.total   || 0) / norm;
-      const orderTax           = (o.amounts?.tax?.total        || 0) / norm;
-
-      // ── Amounts delivery-level (mais específico por seller) ──
-      const deliveryCommission = (delivery.amounts?.commission?.total || 0) / dNorm;
-      const deliveryFreight    = (delivery.amounts?.freight?.total    || 0) / dNorm;
-      const deliveryDiscount   = (delivery.amounts?.discount?.total   || 0) / dNorm;
-
-      // Tarifa fixa da plataforma (sempre R$5 — diferença entre order e delivery commission)
-      const tarifaFixa = Math.max(0, orderCommission - deliveryCommission);
-
-      // Desconto total aplicado no pedido
-      const discount = Math.max(orderDiscount, deliveryDiscount);
-
-      // Base de cálculo da comissão Magalu (o que usam pra calcular o %)
-      // Fórmula derivada: delivery_commission / 0.18 (taxa padrão Magalu)
-      // Isso captura o subsídio da Magalu em descontos (ex: desconto à vista pago pela Magalu)
-      const MAGALU_COMMISSION_RATE = 0.18;
-      const commissionBase = deliveryCommission > 0
-        ? Math.round(deliveryCommission / MAGALU_COMMISSION_RATE * 100) / 100
-        : (total - discount); // fallback se não tem comissão
-
-      // Valor líquido real do vendedor (o que a Magalu deposita na conta)
-      // = valor pago pelo cliente - comissão total (inclui tarifa fixa)
-      const magaluSellerNet = paidByCustomer - orderCommission;
-
-      // Usa o máximo entre order e delivery (mais conservador)
-      const commission = Math.max(orderCommission, deliveryCommission);
-      const freight    = Math.max(orderFreight, deliveryFreight);
-
-      // ── Pagamento ──
-      const payment       = o.payments?.[0] || {};
-      const paymentMethod = payment.method || payment.type || '';
-      const paymentBrand  = payment.brand || payment.method_brand || '';
-      const installments  = payment.installments || 1;
-
-      // ── Envio ──
-      const trackingUrl   = delivery.shipping?.tracking?.url || delivery.shipping?.tracking_url || '';
-      const shippedAt     = delivery.shipping?.shipped_at || '';
-      const shippingType  = delivery.shipping?.provider?.extras?.shipping_type || '';
-      const isFull = delivery.shipping?.provider?.extras?.is_fulfillment === true;
-
-      // ── NF-e ──
-      const invoiceKey      = delivery.invoices?.[0]?.key || '';
-      const invoiceIssuedAt = delivery.invoices?.[0]?.issued_at || '';
-
-      // ── Status ──
-      const deliveryStatus = (delivery.status || '').toLowerCase();
-      const orderStatus    = (o.status || '').toLowerCase();
-      const resolvedStatus = deliveryStatus || orderStatus;
-      const status = statusMap[resolvedStatus] || statusMap[orderStatus] || 'paid';
-      const image = info.images?.[0]?.url || null;
-
-      const magaluCostInfo = [
-        `Comissão: ${brlFmt(commission)}`,
-        `Tarifa: ${brlFmt(tarifaFixa)}`,
-        `Frete: ${brlFmt(freight)}`,
-        `Desconto total: ${brlFmt(discount)}`,
-        `Base comissão: ${brlFmt(commissionBase)}`,
-        `Líquido estimado: ${brlFmt(magaluSellerNet)}`,
-      ].join(' | ');
-
-      return {
-        id:               String(o.code || o.id),
-        platform:         'magalu',
-        platform_order_id:String(o.code || o.id),
-        shop_name:        delivery.seller?.name || acc.shop_name,
-        fulfillment_type: isFull ? 'full' : 'normal',
-        status,
-        delivery_id:      delivery.id || null,
-        shipping_id:      delivery.id || null,
-        magalu_delivery_id: delivery.id || null,
-        magalu_channel:   o.channel || o.sales_channel || delivery.channel || 'MagazineLuiza',
-        magalu_label_available: Boolean(delivery.id) && !isFull && !['cancelled','delivered'].includes(status),
-        buyer_name:       o.customer?.name || '',
-        total_amount:     total,            // preço de catálogo × qtd (valor de venda real)
-        paid_amount:      paidByCustomer,  // valor pago pelo cliente (após desconto)
-        platform_fee:     commission,      // comissão + tarifa (order level = max)
-        shipping_fee:     freight,
-        tax_amount:       orderTax,
-        discount_amount:  discount,        // desconto total aplicado
-        quantity:         qty,
-        order_date:       o.created_at || o.purchased_at || new Date().toISOString(),
-        item_title:       info.name || info.description || 'Produto Magalu',
-        item_image:       image,
-        item_sku:         info.sku || '',
-        // Pagamento
-        payment_method:   paymentMethod,
-        payment_brand:    paymentBrand,
-        installments,
-        // Envio
-        tracking_url:     trackingUrl,
-        shipped_at:       shippedAt,
-        shipping_type:    shippingType,
-        // NF-e
-        invoice_key:      invoiceKey,
-        invoice_issued_at: invoiceIssuedAt,
-        // Breakdown financeiro Magalu
-        magalu_cost_info:           magaluCostInfo,
-        magalu_commission_order:    orderCommission,
-        magalu_commission_delivery: deliveryCommission,
-        magalu_freight_order:       orderFreight,
-        magalu_freight_delivery:    deliveryFreight,
-        magalu_tarifa_fixa:         tarifaFixa,
-        magalu_discount:            discount,
-        magalu_commission_base:     commissionBase,
-        magalu_seller_net:          magaluSellerNet,
-        magalu_total_retained:      commission + freight,
+      const maxVal=Math.max(...buckets.map(b=>b.fat),1);
+      const fmtY=v=>{
+        if(v>=1000000)return 'R$'+(v/1000000).toFixed(1).replace('.',',')+'M';
+        if(v>=1000)return 'R$'+Math.round(v/1000)+'k';
+        return 'R$'+Math.round(v);
       };
+
+      /* Padding: esquerda reservada para eixo Y */
+      const pad={t:8,b:24,l:46,r:6};
+      const plotW=cw-pad.l-pad.r;
+      const plotH=ch-pad.t-pad.b;
+
+      /* Grid horizontal + labels Y */
+      const ySteps=3;
+      ctx.font='8.5px Inter,sans-serif';
+      ctx.textAlign='right';
+      for(let i=0;i<=ySteps;i++){
+        const val=maxVal/ySteps*i;
+        const y=pad.t+plotH*(1-i/ySteps);
+        ctx.strokeStyle='rgba(255,255,255,.05)';
+        ctx.lineWidth=1;
+        ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(cw-pad.r,y);ctx.stroke();
+        ctx.fillStyle='rgba(148,163,184,.45)';
+        ctx.fillText(fmtY(val),pad.l-4,y+3);
+      }
+
+      /* Barras */
+      const n=buckets.length;
+      const gap=n>20?2:n>10?4:6;
+      const barW=Math.max((plotW-(n-1)*gap)/n,4);
+      const radius=Math.min(4,barW/2);
+
+      buckets.forEach((d,i)=>{
+        const x=pad.l+i*(barW+gap);
+        /* Track */
+        ctx.fillStyle='rgba(255,255,255,.03)';
+        roundRect(ctx,x,pad.t,barW,plotH,radius);ctx.fill();
+        /* Barra azul */
+        if(d.fat>0){
+          const bh=Math.max(d.fat/maxVal*plotH,3);
+          const y=pad.t+plotH-bh;
+          const grad=ctx.createLinearGradient(0,y,0,y+bh);
+          grad.addColorStop(0,'#a78bfa');
+          grad.addColorStop(1,'#6d28d9');
+          ctx.fillStyle=grad;
+          roundRect(ctx,x,y,barW,bh,radius);ctx.fill();
+        }
+      });
+
+      /* Labels X */
+      const showEvery=n>20?Math.ceil(n/7):n>10?Math.ceil(n/6):1;
+      ctx.fillStyle='rgba(148,163,184,.6)';
+      ctx.font=`${Math.max(7.5,Math.min(9,barW*0.65))}px Inter,sans-serif`;
+      ctx.textAlign='center';
+      buckets.forEach((d,i)=>{
+        if(i%showEvery!==0&&i!==n-1)return;
+        const x=pad.l+i*(barW+gap)+barW/2;
+        ctx.fillText(d.label,x,ch-5);
+      });
+
+      /* Hover tooltip */
+      canvas.onmousemove=function(e){
+        const rect=canvas.getBoundingClientRect();
+        const mx=e.clientX-rect.left;
+        let found=null;
+        buckets.forEach((d,i)=>{const x=pad.l+i*(barW+gap);if(mx>=x&&mx<=x+barW)found={d,i};});
+        if(!found){tip.style.display='none';return;}
+        const {d,i}=found;
+        const addRevDayTotal=(d.addrevs||[]).reduce((s,r)=>s+parseFloat(r.amount||0),0);
+        const addRevNames=(d.addrevs||[]).map(r=>r.name).join(', ');
+        const acum=period===0?buckets.slice(0,i+1).reduce((s,b)=>s+b.fat,0):0;
+        tip.innerHTML=`
+          <div style="font-size:9px;color:var(--txt3);text-transform:uppercase;letter-spacing:.5px;font-weight:800;margin-bottom:6px">${d.label}</div>
+          <div style="display:flex;flex-direction:column;gap:4px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:16px">
+              <span style="font-size:9px;color:var(--txt3);font-weight:600">Faturado</span>
+              <span style="font-size:13px;font-weight:800;color:var(--p3)">${brl(d.fat)}</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:16px">
+              <span style="font-size:9px;color:var(--txt3);font-weight:600">Lucro líquido</span>
+              <span style="font-size:12px;font-weight:800;color:${d.lucro>=0?'#34d399':'#f87171'}">${brl(d.lucro)}</span>
+            </div>
+            ${period===0?`<div style="display:flex;justify-content:space-between;align-items:center;gap:16px;margin-top:1px">
+              <span style="font-size:9px;color:var(--txt3);font-weight:600">Acumulado mês</span>
+              <span style="font-size:11px;font-weight:700;color:var(--p3);opacity:.75">${brl(acum)}</span>
+            </div>`:''}
+            ${addRevDayTotal>0?`<div style="margin-top:2px;padding-top:4px;border-top:1px solid rgba(255,255,255,.06)">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+                <span style="font-size:9px;color:var(--green2);font-weight:600">💰 Rendimento extra</span>
+                <span style="font-size:11px;font-weight:700;color:var(--green2)">+${brl(addRevDayTotal)}</span>
+              </div>
+              ${addRevNames?`<div style="font-size:8px;color:var(--txt3);margin-top:2px;max-width:180px;white-space:normal">${addRevNames}</div>`:''}
+            </div>`:''}
+          </div>
+        `;
+        tip.style.display='block';
+        const tipW=tip.offsetWidth;
+        let left=pad.l+i*(barW+gap)+barW/2-tipW/2;
+        if(left<4)left=4;if(left+tipW>cw-4)left=cw-tipW-4;
+        tip.style.left=left+'px';
+        tip.style.top=(pad.t+4)+'px';
+      };
+      canvas.onmouseleave=()=>{tip.style.display='none';};
     });
-}
+  };
 
-// ── ENRIQUECE COM CUSTOS ──
-async function enrichWithCosts(orders, userId) {
-  const { rows } = await db.query(
-    `SELECT sku, COALESCE(platform,'geral') AS platform, cost, tax_pct, fee_pct, shipping_fee
-     FROM products
-     WHERE user_id=$1 AND is_active=true`,
-    [userId]
-  );
-
-  const productMap = {};
-  rows.forEach(p => {
-    const sku = normSku(p.sku);
-    const platform = normPlatform(p.platform);
-    productMap[`${platform}:${sku}`] = {
-      cost: parseFloat(p.cost || 0),
-      tax_pct: p.tax_pct === null || p.tax_pct === undefined ? null : parseFloat(p.tax_pct),
-      fee_pct: p.fee_pct === null || p.fee_pct === undefined ? null : parseFloat(p.fee_pct),
-      shipping_fee: p.shipping_fee === null || p.shipping_fee === undefined ? null : parseFloat(p.shipping_fee)
-    };
-  });
-
-  const returnRows = await db.query(`SELECT platform, platform_order_id, SUM(return_total_cost) AS return_total_cost FROM marketplace_returns WHERE user_id=$1 GROUP BY platform, platform_order_id`, [userId]);
-  const returnMap = {};
-  for (const r of returnRows.rows) returnMap[`${normPlatform(r.platform)}:${String(r.platform_order_id||'')}`] = parseFloat(r.return_total_cost || 0);
-
-  return orders.map(o => {
-    const sku = normSku(o.item_sku);
-    const platform = normPlatform(o.platform);
-    const product = productMap[`${platform}:${sku}`] || productMap[`geral:${sku}`] || { cost: 0, tax_pct: null, fee_pct: null, shipping_fee: null };
-    const defaults = productMap[`${platform}:__DEFAULT__`] || productMap[`geral:__DEFAULT__`] || { tax_pct: null, fee_pct: null, shipping_fee: null };
-
-    const unit_cost  = parseFloat(product.cost || 0);
-    // Primeiro tenta o SKU. Se estiver vazio, usa o padrão da plataforma.
-    const tax_pct    = product.tax_pct === null || product.tax_pct === undefined ? defaults.tax_pct : product.tax_pct;
-    const fee_pct    = product.fee_pct === null || product.fee_pct === undefined ? defaults.fee_pct : product.fee_pct;
-    const ship_fixed = product.shipping_fee === null || product.shipping_fee === undefined ? defaults.shipping_fee : product.shipping_fee;
-    const total_cost = unit_cost * (o.quantity || 1);
-    const total_amount = parseFloat(o.total_amount || 0);
-    // Para Magalu: paid_amount = valor NF (o que cliente pagou após desconto).
-    // total_amount = preço catálogo (para exibição de faturamento). Imposto é sobre NF.
-    const paid_amount = platform === 'magalu'
-      ? parseFloat(o.paid_amount || o.total_amount || 0)
-      : total_amount;
-    const platform_fee = fee_pct === null ? parseFloat(o.platform_fee || 0) : (paid_amount * fee_pct / 100);
-    // ML e Magalu: frete vem direto da API (valor real cobrado). Não usa ship_fixed do cadastro.
-    const shipping_fee = (platform === 'mercadolivre' || platform === 'magalu')
-      ? parseFloat(o.shipping_fee || 0)
-      : (ship_fixed === null ? parseFloat(o.shipping_fee || 0) : (parseFloat(ship_fixed || 0) * (o.quantity || 1)));
-    // Imposto sobre o valor da NF (paid_amount), não sobre o preço catálogo
-    const tax_base = platform === 'magalu' ? paid_amount : total_amount;
-    const tax_amount = tax_pct === null ? parseFloat(o.tax_amount || 0) : (tax_base * tax_pct / 100);
-    // Para Magalu: usa o líquido real (commission_base - order_commission) que já desconta
-    // comissão%, tarifa fixa e subsídios de desconto da Magalu. Para outros: cálculo padrão.
-    const magalu_seller_net = o.magalu_seller_net != null ? parseFloat(o.magalu_seller_net) : null;
-    const shopee_escrow     = o.shopee_escrow     != null ? parseFloat(o.shopee_escrow)     : null;
-    const net_revenue = (platform === 'magalu' && magalu_seller_net !== null)
-      ? magalu_seller_net - tax_amount
-      : (platform === 'shopee' && shopee_escrow !== null)
-        ? shopee_escrow - tax_amount
-        : total_amount - platform_fee - shipping_fee - tax_amount;
-    const return_total_cost = returnMap[`${platform}:${String(o.platform_order_id || o.id || '')}`] || 0;
-    const profit     = o.status === 'cancelled' ? 0 : (net_revenue - total_cost - return_total_cost);
-    const margin     = o.total_amount > 0 ? (profit / o.total_amount * 100) : 0;
-
-    return {
-      ...o,
-      unit_cost,
-      tax_pct,
-      fee_pct,
-      platform_fee,
-      shipping_fee,
-      tax_amount,
-      total_cost,
-      return_total_cost,
-      net_revenue,
-      profit,
-      profit_margin_pct: margin
-    };
+  /* ── Busca dados (com cache por período) ── */
+  if(!window._SS_CHART_CACHE)window._SS_CHART_CACHE={};
+  if(totalEl)totalEl.textContent='Carregando...';
+  // period=0 → mês atual: busca 31 dias para garantir o mês cheio
+  const apiPeriod=period===0?31:period;
+  const ordersPromise=window._SS_CHART_CACHE[period]
+    ?Promise.resolve(window._SS_CHART_CACHE[period])
+    :api(`/api/orders?period=${apiPeriod}${PLAT?'&platform='+PLAT:''}`).then(({data})=>{window._SS_CHART_CACHE[period]=data||[];return data||[];}).catch(()=>ALL);
+  // Busca todos os rendimentos extras com starts_at para distribuir por dia
+  const _fetchAddRevItems=()=>{
+    const fetcher=typeof ssFetchJson==='function'
+      ?ssFetchJson(`${API}/api/additional-revenues/all`)
+      :api('/api/additional-revenues/all').then(r=>r.data||r);
+    return fetcher.then(j=>{
+      const items=Array.isArray(j)?j:Array.isArray(j.items)?j.items:[];
+      return items;
+    }).catch(e=>{console.warn('[Chart] addRevItems erro:',e.message);return[];});
+  };
+  const addRevPromise=_fetchAddRevItems();
+  Promise.all([ordersPromise,addRevPromise]).then(([orders,addRevItems])=>{
+    render(orders,addRevItems);
   });
 }
-function monthKeyFromDate(d) {
-  const dt = new Date(d);
-  if (Number.isNaN(dt.getTime())) return null;
-  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-01`;
+
+function roundRect(ctx,x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.lineTo(x+w-r,y);
+  ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+  ctx.lineTo(x+w,y+h);
+  ctx.lineTo(x,y+h);
+  ctx.lineTo(x,y+r);
+  ctx.quadraticCurveTo(x,y,x+r,y);
+  ctx.closePath();
 }
 
-function lastNMonthStarts(n = 5) {
-  // Retorna somente meses FECHADOS, nunca o mês atual.
-  // Exemplo: se hoje está em maio e n=5 => dez, jan, fev, mar, abr.
-  const now = new Date();
-  const currentMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-  const out = [];
-  for (let i = n; i >= 1; i--) {
-    const d = new Date(Date.UTC(currentMonthStart.getUTCFullYear(), currentMonthStart.getUTCMonth() - i, 1));
-    out.push(d.toISOString().slice(0, 10));
+function openOrder(oJson){
+  const o=JSON.parse(oJson.replace(/&quot;/g,'"'));
+  openMo('mo-order');
+  const luc=o.status==='cancelled'?null:parseFloat(o.profit||0);
+  const marg=luc!=null&&o.total_amount>0?(luc/o.total_amount*100):0;
+  document.getElementById('od-title').textContent='Pedido '+(o.platform_order_id||'—');
+  document.getElementById('od-sub').textContent=(o.shop_name||'—')+' · '+(o.platform||'').toUpperCase();
+  const img=o.item_image?`<img class="od-img-big" src="${o.item_image}" onerror="this.outerHTML='<div class=od-img-big-ph>📦</div>'">`:'<div class="od-img-big-ph">📦</div>';
+  const sc=STATUS_PT[o.status]||o.status;const sclr=STATUS_CLR[o.status]||'var(--txt3)';const sbg=STATUS_BG[o.status]||'transparent';
+  document.getElementById('od-body').innerHTML=`
+    <div style="display:flex;gap:14px;background:var(--bg3);border:1px solid var(--border);border-radius:14px;padding:14px;">${img}
+      <div style="flex:1"><div style="font-size:14px;font-weight:700;margin-bottom:8px;line-height:1.4">${o.item_title||'—'}</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">${PBADGE[o.platform]||''}
+          <span style="font-size:9px;font-weight:700;padding:2px 8px;border-radius:20px;background:${sbg};color:${sclr}">${sc}</span>
+          ${o.fulfillment_type==='full'?'<span class="type-full">📦 Full</span>':'<span class="type-normal">🏪 Normal</span>'}
+          ${shipBadge(o)}
+          ${labelButton(o)}
+          ${o.item_sku?`<span style="background:rgba(139,92,246,.1);color:var(--p3);font-size:9px;font-weight:700;padding:2px 8px;border-radius:20px;border:1px solid rgba(139,92,246,.2)">SKU: ${o.item_sku}</span>`:''}
+        </div>
+      </div>
+    </div>
+    <div class="grid2">
+      <div class="od-block"><div class="od-block-title"><i class="ti ti-user"></i> Comprador</div>
+        <div class="od-row"><span class="l">Nome</span><span class="v">${o.buyer_name||'—'}</span></div>
+        <div class="od-row"><span class="l">Conta</span><span class="v">${o.shop_name||'—'}</span></div>
+        <div class="od-row"><span class="l">Data</span><span class="v">${fdt(o.order_date)}</span></div>
+        <div class="od-row"><span class="l">Plataforma</span><span class="v">${(o.platform||'').toUpperCase()}</span></div>
+        <div class="od-row"><span class="l">Pagamento</span><span class="v">${o.payment_method||'—'} ${o.installments?`· ${o.installments}x`:''}</span></div>
+      </div>
+      <div class="od-block"><div class="od-block-title"><i class="ti ti-receipt"></i> Valores</div>
+        ${o.platform==='magalu'?`
+        <div class="od-row"><span class="l">Valor de venda</span><span class="v">${f(o.total_amount)}</span></div>
+        ${o.discount_amount>0?`<div class="od-row"><span class="l">Desconto</span><span class="v" style="color:var(--txt3)">− ${f(o.discount_amount)}</span></div>`:''}
+        <div class="od-row"><span class="l">Tarifa plataf.</span><span class="v" style="color:var(--red2)">− ${f(o.platform_fee)}</span></div>
+        <div class="od-row"><span class="l">Frete</span><span class="v" style="color:var(--yellow2)">− ${f(o.shipping_fee)}</span></div>
+        <div class="od-row" style="border-top:1px solid rgba(255,255,255,.08);margin-top:3px;padding-top:5px"><span class="l" style="font-weight:700">Pago pelo cliente</span><span class="v" style="color:var(--p3)">${f(o.paid_amount||o.total_amount)}</span></div>
+        <div class="od-row"><span class="l">Impostos</span><span class="v" style="color:var(--blue2)">− ${f(o.tax_amount)}</span></div>
+        `:`
+        <div class="od-row"><span class="l">Valor venda</span><span class="v">${f(o.total_amount)}</span></div>
+        <div class="od-row"><span class="l">Pago cliente</span><span class="v">${f(o.paid_amount||o.total_amount)}</span></div>
+        <div class="od-row"><span class="l">Tarifa ML/Plataf.</span><span class="v" style="color:var(--red2)">− ${f(o.platform_fee)}</span></div>
+        <div class="od-row"><span class="l">Frete</span><span class="v" style="color:var(--yellow2)">− ${f(o.shipping_fee)} ${o.manual_shipping_fee!==null&&o.manual_shipping_fee!==undefined?'<small style="color:var(--txt3)">manual</small>':''}</span></div>
+        <div class="od-row"><span class="l">Frete auto ML</span><span class="v">${f(o.auto_shipping_fee ?? o.shipping_fee)} <small style="color:var(--txt3)">${o.shipping_fee_source||'auto'}</small></span></div>
+        <div class="od-row"><span class="l">Impostos</span><span class="v" style="color:var(--blue2)">− ${f(o.tax_amount)}</span></div>
+        `}
+      </div>
+      <div class="od-block"><div class="od-block-title"><i class="ti ti-package"></i> Produto</div>
+        <div class="od-row"><span class="l">SKU</span><span class="v" style="color:var(--p3)">${o.item_sku||'—'}</span></div>
+        <div class="od-row"><span class="l">Custo prod.</span><span class="v" style="color:var(--orange2)">${f(o.total_cost)}</span></div>
+        <div class="od-row"><span class="l">Quantidade</span><span class="v">${o.quantity||1}</span></div>
+        <div class="od-row"><span class="l">Tipo</span><span class="v">${o.fulfillment_type==='full'?'Full':'Normal'}</span></div>
+        <div class="od-row"><span class="l">Item ML</span><span class="v">${o.item_id||'—'}</span></div>
+        <div class="od-row"><span class="l">Anúncio</span><span class="v">${o.listing_type_id||'—'}</span></div>
+      </div>
+      <div class="od-block"><div class="od-block-title"><i class="ti ti-trending-up"></i> Performance</div>
+        <div class="od-row"><span class="l">Receita líq.</span><span class="v">${f(o.net_revenue)}</span></div>
+        <div class="od-row"><span class="l">Margem</span><span class="v">${pct(marg)}</span></div>
+        <div class="od-row"><span class="l">Status</span><span class="v" style="color:${sclr}">${sc}</span></div>
+        <div class="od-row"><span class="l">Envio</span><span class="v">${shipBadge(o)}</span></div>
+        <div class="od-row"><span class="l">ID Envio</span><span class="v" style="font-size:9px;color:var(--txt3)">${o.ml_shipping_id||'—'}</span></div>
+        <div class="od-row"><span class="l">Rastreio</span><span class="v">${o.ml_tracking_number||'—'}</span></div>
+        <div class="od-row"><span class="l">ID</span><span class="v" style="font-size:9px;color:var(--txt3)">${o.platform_order_id||'—'}</span></div>
+      </div>
+    </div>
+    <div class="od-total">
+      <div><div style="font-size:13px;font-weight:700;color:var(--txt2)">Lucro Líquido</div><div style="font-size:10px;color:var(--txt3);margin-top:2px">Margem: ${pct(marg)}</div></div>
+      <div style="font-size:24px;font-weight:800;letter-spacing:-.5px;color:${luc!=null&&luc>=0?'var(--green2)':'var(--red2)'}">${luc!=null?f(luc):'Cancelado'}</div>
+    </div>
+    <button class="btn ghost" onclick="closeMo('mo-order')"><i class="ti ti-x"></i> Fechar</button>`;
+}
+
+function platLabel(platform){
+  return {mercadolivre:'Mercado Livre',magalu:'Magalu',shopee:'Shopee',geral:'Geral'}[platform] || platform || 'Geral';
+}
+function platShort(platform){
+  return {mercadolivre:'ML',magalu:'Magalu',shopee:'Shopee',geral:'Geral'}[platform] || platform || 'Geral';
+}
+function escAttr(v){return String(v??'').replace(/&/g,'&amp;').replace(/'/g,'&#39;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+function productKey(platform,sku){return String(platform||'geral')+'|'+String(sku||'');}
+function rowDefaults(platform,sku){
+  return ALL.find(o=>String(o.item_sku||'')===String(sku||'') && String(o.platform||'geral')===String(platform||'geral')) || {};
+}
+function metricLabel(field){return {cost:'Custo',tax_pct:'Imposto',fee_pct:'Tarifa',shipping_fee:'Frete'}[field]||field;}
+function metricCurrent(o,field,fallback){
+  if(field==='cost') return parseFloat((o.unit_cost ?? ((o.total_cost||0)/(o.quantity||1)))||0);
+  if(o[field]!==null && o[field]!==undefined && o[field]!=='') return parseFloat(o[field]||0);
+  return fallback ?? 0;
+}
+function editableMetric(o,field,type,fallback){
+  const current=metricCurrent(o,field,fallback);
+  if(field==='shipping_fee'){
+    const platform=escAttr(o.platform||''), oid=escAttr(o.platform_order_id||o.id||'');
+    const isManual=o.manual_shipping_fee!==null&&o.manual_shipping_fee!==undefined;
+    const source=isManual?'manual':(o.shipping_fee_source||'auto');
+    const auto=o.auto_shipping_fee!=null?` Auto: ${f(o.auto_shipping_fee)}`:'';
+    // Label de source só aparece em modo debug (ou se for manual para indicar ao usuário)
+    const srcLabel=window.SS_DEBUG
+      ? `<small style="color:var(--txt3);font-size:8px;max-width:90px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle"> ${source}</small>`
+      : (isManual ? `<small style="color:var(--p3);font-size:8px"> manual</small>` : '');
+    return `<span class="inline-edit" style="color:var(--yellow2);font-weight:700;font-size:10px" title="Editar frete deste pedido.${auto}" onclick="event.stopPropagation();editOrderShippingCell(this,'${platform}','${oid}',${Number(current)||0})">${f(current)}${srcLabel}<i class="ti ti-pencil" style="font-size:10px;color:var(--txt3)"></i></span>`;
   }
-  return out;
+  if(!o.item_sku) return `<span style="color:var(--txt3)">—</span>`;
+  const platform=escAttr(o.platform||'geral'), sku=escAttr(o.item_sku||'');
+  const shown=(field==='tax_pct'||field==='fee_pct')
+    ? (o[field]===null||o[field]===undefined?`<span style="color:var(--txt3)">${f(fallback)}</span>`:pct(current))
+    : f(current);
+  const color=field==='cost'?'var(--orange2)':field==='tax_pct'?'var(--blue2)':field==='fee_pct'?'var(--red2)':'var(--yellow2)';
+  return `<span class="inline-edit" style="color:${color};font-weight:700;font-size:10px" title="Editar ${metricLabel(field)}" onclick="event.stopPropagation();editMetricCell(this,'${platform}','${sku}','${field}','${type}',${Number(current)||0})">${shown}<i class="ti ti-pencil" style="font-size:10px;color:var(--txt3)"></i></span>`;
+}
+function editMetricCell(el,platform,sku,field,type,cur){
+  const id=Math.random().toString(36).slice(2,8);
+  el.outerHTML=`<span class="inline-edit" onclick="event.stopPropagation()"><input class="inline-input" type="number" step="0.01" value="${cur||0}" id="m-${id}" autofocus onkeydown="if(event.key==='Enter')saveMetricCell('${platform}','${sku}','${field}','${id}');if(event.key==='Escape')loadData()"/><i class="ti ti-check save-mini" onclick="event.stopPropagation();saveMetricCell('${platform}','${sku}','${field}','${id}')"></i><i class="ti ti-x cancel-mini" onclick="event.stopPropagation();loadData()"></i></span>`;
+  setTimeout(()=>{const i=document.getElementById('m-'+id);if(i){i.focus();i.select();}},20);
+}
+function editOrderShippingCell(el,platform,orderId,cur){
+  const id=Math.random().toString(36).slice(2,8);
+  el.outerHTML=`<span class="inline-edit" onclick="event.stopPropagation()"><input class="inline-input" type="number" step="0.01" value="${cur||0}" id="os-${id}" autofocus onkeydown="if(event.key==='Enter')saveOrderShippingCell('${platform}','${orderId}','${id}');if(event.key==='Escape')loadData()"/><i class="ti ti-check save-mini" onclick="event.stopPropagation();saveOrderShippingCell('${platform}','${orderId}','${id}')"></i><i class="ti ti-rotate-clockwise cancel-mini" title="Voltar para automático" onclick="event.stopPropagation();resetOrderShippingCell('${platform}','${orderId}')"></i></span>`;
+  setTimeout(()=>{const i=document.getElementById('os-'+id);if(i){i.focus();i.select();}},20);
+}
+async function saveOrderShippingCell(platform,orderId,id){
+  const val=parseFloat(document.getElementById('os-'+id)?.value||0);
+  try{await api('/api/orders/'+encodeURIComponent(platform)+'/'+encodeURIComponent(orderId)+'/shipping',{method:'PUT',body:JSON.stringify({shipping_fee:val})});toast('Frete do pedido salvo!');loadData();}
+  catch(e){toast('Erro: '+e.message);}
+}
+async function resetOrderShippingCell(platform,orderId){
+  try{await api('/api/orders/'+encodeURIComponent(platform)+'/'+encodeURIComponent(orderId)+'/shipping',{method:'PUT',body:JSON.stringify({shipping_fee:null})});toast('Frete voltou para automático');loadData();}
+  catch(e){toast('Erro: '+e.message);}
+}
+async function saveMetricCell(platform,sku,field,id){
+  const val=parseFloat(document.getElementById('m-'+id)?.value||0);
+  const row=rowDefaults(platform,sku);
+  const body={
+    platform,
+    cost: metricCurrent(row,'cost',0),
+    tax_pct: row.tax_pct===null||row.tax_pct===undefined?null:parseFloat(row.tax_pct||0),
+    fee_pct: row.fee_pct===null||row.fee_pct===undefined?null:parseFloat(row.fee_pct||0),
+    shipping_fee: row.shipping_fee===null||row.shipping_fee===undefined?null:parseFloat(row.shipping_fee||0)
+  };
+  if(field==='cost') body.cost=val;
+  else body[field]=val;
+  try{await api('/api/products/'+encodeURIComponent(sku)+'/cost',{method:'PUT',body:JSON.stringify(body)});toast(metricLabel(field)+' salvo!');loadProducts();loadData();}
+  catch(e){toast('Erro: '+e.message);}
+}
+async function saveProductRow(platform,sku){
+  const id=productKey(platform,sku).replace(/[^a-zA-Z0-9_-]/g,'_');
+  const body={
+    platform,
+    cost:parseFloat(document.getElementById('pcost-'+id)?.value||0),
+    tax_pct:document.getElementById('ptax-'+id)?.value===''?null:parseFloat(document.getElementById('ptax-'+id)?.value||0),
+    fee_pct:document.getElementById('pfee-'+id)?.value===''?null:parseFloat(document.getElementById('pfee-'+id)?.value||0),
+    shipping_fee:document.getElementById('pship-'+id)?.value===''?null:parseFloat(document.getElementById('pship-'+id)?.value||0)
+  };
+  try{await api('/api/products/'+encodeURIComponent(sku)+'/cost',{method:'PUT',body:JSON.stringify(body)});toast('SKU atualizado!');loadProducts();loadData();}
+  catch(e){toast('Erro: '+e.message);}
+}
+const DEFAULT_PLATFORMS=['mercadolivre','magalu','shopee','geral'];
+function defaultRow(data,platform){return (data||[]).find(p=>String(p.platform||'geral')===platform && String(p.sku||'').toUpperCase()==='__DEFAULT__') || {};}
+function defaultPlaceholder(defaults,platform,field,suffix=''){
+  const d=defaults[platform]||{};
+  const v=d[field];
+  if(v===null||v===undefined||v==='') return 'Auto';
+  return String(parseFloat(v||0))+suffix;
+}
+function renderPlatformDefaults(data){
+  const box=document.getElementById('platform-defaults');
+  if(!box)return;
+  const rows={};DEFAULT_PLATFORMS.forEach(p=>rows[p]=defaultRow(data,p));
+  box.innerHTML=DEFAULT_PLATFORMS.map(platform=>{
+    const d=rows[platform]||{};
+    const id='def-'+platform;
+    return `<div class="default-card">
+      <span class="plat-chip ${platform}">${platShort(platform)}</span>
+      <div><label>Imposto padrão %</label><input id="${id}-tax" type="number" step="0.01" value="${d.tax_pct===null||d.tax_pct===undefined?'':parseFloat(d.tax_pct||0)}" placeholder="Ex: 10"/></div>
+      <div><label>Tarifa padrão %</label><input id="${id}-fee" type="number" step="0.01" value="${d.fee_pct===null||d.fee_pct===undefined?'':parseFloat(d.fee_pct||0)}" placeholder="Auto"/></div>
+      <div><label>Frete padrão R$</label><input id="${id}-ship" type="number" step="0.01" value="${d.shipping_fee===null||d.shipping_fee===undefined?'':parseFloat(d.shipping_fee||0)}" placeholder="Auto"/></div>
+      <button class="ib" title="Salvar padrão" onclick="savePlatformDefaults('${platform}')"><i class="ti ti-check"></i></button>
+    </div>`;
+  }).join('');
+}
+async function savePlatformDefaults(platform){
+  const id='def-'+platform;
+  const taxRaw=document.getElementById(id+'-tax')?.value;
+  const feeRaw=document.getElementById(id+'-fee')?.value;
+  const shipRaw=document.getElementById(id+'-ship')?.value;
+  const body={
+    platform,
+    sku:'__DEFAULT__',
+    name:'Padrão '+platLabel(platform),
+    cost:0,
+    tax_pct:taxRaw===''?null:parseFloat(taxRaw||0),
+    fee_pct:feeRaw===''?null:parseFloat(feeRaw||0),
+    shipping_fee:shipRaw===''?null:parseFloat(shipRaw||0)
+  };
+  try{await api('/api/products',{method:'POST',body:JSON.stringify(body)});toast('Padrão de '+platLabel(platform)+' salvo!');loadProducts();loadData();}
+  catch(e){toast('Erro: '+e.message);}
+}
+async function loadProducts(){
+  const list=document.getElementById('products-list');
+  try{
+    const{data}=await api('/api/products');
+    renderPlatformDefaults(data);
+    const defaults={};DEFAULT_PLATFORMS.forEach(p=>defaults[p]=defaultRow(data,p));
+    const products=(data||[]).filter(p=>String(p.sku||'').toUpperCase()!=='__DEFAULT__');
+    if(!products.length){list.innerHTML='<div class="empty"><i class="ti ti-package-off"></i><p>Nenhum SKU cadastrado</p></div>';return;}
+    list.innerHTML=products.map(p=>{
+      const platform=p.platform||'geral';
+      const id=productKey(platform,p.sku).replace(/[^a-zA-Z0-9_-]/g,'_');
+      return `<div class="cost-card">
+        <span class="plat-chip ${platform}">${platShort(platform)}</span>
+        <div class="cost-field"><label>SKU</label><div><div class="cost-sku" title="${escAttr(p.sku)}">${p.sku}</div><div class="cost-name" title="${escAttr(p.name)}">${p.name||'Sem nome'}</div></div></div>
+        <div class="cost-field"><label>Custo unit.</label><input id="pcost-${id}" type="number" step="0.01" value="${parseFloat(p.cost||0)}"/></div>
+        <div class="cost-field"><label>Imposto %</label><input id="ptax-${id}" type="number" step="0.01" value="${p.tax_pct===null||p.tax_pct===undefined?'':parseFloat(p.tax_pct||0)}" placeholder="Padrão ${defaultPlaceholder(defaults,platform,'tax_pct','%')}"/></div>
+        <div class="cost-field"><label>Tarifa %</label><input id="pfee-${id}" type="number" step="0.01" value="${p.fee_pct===null||p.fee_pct===undefined?'':parseFloat(p.fee_pct||0)}" placeholder="${platform==='mercadolivre'?'Auto ML':('Padrão '+defaultPlaceholder(defaults,platform,'fee_pct','%'))}"/></div>
+        <div class="cost-field"><label>Frete R$</label><input id="pship-${id}" type="number" step="0.01" value="${p.shipping_fee===null||p.shipping_fee===undefined?'':parseFloat(p.shipping_fee||0)}" placeholder="${platform==='mercadolivre'?'Auto ML':('Padrão '+defaultPlaceholder(defaults,platform,'shipping_fee'))}"/></div>
+        <button class="ib" title="Salvar alterações" onclick="saveProductRow('${escAttr(platform)}','${escAttr(p.sku)}')"><i class="ti ti-check"></i></button>
+        <button class="ib danger" title="Apagar SKU" onclick="deleteProductRow(${Number(p.id)||0},'${escAttr(p.sku)}','${escAttr(platform)}')"><i class="ti ti-trash"></i></button>
+      </div>`;
+    }).join('');
+  }catch(e){list.innerHTML='<div class="empty"><p>'+e.message+'</p></div>';}
 }
 
-function moneyNumber(v) {
-  const n = Number(v || 0);
-  return Number.isFinite(n) ? n : 0;
+async function deleteProductRow(id,sku,platform){
+  if(!id)return toast('ID do SKU não encontrado');
+  const ok=confirm(`Apagar o SKU ${sku} de ${platLabel(platform)}?`);
+  if(!ok)return;
+  try{
+    await api('/api/products/'+encodeURIComponent(id),{method:'DELETE'});
+    toast('SKU apagado!');
+    loadProducts();
+    loadData();
+  }catch(e){toast('Erro: '+e.message);}
+}
+async function deleteAllProducts(){
+  const ok=confirm('Apagar TODOS os custos, impostos, tarifas, fretes e SKUs salvos?');
+  if(!ok)return;
+  try{
+    await api('/api/products',{method:'DELETE'});
+    toast('Tudo apagado!');
+    loadProducts();
+    loadData();
+  }catch(e){toast('Erro: '+e.message);}
+}
+async function resetProductValues(){
+  const ok=confirm('Zerar custos/impostos/tarifas/fretes, mas manter os SKUs cadastrados?');
+  if(!ok)return;
+  try{
+    await api('/api/products/reset-values',{method:'POST'});
+    toast('Valores zerados!');
+    loadProducts();
+    loadData();
+  }catch(e){toast('Erro: '+e.message);}
 }
 
-function normalizeOrderMonthAndGross(o) {
-  const date =
-    o.order_date ||
-    o.created_at ||
-    o.purchased_at ||
-    o.date_created ||
-    o.approved_at ||
-    o.invoiced_at;
-
-  const month = monthKeyFromDate(date);
-
-  // ML usa total_amount já em reais; Magalu normalizado no fetch deve vir total_amount em reais.
-  const gross =
-    moneyNumber(o.total_amount) ||
-    moneyNumber(o.paid_amount) ||
-    moneyNumber(o.amount_total) ||
-    0;
-
-  return { month, gross };
-}
-
-async function savePlatformMonthlySnapshot(userId, platform, snapshotMonth, grossSales, ordersCount) {
-  await db.query(`
-    INSERT INTO platform_monthly_snapshots
-      (user_id, platform, snapshot_month, gross_sales, orders_count, updated_at)
-    VALUES ($1, $2, $3, $4, $5, NOW())
-    ON CONFLICT (user_id, platform, snapshot_month)
-    DO UPDATE SET
-      gross_sales = EXCLUDED.gross_sales,
-      orders_count = EXCLUDED.orders_count,
-      updated_at = NOW()
-  `, [userId, platform, snapshotMonth, grossSales, ordersCount]);
-}
-
-app.post('/api/debug/monthly-revenue-backfill', auth, async (req, res) => {
-  const months = Math.min(Math.max(parseInt(req.query.months || '5', 10), 1), 6);
-  const monthStarts = lastNMonthStarts(months);
-
-  // janela com folga: 31 dias * meses + 10 dias
-  const days = Math.min((months * 31) + 10, 200);
-
-  try {
-    const { rows: accounts } = await db.query(`
-      SELECT *
-      FROM marketplace_accounts
-      WHERE user_id=$1
-        AND is_active=true
-        AND access_token IS NOT NULL
-        AND platform IN ('mercadolivre', 'magalu')
-    `, [req.user.id]);
-
-    const result = {
-      ok: true,
-      months: monthStarts,
-      days_window: days,
-      platforms: {},
-      saved: []
-    };
-
-    for (const acc of accounts) {
-      const platform = String(acc.platform || '').toLowerCase();
-      let orders = [];
-
-      try {
-        if (platform === 'mercadolivre') {
-          orders = await fetchML(acc, days);
-        } else if (platform === 'magalu') {
-          orders = await fetchMagalu(acc, days);
-        }
-      } catch (e) {
-        result.platforms[platform] = {
-          error: e.response?.data || e.message,
-          orders_count: 0,
-          monthly: {}
-        };
-        continue;
-      }
-
-      const monthly = {};
-      for (const m of monthStarts) {
-        monthly[m] = { gross_sales: 0, orders_count: 0 };
-      }
-
-      for (const o of orders || []) {
-        const { month, gross } = normalizeOrderMonthAndGross(o);
-        if (!month || !monthly[month]) continue;
-
-        const status = String(o.status || '').toLowerCase();
-        if (['cancelled', 'canceled', 'cancelado', 'invalid'].includes(status)) continue;
-
-        monthly[month].gross_sales += gross;
-        monthly[month].orders_count += 1;
-      }
-
-      for (const m of monthStarts) {
-        monthly[m].gross_sales = Number(monthly[m].gross_sales.toFixed(2));
-        await savePlatformMonthlySnapshot(
-          req.user.id,
-          platform,
-          m,
-          monthly[m].gross_sales,
-          monthly[m].orders_count
-        );
-        result.saved.push({ platform, month: m, ...monthly[m] });
-      }
-
-      result.platforms[platform] = {
-        shop_name: acc.shop_name,
-        orders_scanned: (orders || []).length,
-        monthly
-      };
-    }
-
-    // retorno consolidado para gráfico
-    const { rows: snapshots } = await db.query(`
-      SELECT platform, snapshot_month::date AS month, gross_sales, orders_count
-      FROM platform_monthly_snapshots
-      WHERE user_id=$1
-        AND snapshot_month = ANY($2::date[])
-      ORDER BY snapshot_month ASC, platform ASC
-    `, [req.user.id, monthStarts]);
-
-    result.snapshots = snapshots;
-
-    const totalsByMonth = {};
-    for (const m of monthStarts) totalsByMonth[m] = { month: m, total: 0, platforms: {} };
-    for (const s of snapshots) {
-      const m = s.month instanceof Date ? s.month.toISOString().slice(0,10) : String(s.month).slice(0,10);
-      const platform = String(s.platform || '').toLowerCase();
-      const value = Number(s.gross_sales || 0);
-      if (!totalsByMonth[m]) totalsByMonth[m] = { month: m, total: 0, platforms: {} };
-      totalsByMonth[m].total += value;
-      totalsByMonth[m].platforms[platform] = { gross_sales: value, orders_count: Number(s.orders_count || 0), percentage: 0 };
-    }
-    result.monthly_chart = Object.values(totalsByMonth).map(m => {
-      for (const p of Object.keys(m.platforms)) {
-        m.platforms[p].percentage = m.total > 0 ? Math.round((m.platforms[p].gross_sales / m.total) * 10000) / 100 : 0;
-      }
-      return {
-        ...m,
-        magalu: m.platforms.magalu?.gross_sales || 0,
-        mercadolivre: m.platforms.mercadolivre?.gross_sales || 0,
-        magalu_pct: m.total > 0 ? Math.round(((m.platforms.magalu?.gross_sales || 0) / m.total) * 10000) / 100 : 0,
-        mercadolivre_pct: m.total > 0 ? Math.round(((m.platforms.mercadolivre?.gross_sales || 0) / m.total) * 10000) / 100 : 0
-      };
-    });
-
-    res.json(result);
-  } catch (e) {
-    console.error('[monthly-revenue-backfill]', e);
-    res.status(500).json({ error: e.message });
+async function addProduct(){
+  const platform=document.getElementById('new-platform').value;
+  const sku=document.getElementById('new-sku').value.trim();
+  const name=document.getElementById('new-name').value.trim();
+  const cost=parseFloat(document.getElementById('new-cost').value)||0;
+  if(!sku||!name)return toast('Preencha SKU e nome');
+  try{
+    await api('/api/products',{method:'POST',body:JSON.stringify({platform,sku,name,cost,tax_pct:null,fee_pct:null,shipping_fee:null})});
+    document.getElementById('new-sku').value='';document.getElementById('new-name').value='';document.getElementById('new-cost').value='';
+    toast('SKU salvo! O imposto vem do padrão da plataforma.');loadProducts();loadData();
   }
-});
-
-app.get('/api/analytics/monthly-platforms', auth, async (req, res) => {
-  try {
-    const months = Math.min(Math.max(parseInt(req.query.months || '5', 10), 1), 12);
-    const monthStarts = lastNMonthStarts(months);
-
-    const { rows } = await db.query(`
-      SELECT platform, snapshot_month::date AS month, gross_sales, orders_count
-      FROM platform_monthly_snapshots
-      WHERE user_id=$1
-        AND snapshot_month = ANY($2::date[])
-      ORDER BY snapshot_month ASC, platform ASC
-    `, [req.user.id, monthStarts]);
-
-    const totals = {};
-    for (const m of monthStarts) totals[m] = { month: m, total: 0, platforms: {} };
-    for (const r of rows) {
-      const m = r.month instanceof Date ? r.month.toISOString().slice(0,10) : String(r.month).slice(0,10);
-      const platform = String(r.platform || '').toLowerCase();
-      const value = Number(r.gross_sales || 0);
-      if (!totals[m]) totals[m] = { month: m, total: 0, platforms: {} };
-      totals[m].total += value;
-      totals[m].platforms[platform] = { gross_sales: value, orders_count: Number(r.orders_count || 0), percentage: 0 };
-    }
-    const chart = Object.values(totals).map(m => {
-      for (const p of Object.keys(m.platforms)) {
-        m.platforms[p].percentage = m.total > 0 ? Math.round((m.platforms[p].gross_sales / m.total) * 10000) / 100 : 0;
-      }
-      return {
-        ...m,
-        magalu: m.platforms.magalu?.gross_sales || 0,
-        mercadolivre: m.platforms.mercadolivre?.gross_sales || 0,
-        magalu_pct: m.total > 0 ? Math.round(((m.platforms.magalu?.gross_sales || 0) / m.total) * 10000) / 100 : 0,
-        mercadolivre_pct: m.total > 0 ? Math.round(((m.platforms.mercadolivre?.gross_sales || 0) / m.total) * 10000) / 100 : 0
-      };
-    });
-    res.json({ success: true, months: monthStarts, data: rows, chart });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-
-
-// ── SALES SYNC v21 — vendas em SQL + custos de devolução ──
-async function ensureOrdersReturnsSchema() {
-  try {
-    await db.query(`CREATE TABLE IF NOT EXISTS marketplace_orders (
-      id BIGSERIAL PRIMARY KEY,
-      user_id UUID NOT NULL,
-      platform TEXT NOT NULL,
-      account_id UUID,
-      platform_order_id TEXT NOT NULL,
-      shop_name TEXT,
-      status TEXT,
-      fulfillment_type TEXT,
-      buyer_name TEXT,
-      total_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
-      paid_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
-      platform_fee NUMERIC(14,2) NOT NULL DEFAULT 0,
-      shipping_fee NUMERIC(14,2) NOT NULL DEFAULT 0,
-      tax_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
-      quantity NUMERIC(14,4) NOT NULL DEFAULT 1,
-      order_date TIMESTAMP,
-      item_title TEXT,
-      item_image TEXT,
-      item_sku TEXT,
-      raw_json JSONB,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      UNIQUE(user_id, platform, platform_order_id)
-    )`);
-
-    // Correção para bases antigas: versões anteriores criaram account_id como BIGINT.
-    // O id da tabela marketplace_accounts é UUID, então converter BIGINT direto quebrava a sync.
-    // Se a coluna antiga existir como BIGINT/INTEGER, zera e converte para UUID.
-    await db.query(`DO $$
-    BEGIN
-      IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name='marketplace_orders' AND column_name='account_id'
-          AND data_type IN ('bigint','integer','numeric')
-      ) THEN
-        ALTER TABLE marketplace_orders ALTER COLUMN account_id DROP DEFAULT;
-        ALTER TABLE marketplace_orders ALTER COLUMN account_id TYPE UUID USING NULL;
-      END IF;
-    END $$;`);
-
-    await db.query(`ALTER TABLE marketplace_orders ADD COLUMN IF NOT EXISTS account_id UUID`);
-    await db.query(`ALTER TABLE marketplace_orders ADD COLUMN IF NOT EXISTS raw_json JSONB`);
-    await db.query(`ALTER TABLE marketplace_orders ADD COLUMN IF NOT EXISTS manual_shipping_fee NUMERIC(14,2)`);
-    await db.query(`ALTER TABLE marketplace_orders ADD COLUMN IF NOT EXISTS shipping_fee_source TEXT`);
-    await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_orders_user_date ON marketplace_orders(user_id, order_date DESC)`);
-    await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_orders_platform ON marketplace_orders(user_id, platform)`);
-
-    // Cache de imagens dos anúncios. Guarda a URL da imagem, não o arquivo binário.
-    // Isso deixa a listagem rápida e evita chamar /items/{id} toda hora.
-    await db.query(`CREATE TABLE IF NOT EXISTS marketplace_item_images (
-      id BIGSERIAL PRIMARY KEY,
-      platform TEXT NOT NULL,
-      item_id TEXT NOT NULL,
-      image_url TEXT,
-      title TEXT,
-      seller_sku TEXT,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      UNIQUE(platform, item_id)
-    )`);
-    await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_item_images_platform_item ON marketplace_item_images(platform, item_id)`);
-
-    await db.query(`CREATE TABLE IF NOT EXISTS marketplace_returns (
-      id BIGSERIAL PRIMARY KEY,
-      user_id UUID NOT NULL,
-      platform TEXT NOT NULL,
-      account_id UUID,
-      platform_order_id TEXT,
-      external_return_id TEXT NOT NULL,
-      external_ticket_id TEXT,
-      status TEXT,
-      reason TEXT,
-      type TEXT DEFAULT 'return',
-      buyer_message TEXT,
-      return_tracking_code TEXT,
-      return_shipping_cost NUMERIC(14,2) NOT NULL DEFAULT 0,
-      return_fee NUMERIC(14,2) NOT NULL DEFAULT 0,
-      refund_adjustment NUMERIC(14,2) NOT NULL DEFAULT 0,
-      lost_product_cost NUMERIC(14,2) NOT NULL DEFAULT 0,
-      return_total_cost NUMERIC(14,2) NOT NULL DEFAULT 0,
-      raw_json JSONB,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      UNIQUE(user_id, platform, external_return_id)
-    )`);
-
-    await db.query(`DO $$
-    BEGIN
-      IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name='marketplace_returns' AND column_name='account_id'
-          AND data_type IN ('bigint','integer','numeric')
-      ) THEN
-        ALTER TABLE marketplace_returns ALTER COLUMN account_id DROP DEFAULT;
-        ALTER TABLE marketplace_returns ALTER COLUMN account_id TYPE UUID USING NULL;
-      END IF;
-    END $$;`);
-    await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS account_id UUID`);
-
-    await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS return_shipping_cost NUMERIC(14,2) NOT NULL DEFAULT 0`);
-    await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS return_fee NUMERIC(14,2) NOT NULL DEFAULT 0`);
-    await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS refund_adjustment NUMERIC(14,2) NOT NULL DEFAULT 0`);
-    await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS lost_product_cost NUMERIC(14,2) NOT NULL DEFAULT 0`);
-    await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS return_total_cost NUMERIC(14,2) NOT NULL DEFAULT 0`);
-    await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS resolution_type TEXT`);
-    await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS ml_protected BOOLEAN NOT NULL DEFAULT FALSE`);
-    await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_returns_user_status ON marketplace_returns(user_id, status)`);
-    await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_returns_order ON marketplace_returns(user_id, platform, platform_order_id)`);
-    console.log('✅ Orders/Returns schema OK: vendas em SQL + custos de devolução');
-  } catch (e) { console.error('[Orders/Returns schema]', e.message); }
+  catch(e){toast('Erro: '+e.message);}
+}
+function editCostPr(platform,sku,name,cur,taxCur,feeCur,shipCur){
+  openMo('mo-cst');
+  setTimeout(()=>{
+    const id=productKey(platform,sku).replace(/[^a-zA-Z0-9_-]/g,'_');
+    const el=document.getElementById('pcost-'+id);
+    if(el){el.focus();el.select();}
+  },150);
 }
 
-function ssNum2(v){ const n=Number(v||0); return Number.isFinite(n)?n:0; }
-function ssIso(v){ const d=new Date(v||Date.now()); return Number.isFinite(d.getTime())?d.toISOString():new Date().toISOString(); }
 
-async function ssUpsertOrders(userId, accountId, orders=[]) {
-  for (const o of orders || []) {
-    const platform = normPlatform(o.platform);
-    const oid = String(o.platform_order_id || o.id || '').trim();
-    if (!platform || !oid) continue;
-    await db.query(`INSERT INTO marketplace_orders
-      (user_id, platform, account_id, platform_order_id, shop_name, status, fulfillment_type, buyer_name,
-       total_amount, paid_amount, platform_fee, shipping_fee, tax_amount, quantity, order_date,
-       item_title, item_image, item_sku, raw_json, updated_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,NOW())
-      ON CONFLICT (user_id, platform, platform_order_id) DO UPDATE SET
-        account_id=EXCLUDED.account_id, shop_name=EXCLUDED.shop_name, status=EXCLUDED.status,
-        fulfillment_type=EXCLUDED.fulfillment_type, buyer_name=EXCLUDED.buyer_name,
-        total_amount=EXCLUDED.total_amount, paid_amount=EXCLUDED.paid_amount, platform_fee=EXCLUDED.platform_fee,
-        shipping_fee=EXCLUDED.shipping_fee,
-        shipping_fee_source=COALESCE((EXCLUDED.raw_json->>'shipping_fee_source'), marketplace_orders.shipping_fee_source, 'auto'),
-        tax_amount=EXCLUDED.tax_amount, quantity=EXCLUDED.quantity,
-        order_date=EXCLUDED.order_date, item_title=EXCLUDED.item_title, item_image=EXCLUDED.item_image,
-        item_sku=EXCLUDED.item_sku, raw_json=EXCLUDED.raw_json, updated_at=NOW()`,
-      [userId, platform, accountId || null, oid, o.shop_name || null, o.status || null, o.fulfillment_type || null, o.buyer_name || null,
-       ssNum2(o.total_amount), ssNum2(o.paid_amount || o.total_amount), ssNum2(o.platform_fee), ssNum2(o.shipping_fee), ssNum2(o.tax_amount), ssNum2(o.quantity || 1), ssIso(o.order_date),
-       o.item_title || null, o.item_image || null, o.item_sku || null, JSON.stringify(o)]);
-  }
-}
 
-async function ssLoadOrdersFromSql(userId, opts={}) {
-  const platform = opts.platform || null;
-  const from = opts.date_from ? new Date(String(opts.date_from)+'T00:00:00-03:00') : new Date(Date.now() - (Math.min(Math.max(parseInt(opts.period||7)||7,1),45) * 86400000));
-  const to = opts.date_to ? new Date(String(opts.date_to)+'T23:59:59-03:00') : new Date();
-  const params = [userId, from.toISOString(), to.toISOString()];
-  let sql = `SELECT COALESCE(raw_json,'{}'::jsonb) AS raw_json, platform_order_id, platform, shop_name, status, fulfillment_type, buyer_name,
-             total_amount, paid_amount, platform_fee, shipping_fee, manual_shipping_fee, shipping_fee_source, tax_amount, quantity, order_date, item_title, item_image, item_sku
-             FROM marketplace_orders WHERE user_id=$1 AND order_date >= $2 AND order_date <= $3`;
-  if (platform) { params.push(platform); sql += ` AND platform=$${params.length}`; }
-  sql += ` ORDER BY order_date DESC LIMIT 3000`;
-  const { rows } = await db.query(sql, params);
-  return rows.map(r => ({
-    ...(r.raw_json || {}),
-    platform_order_id: String(r.platform_order_id), id: String(r.platform_order_id), platform: r.platform,
-    shop_name: r.shop_name, status: r.status, fulfillment_type: r.fulfillment_type, buyer_name: r.buyer_name,
-    total_amount: Number(r.total_amount||0), paid_amount: Number(r.paid_amount||0), platform_fee: Number(r.platform_fee||0),
-    shipping_fee: r.manual_shipping_fee === null || r.manual_shipping_fee === undefined ? Number(r.shipping_fee||0) : Number(r.manual_shipping_fee||0),
-    auto_shipping_fee: Number(r.shipping_fee||0),
-    manual_shipping_fee: r.manual_shipping_fee === null || r.manual_shipping_fee === undefined ? null : Number(r.manual_shipping_fee||0),
-    shipping_fee_source: r.manual_shipping_fee === null || r.manual_shipping_fee === undefined ? (r.shipping_fee_source || 'auto') : 'manual',
-    tax_amount: Number(r.tax_amount||0), quantity: Number(r.quantity||1),
-    order_date: r.order_date, item_title: r.item_title, item_image: r.item_image, item_sku: r.item_sku
-  }));
-}
-
-async function ssSyncOrdersForUser(userId, platform=null, days=45) {
-  const accounts = await ssGetAccounts(userId, platform);
-  let all = [];
-  for (const acc of accounts) {
-    try {
-      let orders=[];
-      if (acc.platform === 'mercadolivre') orders = await fetchML(acc, days);
-      else if (acc.platform === 'shopee') orders = await fetchShopee(acc, days);
-      else if (acc.platform === 'magalu') orders = await fetchMagalu(acc, days);
-      else if (acc.platform === 'tiktok') orders = await fetchTiktok(acc, days);
-      await ssUpsertOrders(userId, acc.id, orders);
-      all = all.concat(orders || []);
-      await db.query(`UPDATE marketplace_accounts SET last_sync_at=NOW() WHERE id=$1`, [acc.id]);
-    } catch(e) {
-      const msg = e.message || '';
-      if (msg.startsWith('TOKEN_INVALID:')) {
-        console.warn(`[orders sync] ${acc.platform} conta ${acc.id}: token inválido, conta marcada para reconexão.`);
-      } else {
-        console.error('[orders sync]', acc.platform, e.response?.data || msg);
+async function loadAccounts(){
+  try{
+    const{data}=await api('/api/accounts');
+    ACCOUNTS=data;
+    buildPlatBar();
+    // Detecta contas Shopee que precisam reconectar (token nulo = invalidado)
+    const needReconnect = data.filter(a => a.platform === 'shopee' && !a.is_connected && a.shop_name);
+    if(needReconnect.length){
+      const existing = document.getElementById('shopee-reconnect-alert');
+      if(!existing){
+        const bar = document.createElement('div');
+        bar.id = 'shopee-reconnect-alert';
+        bar.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99998;background:rgba(238,77,45,.18);border-bottom:2px solid #ee4d2d;padding:8px 16px;display:flex;align-items:center;gap:10px;font-size:12px;font-weight:700;color:#f1f5f9;backdrop-filter:blur(8px);';
+        bar.innerHTML = `<span>🔴</span><span><strong>Shopee desconectada:</strong> Suas credenciais mudaram (sandbox → produção). Reconecte sua loja para continuar sincronizando.</span><button onclick="openMo('mo-mp')" style="margin-left:auto;background:#ee4d2d;color:#fff;border:none;border-radius:8px;padding:5px 14px;font-size:11px;font-weight:800;cursor:pointer;">Reconectar agora</button><span onclick="document.getElementById('shopee-reconnect-alert').remove()" style="cursor:pointer;font-size:16px;margin-left:8px;opacity:.6">✕</span>`;
+        document.body.prepend(bar);
       }
     }
-  }
-  return all;
+  }catch{}
+}
+function buildPlatBar(){
+  const PI={mercadolivre:{label:'Mercado Livre',color:'#ffd600',cls:'ml'},shopee:{label:'Shopee',color:'#ee4d2d',cls:'sp'},magalu:{label:'Magalu',color:'#0078ff',cls:'mg'},tiktok:{label:'TikTok',color:'#ff0050',cls:'tk'}};
+  const bar=document.getElementById('platbar');
+  bar.innerHTML='<div class="pfil on" onclick="setPlatFilter(\'\',this)">🌐 Todos</div>';
+  ACCOUNTS.filter(a=>a.is_connected).forEach(acc=>{
+    const info=PI[acc.platform]||{label:acc.platform,color:'var(--p2)',cls:''};
+    const d=document.createElement('div');d.className='pfil '+info.cls;d.onclick=function(){setPlatFilter(acc.platform,this);};
+    d.innerHTML=`<span style="width:7px;height:7px;border-radius:50%;background:${info.color};display:inline-block"></span> ${acc.shop_name||info.label}`;
+    bar.appendChild(d);
+  });
+}
+async function loadAccountsMo(){
+  const body=document.getElementById('mp-body');await loadAccounts();
+  const pm={mercadolivre:{label:'Mercado Livre',cls:'ml',desc:'Vendas normais · Full'},shopee:{label:'Shopee',cls:'sp',desc:'Vendas normais'},magalu:{label:'Magalu',cls:'mg',desc:'Fulfillment · Normal'},tiktok:{label:'TikTok Shop',cls:'tk',desc:'Vendas TikTok Shop'}};
+  body.innerHTML=`
+    <div style="background:var(--bg3);border:1px solid var(--border2);border-radius:12px;padding:12px 16px;display:flex;align-items:center;gap:10px;">
+      <div style="width:8px;height:8px;border-radius:50%;background:var(--green2);box-shadow:0 0 8px var(--green2);"></div>
+      <span style="font-size:11px;color:var(--txt2)">API online · salesync-backend.onrender.com</span>
+      <div style="margin-left:auto"><div class="ib" onclick="doSync()"><i class="ti ti-refresh"></i></div></div>
+    </div>
+    ${['mercadolivre','shopee','magalu','tiktok'].map(plat=>{
+      const acc=ACCOUNTS.find(a=>a.platform===plat),p=pm[plat],ok=acc?.is_connected;
+      return`<div class="mpc">
+        <div class="mpch" onclick="toggleMp('${plat}')">
+          <div class="mp-ico ${p.cls}">${p.cls.toUpperCase()}</div>
+          <div class="mp-info"><h3>${p.label}</h3><p>${p.desc}</p></div>
+          <div class="mp-status">${ok?'<span class="conn-badge">Conectado</span>':'<span class="disc-badge">Não conectado</span>'}<i class="ti ti-chevron-down chev" id="cv-${plat}"></i></div>
+        </div>
+        <div class="mp-body" id="mp-${plat}">
+          ${ok?`<div class="mp-acc">
+            <div class="mp-ava">${(acc.shop_name||plat)[0].toUpperCase()}</div>
+            <div class="mp-acc-info"><div class="mp-acc-name">${acc.shop_name||'—'}</div>
+              <div class="mp-acc-sub">${acc.mode==='full'||acc.mode==='both'?'<span class="type-full">📦 Full</span>':''}<span class="type-normal">🏪 Normal</span></div>
+            </div>
+            <div style="display:flex;gap:4px">
+              <div class="ib" onclick="doSync()"><i class="ti ti-refresh"></i></div>
+              <div class="ib danger" onclick="disconnPlat('${plat}')"><i class="ti ti-unlink"></i></div>
+            </div>
+          </div>
+          <div class="mp-stats">
+            <div class="mp-stat"><span>Última sinc.</span><strong>${acc.last_sync_at?new Date(acc.last_sync_at).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}):'—'}</strong></div>
+            <div class="mp-stat"><span>Token</span><strong style="color:var(--green2)">✓ OK</strong></div>
+            <div class="mp-stat"><span>Modo</span><strong>${acc.mode||'—'}</strong></div>
+            <div class="mp-stat"><span>Período</span><strong>${CUSTOM_FROM&&CUSTOM_TO?CUSTOM_FROM+' a '+CUSTOM_TO:PERIOD+'d'}</strong></div>
+          </div>
+          <a class="btn ghost" href="${API}/debug/${plat}?token=${TOKEN}&days=30" target="_blank" style="text-decoration:none;font-size:11px;padding:8px">
+            <i class="ti ti-bug"></i> Debug ${p.label}
+          </a>`:`<div class="note"><i class="ti ti-shield-check"></i>Redirecionado para o site oficial. Sua senha nunca é armazenada.</div>
+          <button class="btn primary" onclick="connectPlat('${plat}')"><i class="ti ti-external-link"></i> Conectar com ${p.label}</button>`}
+        </div>
+      </div>`;
+    }).join('')}
+    <div class="note"><i class="ti ti-lock"></i>OAuth 2.0 oficial — apenas o token é armazenado. Pedidos em tempo real.</div>`;
+}
+function connectMagalu(){
+  window.location.href = API + '/auth/magalu?user_id=' + (USER?.id || '');
+}
+function connectPlat(plat){location.href=API+'/auth/'+plat+'?user_id='+(USER?.id||'');}
+function connectMagaluDirect(){location.href=API+'/auth/magalu?user_id='+(USER?.id||'');}
+async function disconnPlat(plat){if(!confirm('Desconectar '+plat+'?'))return;try{await api('/api/accounts/'+plat+'/disconnect',{method:'POST'});toast('Desconectado!');ACCOUNTS=[];buildPlatBar();loadAccountsMo();loadData();}catch(e){toast('Erro: '+e.message);}}
+
+function renderDRE(){
+  const d=DASH,fat=d.faturamento||0,luc=d.lucro||0,marg=d.marg||0;
+  document.getElementById('dre-per').textContent=CUSTOM_FROM&&CUSTOM_TO?CUSTOM_FROM+' até '+CUSTOM_TO:(PERIOD===1?'Hoje':'Últimos '+PERIOD+' dias');
+  document.getElementById('dre-body').innerHTML=`
+    <div class="grid2">
+      <div class="od-block"><div class="od-block-title"><i class="ti ti-trending-up"></i> Receitas</div>
+        <div class="od-row"><span class="l">Faturamento</span><span class="v">${f(fat)}</span></div>
+        <div class="od-row"><span class="l">Pedidos</span><span class="v">${d.total_orders||0}</span></div>
+        <div class="od-row"><span class="l">Ticket médio</span><span class="v">${f(d.ticket||0)}</span></div>
+      </div>
+      <div class="od-block"><div class="od-block-title"><i class="ti ti-minus"></i> Deduções</div>
+        <div class="od-row"><span class="l">Tarifas</span><span class="v" style="color:var(--red2)">− ${f(d.tarifas)}</span></div>
+        <div class="od-row"><span class="l">Impostos</span><span class="v" style="color:var(--red2)">− ${f(d.impostos)}</span></div>
+        <div class="od-row"><span class="l">Frete</span><span class="v" style="color:var(--red2)">− ${f(d.frete)}</span></div>
+      </div>
+      <div class="od-block"><div class="od-block-title"><i class="ti ti-package"></i> CMV</div>
+        <div class="od-row"><span class="l">Custos produtos</span><span class="v" style="color:var(--orange2)">− ${f(d.custos)}</span></div>
+        <div class="od-row"><span class="l">% do fat.</span><span class="v">${fat>0?pct(d.custos/fat*100):'—'}</span></div>
+      </div>
+      <div class="od-block"><div class="od-block-title"><i class="ti ti-x"></i> Cancelamentos</div>
+        <div class="od-row"><span class="l">Quantidade</span><span class="v" style="color:var(--red2)">${d.cancelados||0}</span></div>
+        <div class="od-row"><span class="l">Taxa</span><span class="v">${(d.total_orders||0)+(d.cancelados||0)>0?pct((d.cancelados||0)/((d.total_orders||0)+(d.cancelados||0))*100):'—'}</span></div>
+      </div>
+    </div>
+    <div class="od-total">
+      <div><div style="font-size:14px;font-weight:700;color:var(--txt2)">Lucro Operacional Líquido</div><div style="font-size:11px;color:var(--txt3);margin-top:3px">Margem: ${pct(marg)} · ${d.total_orders||0} pedidos</div></div>
+      <div style="font-size:26px;font-weight:800;letter-spacing:-.5px;color:${luc>=0?'var(--green2)':'var(--red2)'}">${f(luc)}</div>
+    </div>`;
 }
 
-// Sync rápido: só últimas 48h, sem buscar shipment details pesados.
-// Usado pelo auto-refresh do frontend pra detectar pedidos novos sem travar.
-async function ssQuickSyncOrdersForUser(userId, platform=null) {
-  const accounts = await ssGetAccounts(userId, platform);
-  let count = 0;
-  for (const acc of accounts) {
-    try {
-      let orders = [];
-      if (acc.platform === 'mercadolivre') {
-        let token = acc.access_token;
-        if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 5*60*1000)) {
-          const nt = await refreshMLToken(acc);
-          if (nt) token = nt;
-        }
-        const since = new Date(Date.now() - 2 * 86400000).toISOString();
-        const headers = { Authorization: `Bearer ${token}` };
-        const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
-          params: { seller: acc.platform_shop_id, sort: 'date_desc', 'order.date_created.from': since, limit: 50, offset: 0 },
-          headers
-        });
-        const raw = Array.isArray(data.results) ? data.results : [];
-        const statusMap = { paid:'paid', payment_required:'pending', pending:'pending', confirmed:'paid', shipped:'shipped', delivered:'delivered', cancelled:'cancelled', invalid:'cancelled' };
-        orders = raw.map(o => {
-          const item = o.order_items?.[0] || {};
-          return {
-            id: String(o.id), platform: 'mercadolivre', platform_order_id: String(o.id),
-            shipping_id: o.shipping?.id || null, tags: Array.isArray(o.tags) ? o.tags : [],
-            shop_name: acc.shop_name, status: statusMap[o.status] || o.status,
-            buyer_name: o.buyer?.nickname || '', buyer_id: o.buyer?.id || null,
-            seller_id: o.seller?.id || acc.platform_shop_id,
-            total_amount: parseFloat(o.total_amount || 0), paid_amount: parseFloat(o.paid_amount || 0),
-            platform_fee: (o.order_items||[]).reduce((s,it)=>s+parseFloat(it.sale_fee||0)*parseFloat(it.quantity||1),0),
-            shipping_fee: 0, item_title: item?.item?.title || '', item_sku: item?.item?.seller_sku || '',
-            item_image: null, quantity: parseFloat(item?.quantity || 1), order_date: o.date_created
-          };
-        });
-      } else if (acc.platform === 'shopee') {
-        orders = await fetchShopee(acc, 2);
-      } else if (acc.platform === 'magalu') {
-        orders = await fetchMagalu(acc, 2);
-      } else if (acc.platform === 'tiktok') {
-        orders = await fetchTiktok(acc, 2);
-      }
-      if (orders.length) { await ssUpsertOrders(userId, acc.id, orders); count += orders.length; }
-      await db.query(`UPDATE marketplace_accounts SET last_sync_at=NOW() WHERE id=$1`, [acc.id]);
-    } catch(e) { console.error('[quick sync]', acc.platform, e.response?.data || e.message); }
-  }
-  return count;
+function calc(){
+  const p=parseFloat(document.getElementById('cp').value)||0,c=parseFloat(document.getElementById('cc').value)||0,t=parseFloat(document.getElementById('ct').value)||0;
+  const imp=parseFloat(document.getElementById('ci2').value)||0,fr=parseFloat(document.getElementById('cfr').value)||0,ads=parseFloat(document.getElementById('cads').value)||0;
+  const vt=p*t/100,vi=p*imp/100,l=p-c-vt-vi-fr-ads,mg=p>0?l/p*100:0;
+  const ff=v=>'R$ '+v.toFixed(2).replace('.',',');
+  document.getElementById('rr').textContent=ff(p);document.getElementById('rt').textContent='− '+ff(vt);
+  document.getElementById('ri').textContent='− '+ff(vi);document.getElementById('rfr').textContent='− '+ff(fr);
+  document.getElementById('rc').textContent='− '+ff(c);
+  const rl=document.getElementById('rl');rl.textContent=ff(l);rl.style.color=l>=0?'var(--green2)':'var(--red2)';
+  document.getElementById('rm').textContent=mg.toFixed(1)+'%';
+  document.getElementById('rroas').textContent=ads>0?(p/ads).toFixed(2)+'x':'—';
 }
 
-async function ssUpsertReturn(userId, acc, r) {
-  const platform = normPlatform(r.platform || acc.platform);
-  const externalId = String(r.external_return_id || r.id || r.claim_id || r.ticket_return_id || '').trim();
-  if (!externalId) return;
-  const mlProtected = r.ml_protected === true;
-  // Se ML absorveu o custo (seller protection), não soma como prejuízo do vendedor
-  const total = mlProtected ? 0 : ssNum2(r.return_shipping_cost)+ssNum2(r.return_fee)+ssNum2(r.refund_adjustment)+ssNum2(r.lost_product_cost);
-  await db.query(`INSERT INTO marketplace_returns
-    (user_id, platform, account_id, platform_order_id, external_return_id, external_ticket_id, status, reason, type,
-     buyer_message, return_tracking_code, return_shipping_cost, return_fee, refund_adjustment, lost_product_cost, return_total_cost,
-     resolution_type, ml_protected, raw_json, updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,NOW())
-    ON CONFLICT (user_id, platform, external_return_id) DO UPDATE SET
-      account_id=EXCLUDED.account_id, platform_order_id=COALESCE(EXCLUDED.platform_order_id, marketplace_returns.platform_order_id),
-      external_ticket_id=EXCLUDED.external_ticket_id, status=EXCLUDED.status, reason=EXCLUDED.reason, type=EXCLUDED.type,
-      buyer_message=EXCLUDED.buyer_message, return_tracking_code=EXCLUDED.return_tracking_code,
-      return_shipping_cost=CASE WHEN EXCLUDED.ml_protected THEN 0 ELSE GREATEST(marketplace_returns.return_shipping_cost, EXCLUDED.return_shipping_cost) END,
-      return_fee=CASE WHEN EXCLUDED.ml_protected THEN 0 ELSE GREATEST(marketplace_returns.return_fee, EXCLUDED.return_fee) END,
-      refund_adjustment=CASE WHEN EXCLUDED.ml_protected THEN 0 ELSE GREATEST(marketplace_returns.refund_adjustment, EXCLUDED.refund_adjustment) END,
-      lost_product_cost=CASE WHEN EXCLUDED.ml_protected THEN 0 ELSE GREATEST(marketplace_returns.lost_product_cost, EXCLUDED.lost_product_cost) END,
-      return_total_cost=CASE WHEN EXCLUDED.ml_protected THEN 0 ELSE GREATEST(marketplace_returns.return_total_cost, EXCLUDED.return_total_cost) END,
-      resolution_type=EXCLUDED.resolution_type, ml_protected=EXCLUDED.ml_protected,
-      raw_json=EXCLUDED.raw_json, updated_at=NOW()`,
-    [userId, platform, acc.id || null, r.platform_order_id || null, externalId, r.external_ticket_id || null, r.status || null, r.reason || null, r.type || 'return',
-     r.buyer_message || null, r.return_tracking_code || null, ssNum2(r.return_shipping_cost), ssNum2(r.return_fee), ssNum2(r.refund_adjustment), ssNum2(r.lost_product_cost), total,
-     r.resolution_type || null, mlProtected, JSON.stringify(r.raw_json || r)]);
+function filterTable(v){const t=v.toLowerCase();FILTERED=ALL.filter(o=>!t||(o.item_title||'').toLowerCase().includes(t)||(o.item_sku||'').toLowerCase().includes(t)||(o.platform_order_id||'').toLowerCase().includes(t));PAGE=1;renderOrders();}
+function changePage(d){const p=Math.max(1,Math.ceil(FILTERED.length/20));PAGE=Math.max(1,Math.min(p,PAGE+d));renderOrders();}
+function setPeriod(el,d){document.querySelectorAll('.pill').forEach(p=>p.classList.remove('on'));el.classList.add('on');CUSTOM_FROM='';CUSTOM_TO='';PERIOD=clampPeriod(d);loadData();}
+let CUSTOM_PERIOD_EL=null;
+function isoDateLocal(d){
+  const x=new Date(d);x.setMinutes(x.getMinutes()-x.getTimezoneOffset());return x.toISOString().slice(0,10);
 }
-
-function ssMLIsRealReturnFromOrder(o) {
-  const tags = Array.isArray(o?.tags) ? o.tags.map(String) : [];
-  const payments = Array.isArray(o?.payments) ? o.payments : [];
-  const payText = payments.map(p => `${p.status || ''} ${p.status_detail || ''}`).join(' ').toLowerCase();
-  const delivered = tags.includes('delivered');
-  const refunded = /(refunded|charged_back|chargeback|reimbursed|bpp_refunded|bpp_covered)/i.test(payText);
-  const cancelledAfterDelivery = String(o?.status || '').toLowerCase() === 'cancelled' && delivered;
-  // "not_delivered" sozinho NÃO é devolução real; aparece em pedido pago ainda não entregue.
-  return (delivered && refunded) || cancelledAfterDelivery || payments.some(p => String(p.status || '').toLowerCase() === 'charged_back');
+function daysBetween(a,b){
+  const da=new Date(a+'T00:00:00'),db=new Date(b+'T00:00:00');
+  return Math.round((db-da)/86400000)+1;
 }
-
-// Resolve os custos reais de um claim ML a partir da resolução.
-// Retorna { return_shipping_cost, return_fee, refund_adjustment, resolution_type, ml_protected }
-function ssResolveMLClaimCosts(claim) {
-  const resolution = claim?.resolution || {};
-  const resType = String(resolution.type || resolution.resolution_type || '').toLowerCase();
-  const reasonField = String(claim?.reason_id || claim?.reason || '').toLowerCase();
-  const parties = Array.isArray(resolution.parties) ? resolution.parties : [];
-
-  // ml_protected: ML absorveu o custo — vendedor não perde nada financeiramente.
-  // Checar tanto resolution.type quanto reason (bpp_covered vem no reason nas orders/search).
-  const protectedTypes = ['seller_protection', 'bpp_covered', 'no_action_required', 'no_action', 'rejected'];
-  const mlProtected = protectedTypes.some(t => resType.includes(t) || reasonField.includes(t));
-
-  if (mlProtected) {
-    return { return_shipping_cost: 0, return_fee: 0, refund_adjustment: 0, resolution_type: resType || 'seller_protection', ml_protected: true };
-  }
-
-  // Monta custos a partir de resolution.parties — cada entry tem { role, type, amount }
-  // role: "seller" | "buyer" | "marketplace" | "shipping"
-  let returnShippingCost = 0;
-  let returnFee = 0;
-  let refundAdjustment = 0;
-
-  for (const p of parties) {
-    const role = String(p.role || p.type || '').toLowerCase();
-    const amount = Number(p.amount || p.value || p.cost || 0);
-    if (!amount) continue;
-
-    if (role === 'shipping' || role === 'return_shipping' || /frete|shipping/i.test(role)) {
-      returnShippingCost += amount;
-    } else if (role === 'seller') {
-      // Quando o vendedor é debitado, pode ser taxa ou reembolso ao comprador
-      if (/fee|commission|taxa/i.test(String(p.description || p.reason || ''))) {
-        returnFee += amount;
-      } else {
-        refundAdjustment += amount;
-      }
-    }
-  }
-
-  // Fallback: se não tem parties mas tem valor total na resolution, trata como refund_adjustment
-  if (!parties.length) {
-    const total = Number(resolution.total_amount || resolution.amount || resolution.refund_amount || 0);
-    if (total > 0) refundAdjustment = total;
-  }
-
-  return { return_shipping_cost: returnShippingCost, return_fee: returnFee, refund_adjustment: refundAdjustment, resolution_type: resType || 'refund', ml_protected: false };
-}
-
-async function ssFetchMLReturns(acc, days = 365) {
-  const headers = { Authorization: `Bearer ${acc.access_token}` };
-  const claimsDomain = 'https://api.mercadolibre.com';
-  const since = new Date(Date.now() - Math.min(Math.max(Number(days) || 365, 1), 365) * 86400000).toISOString();
-
-  // Tenta claims API primeiro — mais preciso, já filtra só disputas/devoluções reais.
-  try {
-    const allClaims = [];
-    for (let offset = 0; offset < 500; offset += 50) {
-      const { data } = await axios.get(`${claimsDomain}/post-purchase/v1/claims/search`, {
-        headers,
-        params: { seller_id: acc.platform_shop_id, limit: 50, offset, sort: 'date_created:desc', date_created_from: since }
-      });
-      const page = data?.data || data?.results || [];
-      allClaims.push(...page);
-      if (!page.length || page.length < 50) break;
-      if (data?.paging?.total && offset + 50 >= Number(data.paging.total)) break;
-    }
-
-    if (allClaims.length > 0) {
-      console.log(`[ML returns] claims API: ${allClaims.length} claims encontrados`);
-      // Busca detalhes de cada claim para pegar resolution e custos reais
-      const detailed = await ssMapLimit(allClaims, 5, async (c) => {
-        try {
-          const { data } = await axios.get(`${claimsDomain}/post-purchase/v1/claims/${c.id}`, { headers });
-          return data;
-        } catch(e) {
-          return c; // fallback: usa dados básicos da lista
-        }
-      });
-
-      return detailed.map(c => {
-        const costs = ssResolveMLClaimCosts(c);
-        return {
-          platform: 'mercadolivre',
-          external_return_id: `ml-claim-${c.id}`,
-          platform_order_id: String(c.resource_id || c.order_id || ''),
-          status: c.status || 'open',
-          reason: c.reason_id || c.reason || c.stage || '—',
-          type: c.type || 'claim',
-          buyer_message: c.players?.find(p => p.role === 'complainant')?.user?.nickname || null,
-          return_tracking_code: c.resolution?.return?.tracking_id || null,
-          resolution_type: costs.resolution_type,
-          ml_protected: costs.ml_protected,
-          return_shipping_cost: costs.return_shipping_cost,
-          return_fee: costs.return_fee,
-          refund_adjustment: costs.refund_adjustment,
-          lost_product_cost: 0,
-          raw_json: c
-        };
-      });
-    }
-  } catch(e) {
-    console.error('[ML returns] claims API status:', e.response?.status, e.response?.data || e.message, '— usando orders/search fallback');
-  }
-
-  // Fallback: varre orders/search e detecta devolução por sinais nos pagamentos.
-  const out = [];
-  try {
-    const limit = 50;
-    for (let page = 0; page < 20; page++) {
-      const offset = page * limit;
-      const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
-        headers,
-        params: { seller: acc.platform_shop_id, sort: 'date_desc', 'order.date_created.from': since, limit, offset }
-      });
-      const arr = Array.isArray(data.results) ? data.results : [];
-      for (const o of arr) {
-        if (!ssMLIsRealReturnFromOrder(o)) continue;
-        const payments = Array.isArray(o.payments) ? o.payments : [];
-        const reason = payments.map(p => p.status_detail || p.status).filter(Boolean).join(', ');
-        // bpp_covered = ML absorveu, vendedor não perde. bpp_refunded = ML reembolsou comprador, vendedor pode perder.
-        const bppCovered = payments.some(p => /bpp_covered/i.test(`${p.status||''} ${p.status_detail||''}`));
-        out.push({
-          platform: 'mercadolivre',
-          external_return_id: `ml-order-${o.id}`,
-          platform_order_id: String(o.id || ''),
-          status: o.status || 'returned',
-          reason: reason || 'Pedido entregue com reembolso/chargeback',
-          type: 'return',
-          resolution_type: bppCovered ? 'seller_protection' : 'refund',
-          ml_protected: bppCovered,
-          return_shipping_cost: bppCovered ? 0 : payments.reduce((s, p) => s + Number(p.shipping_cost || 0), 0),
-          return_fee: 0,
-          refund_adjustment: 0,
-          lost_product_cost: 0,
-          raw_json: o
-        });
-      }
-      if (!arr.length || arr.length < limit) break;
-      if (data.paging?.total && offset + limit >= Number(data.paging.total)) break;
-    }
-  } catch(e) {
-    console.error('[ML returns orders/search]', e.response?.status, e.response?.data || e.message);
-  }
-  return out;
-}
-
-async function ssFetchMagaluReturns(acc) {
-  const headers = { Authorization: `Bearer ${acc.access_token}` };
-  try {
-    const { data } = await axios.get('https://api.magalu.com/seller/v0/tickets', { params: { _limit: 50, _sort: 'updated_at:desc' }, headers });
-    const tickets = data?.results || data?.tickets || data?.data || [];
-    const out=[];
-    for (const t of tickets.slice(0,50)) {
-      const tid = t.id || t.uuid || t.code;
-      if (!tid) continue;
-      try {
-        const rr = await axios.get(`https://api.magalu.com/seller/v0/tickets/${tid}/returns`, { headers });
-        const returns = rr.data?.results || rr.data?.returns || rr.data?.data || [];
-        for (const r of returns) out.push({ platform:'magalu', external_return_id:String(r.id || r.uuid || r.code), external_ticket_id:String(tid), platform_order_id:String(t.order?.code || t.order_id || r.order?.code || ''), status:r.status?.id || r.status || t.status, reason:r.reason?.description || r.reason || t.reason, return_tracking_code:r.tracking_code || r.tracking?.code || '', raw_json:{ticket:t, return:r} });
-      } catch(e) {}
-    }
-    return out;
-  } catch(e) { console.error('[Magalu returns]', e.response?.status, e.response?.data || e.message); return []; }
-}
-
-async function ssLoadReturns(userId, platform=null) {
-  const params=[userId];
-  let sql=`SELECT r.*, o.item_title, o.item_sku, o.total_amount, o.order_date
-           FROM marketplace_returns r
-           LEFT JOIN marketplace_orders o ON o.user_id=r.user_id AND o.platform=r.platform AND o.platform_order_id=r.platform_order_id
-           WHERE r.user_id=$1`;
-  if(platform){params.push(platform); sql += ` AND r.platform=$${params.length}`;}
-  sql += ` ORDER BY r.updated_at DESC LIMIT 500`;
-  const { rows } = await db.query(sql, params);
-  return rows.map(x=>({ ...x, return_shipping_cost:Number(x.return_shipping_cost||0), return_fee:Number(x.return_fee||0), refund_adjustment:Number(x.refund_adjustment||0), lost_product_cost:Number(x.lost_product_cost||0), return_total_cost:Number(x.return_total_cost||0), total_amount:Number(x.total_amount||0) }));
-}
-
-app.get('/api/returns', auth, async (req, res) => {
-  try { res.json({ success:true, data: await ssLoadReturns(req.user.id, req.query.platform || null) }); }
-  catch(e){ res.status(500).json({ error:e.message }); }
-});
-
-app.post('/api/returns/:id/cost', auth, async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    const shipping = ssNum2(req.body.return_shipping_cost);
-    const fee = ssNum2(req.body.return_fee);
-    const refund = ssNum2(req.body.refund_adjustment);
-    const lost = ssNum2(req.body.lost_product_cost);
-    const total = shipping + fee + refund + lost;
-    const { rows } = await db.query(`UPDATE marketplace_returns SET return_shipping_cost=$1, return_fee=$2, refund_adjustment=$3, lost_product_cost=$4, return_total_cost=$5, updated_at=NOW() WHERE id=$6 AND user_id=$7 RETURNING *`, [shipping, fee, refund, lost, total, id, req.user.id]);
-    if(!rows.length) return res.status(404).json({ error:'Devolução não encontrada' });
-    res.json({ success:true, data:rows[0] });
-  } catch(e){ res.status(500).json({ error:e.message }); }
-});
-
-app.post('/api/returns/sync/:platform', auth, async (req, res) => {
-  try {
-    const platform = String(req.params.platform || '').toLowerCase();
-    const accounts = await ssGetAccounts(req.user.id, platform);
-    let count=0;
-    for (const acc of accounts) {
-      const list = platform === 'mercadolivre' ? await ssFetchMLReturns(acc) : platform === 'magalu' ? await ssFetchMagaluReturns(acc) : [];
-      for (const r of list) { await ssUpsertReturn(req.user.id, acc, r); count++; }
-    }
-    res.json({ success:true, synced:count, data: await ssLoadReturns(req.user.id, platform) });
-  } catch(e){ res.status(500).json({ error:e.message }); }
-});
-
-// ── FRETE MANUAL POR PEDIDO ──
-app.put('/api/orders/:platform/:orderId/shipping', auth, async (req, res) => {
-  const platform = normPlatform(req.params.platform);
-  const orderId = String(req.params.orderId || '').trim();
-  const raw = req.body?.shipping_fee;
-  const manual = raw === '' || raw === null || raw === undefined ? null : Number(raw);
-  if (!platform || !orderId) return res.status(400).json({ error: 'Pedido inválido' });
-  if (manual !== null && (!Number.isFinite(manual) || manual < 0)) return res.status(400).json({ error: 'Frete inválido' });
-
-  try {
-    const { rowCount } = await db.query(
-      `UPDATE marketplace_orders
-       SET manual_shipping_fee=$1, updated_at=NOW()
-       WHERE user_id=$2 AND platform=$3 AND platform_order_id=$4`,
-      [manual, req.user.id, platform, orderId]
-    );
-    if (!rowCount) return res.status(404).json({ error: 'Pedido não encontrado' });
-    res.json({ success: true, manual_shipping_fee: manual });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// ── API PEDIDOS ──
-app.get('/api/orders', auth, async (req, res) => {
-  const { period = '7', platform, date_from, date_to, fresh } = req.query;
-  try {
-    let orders = [];
-    if (String(fresh || '') !== '1') {
-      orders = await ssLoadOrdersFromSql(req.user.id, { period, platform, date_from, date_to });
-    }
-    // Primeiro acesso ou botão de atualizar: busca API, salva no SQL e depois usa o SQL.
-    if (!orders.length || String(fresh || '') === '1') {
-      const days = date_from && date_to ? 45 : Math.min(Math.max(parseInt(period) || 7, 1), 45);
-      await ssSyncOrdersForUser(req.user.id, platform || null, days);
-      orders = await ssLoadOrdersFromSql(req.user.id, { period, platform, date_from, date_to });
-    }
-    const enriched = await enrichWithCosts(orders, req.user.id);
-    enriched.sort((a, b) => new Date(b.order_date) - new Date(a.order_date));
-    res.json({ success: true, from_sql: true, data: enriched, total: enriched.length });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// ── SYNC ──
-app.get('/api/sync/:platform', auth, async (req, res) => {
-  try {
-    Object.keys(CACHE).forEach(k => { if (k.startsWith(`${req.user.id}_${req.params.platform}`)) delete CACHE[k]; });
-    const platform = req.params.platform === 'all' ? null : req.params.platform;
-    const orders = await ssSyncOrdersForUser(req.user.id, platform, 45);
-    res.json({ success: true, stored: orders.length });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// Sync rápido: só últimas 48h, resposta em ~1s. Usado pelo auto-refresh do frontend.
-app.get('/api/sync/quick', auth, async (req, res) => {
-  try {
-    const platform = req.query.platform || null;
-    const count = await ssQuickSyncOrdersForUser(req.user.id, platform);
-    res.json({ success: true, upserted: count });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// ── MERCADO LIVRE: ETIQUETA DE ENVIO ──
-app.get('/api/mercadolivre/shipments/:shipmentId/label', async (req, res, next) => {
-  if (req.query.token && !req.headers.authorization) {
-    try { req.user = jwt.verify(req.query.token, process.env.JWT_SECRET); return next(); }
-    catch { return res.status(401).json({ error: 'Token inválido' }); }
-  }
-  return auth(req, res, next);
-}, async (req, res) => {
-  const shipmentId = req.params.shipmentId;
-  try {
-    const { rows } = await db.query(
-      `SELECT * FROM marketplace_accounts
-       WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND access_token IS NOT NULL
-       LIMIT 1`,
-      [req.user.id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Mercado Livre não conectado' });
-
-    let acc = rows[0];
-    let token = acc.access_token;
-    if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 5*60*1000)) {
-      const newToken = await refreshMLToken(acc);
-      if (newToken) token = newToken;
-    }
-
-    const headers = { Authorization: `Bearer ${token}` };
-    const attempts = [
-      `https://api.mercadolibre.com/shipment_labels?shipment_ids=${encodeURIComponent(shipmentId)}&response_type=pdf`,
-      `https://api.mercadolibre.com/shipments/${encodeURIComponent(shipmentId)}/labels?response_type=pdf`
-    ];
-
-    let lastError = null;
-    for (const url of attempts) {
-      try {
-        const r = await axios.get(url, { headers, responseType: 'arraybuffer', validateStatus: s => s < 500 });
-        const ct = String(r.headers['content-type'] || '');
-        if (r.status >= 200 && r.status < 300 && (ct.includes('pdf') || Buffer.byteLength(r.data || Buffer.alloc(0)) > 500)) {
-          res.setHeader('Content-Type', ct.includes('pdf') ? ct : 'application/pdf');
-          res.setHeader('Content-Disposition', `inline; filename="etiqueta-ml-${shipmentId}.pdf"`);
-          return res.send(Buffer.from(r.data));
-        }
-        lastError = { status: r.status, data: Buffer.from(r.data || '').toString('utf8').slice(0, 500) };
-      } catch(e) {
-        lastError = e.response?.data || e.message;
-      }
-    }
-
-    return res.status(422).json({ error: 'Etiqueta ainda não disponível para esse envio', details: lastError });
-  } catch(e) {
-    console.error('[ML label]', e.response?.data || e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-
-setInterval(() => {
-  const now = Date.now();
-  Object.keys(CACHE).forEach(k => { if ((now - CACHE[k].ts) >= CACHE_TTL) delete CACHE[k]; });
-}, CACHE_TTL);
-
-// ── OAUTH ML ──
-app.get('/auth/mercadolivre', (req, res) => {
-  const state = req.query.user_id || '';
-  res.redirect('https://auth.mercadolivre.com.br/authorization'
-    + `?response_type=code&client_id=${process.env.ML_CLIENT_ID}`
-    + `&redirect_uri=${encodeURIComponent(process.env.ML_REDIRECT_URI)}&state=${state}`);
-});
-
-app.get('/callback/mercadolivre', async (req, res) => {
-  const { code, state } = req.query;
-  if (!code) return res.redirect('https://salesync.shop?error=ml_no_code');
-  try {
-    const { data: tk } = await axios.post('https://api.mercadolibre.com/oauth/token',
-      new URLSearchParams({ grant_type:'authorization_code', client_id:process.env.ML_CLIENT_ID,
-        client_secret:process.env.ML_CLIENT_SECRET, code, redirect_uri:process.env.ML_REDIRECT_URI }),
-      { headers: { 'Content-Type':'application/x-www-form-urlencoded' } }
-    );
-    const { data: info } = await axios.get(`https://api.mercadolibre.com/users/${tk.user_id}`,
-      { headers: { Authorization:`Bearer ${tk.access_token}` } }
-    );
-    await db.query(`
-      INSERT INTO marketplace_accounts (user_id,platform,platform_shop_id,shop_name,seller_email,access_token,refresh_token,token_expires_at,mode,is_active)
-      VALUES ($1,'mercadolivre',$2,$3,$4,$5,$6,$7,'both',true)
-      ON CONFLICT (user_id,platform,platform_shop_id) DO UPDATE SET
-        access_token=EXCLUDED.access_token,refresh_token=EXCLUDED.refresh_token,
-        token_expires_at=EXCLUDED.token_expires_at,is_active=true,updated_at=NOW()`,
-      [state, String(tk.user_id), info.nickname, info.email,
-       tk.access_token, tk.refresh_token, new Date(Date.now()+tk.expires_in*1000)]
-    );
-    res.redirect('https://salesync.shop?connected=mercadolivre');
-  } catch(e) { console.error('[ML]', e.response?.data||e.message); res.redirect('https://salesync.shop?error=ml_failed'); }
-});
-
-// ── OAUTH SHOPEE ──
-// A Shopee NÃO devolve o state/uid no callback.
-// Solução: salvar user_id em tabela temporária (nonce) antes de redirecionar,
-// e recuperar pelo shop_id no callback.
-async function ensureShopeeNonceTable() {
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS shopee_oauth_nonce (
-      nonce      TEXT PRIMARY KEY,
-      user_id    UUID NOT NULL,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW()
-    )
-  `).catch(() => {});
-}
-ensureShopeeNonceTable();
-
-app.get('/auth/shopee', async (req, res) => {
-  const uid = req.query.user_id || '';
-  if (!uid) return res.status(400).send('user_id obrigatório');
-
-  // Salva nonce → user_id no banco (expira em 10 min, mas não precisamos limpar imediatamente)
-  const nonce = crypto.randomBytes(16).toString('hex');
-  await db.query(
-    `INSERT INTO shopee_oauth_nonce (nonce, user_id) VALUES ($1, $2)
-     ON CONFLICT (nonce) DO UPDATE SET user_id=$2, created_at=NOW()`,
-    [nonce, uid]
-  ).catch(e => console.error('[Shopee nonce save]', e.message));
-
-  const ts   = Math.floor(Date.now() / 1000);
-  const path = '/api/v2/shop/auth_partner';
-  const sign = shopeeSign(SHOPEE_PID(), path, ts, SHOPEE_KEY());
-
-  // Embutimos o nonce na redirect_uri como query param — a Shopee preserva o path+query do redirect.
-  const baseRedirect = process.env.SHOPEE_REDIRECT_URI || '';
-  const redirectUri  = `${baseRedirect}?nonce=${nonce}`;
-
-  const authUrl = `${SHOPEE_BASE}${path}?partner_id=${SHOPEE_PID()}&timestamp=${ts}&sign=${sign}&redirect=${encodeURIComponent(redirectUri)}`;
-  console.log('[Shopee Auth] uid:', uid, '| nonce:', nonce);
-  res.redirect(authUrl);
-});
-
-app.get('/callback/shopee', async (req, res) => {
-  const { code, shop_id, nonce } = req.query;
-  console.log('[Shopee Callback] code:', code ? 'ok' : 'MISSING', '| shop_id:', shop_id, '| nonce:', nonce || '(vazio)');
-
-  if (!code) return res.redirect('https://salesync.shop?error=shopee_no_code');
-
-  // Recupera user_id pelo nonce
-  let uid = '';
-  if (nonce) {
-    try {
-      const { rows } = await db.query(
-        `DELETE FROM shopee_oauth_nonce WHERE nonce=$1 AND created_at > NOW() - INTERVAL '10 minutes' RETURNING user_id`,
-        [nonce]
-      );
-      uid = rows[0]?.user_id || '';
-      if (!uid) console.warn('[Shopee Callback] nonce expirado ou não encontrado:', nonce);
-    } catch(e) { console.error('[Shopee nonce lookup]', e.message); }
-  }
-
-  if (!uid) {
-    console.error('[Shopee Callback] ❌ user_id não encontrado — nonce inválido/expirado');
-    return res.redirect('https://salesync.shop?error=shopee_session_expired');
-  }
-
-  try {
-    const ts   = Math.floor(Date.now() / 1000);
-    const path = '/api/v2/auth/token/get';
-    const sign = shopeeSign(SHOPEE_PID(), path, ts, SHOPEE_KEY());
-    const { data: tk } = await axios.post(
-      `${SHOPEE_BASE}${path}?partner_id=${SHOPEE_PID()}&timestamp=${ts}&sign=${sign}`,
-      { code, partner_id: parseInt(process.env.SHOPEE_PARTNER_ID), shop_id: parseInt(shop_id) },
-      { headers: { 'Content-Type': 'application/json' } }
-    );
-
-    if (!tk.access_token) throw new Error(JSON.stringify(tk));
-
-    // Busca nome real da loja
-    let shopName = `Shopee Loja ${shop_id}`;
-    try {
-      const ts2   = Math.floor(Date.now() / 1000);
-      const spath = '/api/v2/shop/get_shop_info';
-      const ssign = shopeeSign(SHOPEE_PID(), spath, ts2, SHOPEE_KEY(), tk.access_token, String(shop_id));
-      const { data: si } = await axios.get(`${SHOPEE_BASE}${spath}`, {
-        params: { partner_id: SHOPEE_PID(), shop_id: String(shop_id), access_token: tk.access_token, timestamp: ts2, sign: ssign }
-      });
-      shopName = si?.response?.shop_name || si?.shop_name || shopName;
-    } catch(e) { console.warn('[Shopee] shop_info falhou, usando nome padrão:', e.message); }
-
-    await db.query(`
-      INSERT INTO marketplace_accounts (user_id,platform,platform_shop_id,shop_name,access_token,refresh_token,token_expires_at,mode,is_active)
-      VALUES ($1,'shopee',$2,$3,$4,$5,$6,'normal',true)
-      ON CONFLICT (user_id,platform,platform_shop_id) DO UPDATE SET
-        access_token=EXCLUDED.access_token, refresh_token=EXCLUDED.refresh_token,
-        token_expires_at=EXCLUDED.token_expires_at, shop_name=EXCLUDED.shop_name,
-        is_active=true, updated_at=NOW()`,
-      [uid, String(shop_id), shopName, tk.access_token, tk.refresh_token,
-       new Date(Date.now() + (tk.expire_in || 14400) * 1000)]
-    );
-
-    console.log(`[Shopee] ✅ Conta conectada: ${shopName} (shop_id ${shop_id}) → user ${uid}`);
-    res.redirect('https://salesync.shop?connected=shopee');
-  } catch(e) {
-    console.error('[Shopee callback]', e.response?.data || e.message);
-    res.redirect('https://salesync.shop?error=shopee_failed');
-  }
-});
-
-// ── OAUTH MAGALU ──
-app.get('/auth/magalu', (req, res) => {
-  const state = req.query.user_id || '';
-
-  const scope = [
-    'open:order-order-seller:read',
-    'open:order-delivery-seller:read',
-    'open:order-delivery-seller:write',
-    'open:order-invoice-seller:read',
-    'open:order-logistics-seller:read',
-    'open:order-logistics-seller:write',
-    'open:logistic-seller-shippings:read'
-  ].join(' ');
-
-  const url = 'https://id.magalu.com/login?' + new URLSearchParams({
-    client_id: process.env.MAGALU_CLIENT_ID,
-    redirect_uri: process.env.MAGALU_REDIRECT_URI,
-    scope,
-    response_type: 'code',
-    choose_tenants: 'true',
-    state
-  }).toString();
-
-  console.log('[MAGALU AUTH URL]', url);
-
-  res.redirect(url);
-});
-
-// Opcional: use esta rota só depois de criar um NOVO client Magalu com o scope de entrega liberado.
-// URL: /auth/magalu-full?user_id=...
-app.get('/auth/magalu-full', (req, res) => {
-  const state = req.query.user_id || '';
-  const scope = 'open:order-order-seller:read open:order-delivery-seller:read';
-
-  const url = 'https://id.magalu.com/login?' + new URLSearchParams({
-    client_id: process.env.MAGALU_CLIENT_ID,
-    redirect_uri: process.env.MAGALU_REDIRECT_URI,
-    scope,
-    response_type: 'code',
-    choose_tenants: 'true',
-    state
-  }).toString();
-
-  console.log('[MAGALU AUTH URL - FULL]', url);
-  res.redirect(url);
-});
-
-app.get('/callback/magalu', async (req, res) => {
-  const { code, state } = req.query;
-  if (!code) return res.redirect('https://salesync.shop?error=magalu_no_code');
-  try {
-    const { data: tk } = await axios.post('https://id.magalu.com/oauth/token',
-      new URLSearchParams({ grant_type:'authorization_code', client_id:process.env.MAGALU_CLIENT_ID,
-        client_secret:process.env.MAGALU_CLIENT_SECRET, code, redirect_uri:process.env.MAGALU_REDIRECT_URI }),
-      { headers: { 'Content-Type':'application/x-www-form-urlencoded' } }
-    );
-    // Nome real da loja via primeiro pedido
-    let sellerId = 'magalu-store', shopName = 'Loja Magalu';
-    try {
-      const { data: sample } = await axios.get('https://api.magalu.com/seller/v1/orders', {
-        params: { _limit: 1, _sort: 'created_at:desc' },
-        headers: { Authorization: `Bearer ${tk.access_token}` }
-      });
-      const seller = sample.results?.[0]?.deliveries?.[0]?.seller;
-      if (seller?.name) {
-        sellerId = seller.id || 'magalu-store';
-        shopName = seller.name; // nome real: ex "levelupshops"
-        console.log('[Magalu] Nome da loja:', shopName);
-      }
-    } catch(se) { console.log('[Magalu seller name]', se.message); }
-
-    await db.query(`
-      INSERT INTO marketplace_accounts (user_id,platform,platform_shop_id,shop_name,access_token,refresh_token,token_expires_at,mode,is_active)
-      VALUES ($1,'magalu',$2,$3,$4,$5,$6,'both',true)
-      ON CONFLICT (user_id,platform,platform_shop_id) DO UPDATE SET
-        access_token=EXCLUDED.access_token,refresh_token=EXCLUDED.refresh_token,
-        token_expires_at=EXCLUDED.token_expires_at,shop_name=EXCLUDED.shop_name,is_active=true,updated_at=NOW()`,
-      [state, String(sellerId), shopName, tk.access_token, tk.refresh_token,
-       new Date(Date.now()+(tk.expires_in||7200)*1000)]
-    );
-    console.log(`[Magalu] ✅ ${shopName} conectado`);
-    res.redirect('https://salesync.shop?connected=magalu');
-  } catch(e) {
-    console.error('[Magalu callback]', {
-      status: e.response?.status,
-      data: e.response?.data,
-      message: e.message
-    });
-    res.redirect('https://salesync.shop?error=magalu_failed');
-  }
-});
-
-
-// ══ DEBUG MERCADO LIVRE ══
-app.get('/debug/mercadolivre', auth, async (req, res) => {
-  const days = parseInt(req.query.days || '30');
-  try {
-    const { rows } = await db.query(
-      `SELECT * FROM marketplace_accounts WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND access_token IS NOT NULL LIMIT 1`,
-      [req.user.id]
-    );
-    if (!rows.length) return res.send('<h2 style="font-family:sans-serif;padding:20px;color:red">Mercado Livre não conectado</h2>');
-    const acc = rows[0];
-    const since = new Date(Date.now() - days * 86400000).toISOString();
-    let rawData = null, error = '';
-    try {
-      const debugResults = [];
-      const limit = 50;
-      for (let page = 0; page < 10; page++) {
-        const offset = page * limit;
-        const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
-          params: { seller: acc.platform_shop_id, sort: 'date_desc', 'order.date_created.from': since, limit, offset },
-          headers: { Authorization: `Bearer ${acc.access_token}` }
-        });
-        const pageResults = Array.isArray(data.results) ? data.results : [];
-        debugResults.push(...pageResults);
-        const total = Number(data.paging?.total || 0);
-        if (!pageResults.length || pageResults.length < limit || (total && offset + limit >= total)) break;
-      }
-      rawData = { results: debugResults, paging: { total: debugResults.length } };
-    } catch(e) { error = e.response?.status + ' ' + JSON.stringify(e.response?.data || e.message); }
-
-    const orders = rawData?.results || [];
-
-    // Busca items em lote
-    const itemIds = [...new Set(orders.map(o => o.order_items?.[0]?.item?.id).filter(Boolean))];
-    const itemMap = {};
-    for (let i = 0; i < itemIds.length; i += 20) {
-      try {
-        const { data: items } = await axios.get('https://api.mercadolibre.com/items', {
-          params: { ids: itemIds.slice(i, i+20).join(',') },
-          headers: { Authorization: `Bearer ${acc.access_token}` }
-        });
-        (Array.isArray(items)?items:[]).forEach(entry => {
-          if (entry.code === 200 && entry.body) {
-            const b = entry.body;
-            itemMap[b.id] = {
-              title: b.title,
-              image: b.pictures?.[0]?.url || b.thumbnail || null,
-              sku: b.seller_custom_field || b.attributes?.find(a=>a.id==='SELLER_SKU')?.value_name || '',
-              logistic_type: b.shipping?.logistic_type || ''
-            };
-          }
-        });
-      } catch(e) { console.error('[ML debug items]', e.message); }
-    }
-
-    const html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"/>
-<title>Debug ML</title>
-<style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:'Segoe UI',sans-serif;background:#0D1117;color:#e6edf3;padding:20px;}
-h1{color:#FFE600;margin-bottom:4px;}.sub{color:#64748B;font-size:13px;margin-bottom:20px;}
-.section{background:#161B26;border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:16px;margin-bottom:16px;}
-.section h2{font-size:13px;color:#94A3B8;text-transform:uppercase;letter-spacing:.6px;margin-bottom:12px;}
-pre{background:#0D1117;border-radius:8px;padding:12px;overflow-x:auto;font-size:11px;color:#38BDF8;border:1px solid rgba(255,255,255,.06);}
-.order-card{background:#1E2535;border-radius:8px;padding:12px;margin-bottom:10px;display:flex;gap:12px;}
-.order-img{width:60px;height:60px;border-radius:6px;object-fit:cover;flex-shrink:0;}
-.badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700;}
-.green{background:rgba(16,185,129,.15);color:#10B981;}.red{background:rgba(244,63,94,.12);color:#F43F5E;}
-.yellow{background:rgba(251,191,36,.12);color:#FBBF24;}.blue{background:rgba(56,189,248,.12);color:#38BDF8;}
-.info-row{display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.04);}
-.l{color:#64748B;}.v{color:#F8FAFC;font-weight:600;}</style></head><body>
-<h1>🟡 Debug Mercado Livre</h1>
-<div class="sub">Últimos ${days} dias · ${new Date().toLocaleString('pt-BR')}</div>
-${error?`<div style="background:rgba(244,63,94,.1);border:1px solid rgba(244,63,94,.3);border-radius:8px;padding:12px;color:#F43F5E;margin-bottom:16px">${error}</div>`:''}
-<div class="section"><h2>Conta</h2>
-<div class="info-row"><span class="l">Shop ID</span><span class="v">${acc.platform_shop_id}</span></div>
-<div class="info-row"><span class="l">Nome (nickname)</span><span class="v">${acc.shop_name}</span></div>
-<div class="info-row"><span class="l">Token expira</span><span class="v">${acc.token_expires_at?new Date(acc.token_expires_at).toLocaleString('pt-BR'):'—'}</span></div>
-</div>
-<div class="section"><h2>${orders.length} pedidos · ${itemIds.length} items buscados</h2>
-${orders.map(o => {
-  const item = o.order_items?.[0];
-  const details = itemMap[item?.item?.id] || {};
-  const isFull = o.shipping?.logistic_type === 'fulfillment' || details.logistic_type === 'fulfillment';
-  const sc = {paid:'green',payment_required:'yellow',confirmed:'green',shipped:'blue',delivered:'green',cancelled:'red'}[o.status]||'yellow';
-  return `<div class="order-card">
-    ${details.image?`<img class="order-img" src="${details.image}" onerror="this.src=''"/>`:'<div style="width:60px;height:60px;border-radius:6px;background:#0D1117;display:flex;align-items:center;justify-content:center;font-size:24px;flex-shrink:0">📦</div>'}
-    <div style="flex:1">
-      <div style="font-weight:600;margin-bottom:4px">${details.title||item?.item?.title||'—'}</div>
-      <div style="font-size:11px;color:#64748B;display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
-        <span>ID: ${o.id}</span>
-        <span>SKU: <strong style="color:#A855F7">${details.sku||item?.item?.seller_sku||'—'}</strong></span>
-        <span class="badge ${sc}">${o.status}</span>
-        <span class="badge ${isFull?'blue':'yellow'}">${isFull?'📦 FULL':'🏪 Normal'}</span>
-        <span>R$ ${o.total_amount?.toFixed(2)||'0'}</span>
-        <span>${new Date(o.date_created).toLocaleDateString('pt-BR')}</span>
+function ensureCustomDateModal(){
+  let modal=document.getElementById('mo-date');
+  if(modal)return modal;
+  const wrap=document.createElement('div');
+  wrap.innerHTML=`<div class="mo" id="mo-date" onclick="closeBg(event,'mo-date')">
+    <div class="md" style="max-width:430px;">
+      <div class="mh"><div class="mh-left"><div class="mh-ico"><i class="ti ti-calendar"></i></div><div><div class="mh-title">Data personalizada</div><div class="mh-sub">Selecione um período de até 45 dias</div></div></div><div class="mh-close" onclick="closeMo('mo-date')"><i class="ti ti-x"></i></div></div>
+      <div class="mb">
+        <div class="grid2">
+          <div class="fi"><label>Data inicial</label><input type="date" id="custom-date-from" onchange="syncCustomDateLimits()"/></div>
+          <div class="fi"><label>Data final</label><input type="date" id="custom-date-to"/></div>
+        </div>
+        <div class="note"><i class="ti ti-info-circle"></i> O limite é de 45 dias para evitar sobrecarga nas APIs dos marketplaces.</div>
+        <button class="btn primary" onclick="applyCustomDate()"><i class="ti ti-check"></i> Aplicar filtro</button>
       </div>
     </div>
   </div>`;
-}).join('')}
-</div>
-<div class="section"><h2>JSON do primeiro pedido</h2><pre>${JSON.stringify(orders[0],null,2)}</pre></div>
-<div class="section"><h2>Item details (primeiro)</h2><pre>${JSON.stringify(Object.values(itemMap)[0],null,2)}</pre></div>
-</body></html>`;
-    res.send(html);
-  } catch(e) { res.send(`<pre style="padding:20px;color:red">${e.message}</pre>`); }
-});
-// ── DEBUG ML CLAIMS / DEVOLUÇÕES RAW ──
-app.get('/debug/ml-claims-raw', auth, async (req, res) => {
-  try {
-    const { rows } = await db.query(
-      `SELECT *
-       FROM marketplace_accounts
-       WHERE user_id=$1
-         AND platform='mercadolivre'
-         AND is_active=true
-         AND access_token IS NOT NULL
-       LIMIT 1`,
-      [req.user.id]
-    );
+  document.body.appendChild(wrap.firstElementChild);
+  return document.getElementById('mo-date');
+}
+function setCustomPeriod(el){
+  CUSTOM_PERIOD_EL=el;
+  ensureCustomDateModal();
+  const today=isoDateLocal(new Date());
+  const from=document.getElementById('custom-date-from');
+  const to=document.getElementById('custom-date-to');
+  if(!from||!to)return toast('Calendário não carregou. Recarregue a página.');
+  from.max=today;
+  to.max=today;
+  from.value=CUSTOM_FROM||today;
+  to.value=CUSTOM_TO||today;
+  syncCustomDateLimits();
+  openMo('mo-date');
+}
+function syncCustomDateLimits(){
+  const from=document.getElementById('custom-date-from');
+  const to=document.getElementById('custom-date-to');
+  if(!from||!to||!from.value)return;
+  const start=new Date(from.value+'T00:00:00');
+  const maxEnd=new Date(start);maxEnd.setDate(maxEnd.getDate()+44);
+  const today=new Date();today.setHours(0,0,0,0);
+  to.min=from.value;
+  to.max=isoDateLocal(maxEnd>today?today:maxEnd);
+  if(!to.value||to.value<to.min)to.value=to.min;
+  if(to.value>to.max)to.value=to.max;
+}
+function applyCustomDate(){
+  const ini=document.getElementById('custom-date-from').value;
+  const fim=document.getElementById('custom-date-to').value;
+  if(!ini||!fim)return toast('Selecione as duas datas');
+  const total=daysBetween(ini,fim);
+  if(total<1)return toast('Data final precisa ser depois da inicial');
+  if(total>45)return toast('Escolha no máximo 45 dias');
+  CUSTOM_FROM=ini;CUSTOM_TO=fim;
+  document.querySelectorAll('.pill').forEach(p=>p.classList.remove('on'));
+  if(CUSTOM_PERIOD_EL)CUSTOM_PERIOD_EL.classList.add('on');
+  closeMo('mo-date');
+  toast(`Filtro aplicado: ${ini.split('-').reverse().join('/')} até ${fim.split('-').reverse().join('/')}`);
+  loadData();
+}
+function setPlatFilter(plat,el){document.querySelectorAll('.pfil').forEach(p=>p.classList.remove('on'));el.classList.add('on');PLAT=plat;loadData();}
+function setFTab(el,tab){document.querySelectorAll('.ftab').forEach(t=>t.classList.remove('on'));el.classList.add('on');FTAB=tab;applyFilters();}
+function setPTab(el,tab){document.querySelectorAll('.ptab').forEach(t=>t.classList.remove('on'));el.classList.add('on');PTAB=tab;renderProds();}
+function setSbi(el){document.querySelectorAll('.s-btn').forEach(i=>i.classList.remove('on'));el.classList.add('on');}
+function openMo(id){const m=document.getElementById(id);if(!m)return;m.classList.add('on');if(id==='mo-mp')loadAccountsMo();if(id==='mo-cst')loadProducts();if(id==='mo-dre')renderDRE();if(id==='mo-acc')ssInitDebugToggle();}
+function closeMo(id){const m=document.getElementById(id);if(m)m.classList.remove('on');}
+function closeBg(e,id){if(e.target.id===id)closeMo(id);}
+function toggleMp(id){document.getElementById('mp-'+id).classList.toggle('on');document.getElementById('cv-'+id).classList.toggle('open');}
+function toggleHide(){HIDDEN=!HIDDEN;document.getElementById('eye-btn').innerHTML=HIDDEN?'<i class="ti ti-eye-off"></i>':'<i class="ti ti-eye"></i>';computeDash();renderOrders();renderProds();}
 
-    if (!rows.length) {
-      return res.status(404).json({
-        success: false,
-        error: 'Conta Mercado Livre não conectada'
-      });
-    }
-
-    const acc = rows[0];
-    const token = acc.access_token;
-    const days = Number(req.query.days || 365);
-    const since = new Date(Date.now() - days * 86400000).toISOString();
-
-    const headers = {
-      Authorization: `Bearer ${token}`
-    };
-
-    const attempts = [];
-
-    async function tryCall(name, url, params) {
-      try {
-        const r = await axios.get(url, { headers, params });
-
-        attempts.push({
-          name,
-          ok: true,
-          status: r.status,
-          params,
-          total:
-            r.data?.paging?.total ??
-            r.data?.total ??
-            r.data?.claims?.length ??
-            r.data?.data?.length ??
-            r.data?.results?.length ??
-            null,
-          data: r.data
-        });
-      } catch (e) {
-        attempts.push({
-          name,
-          ok: false,
-          status: e.response?.status || null,
-          params,
-          error: e.response?.data || e.message
-        });
-      }
-    }
-
-    await tryCall(
-      '1 - Claims com seller_id + data',
-      'https://api.mercadopago.com/post-purchase/v1/claims/search',
-      {
-        seller_id: acc.platform_shop_id,
-        limit: 50,
-        offset: 0,
-        'claim.date_created.from': since
-      }
-    );
-
-    await tryCall(
-      '2 - Claims com seller_id sem data',
-      'https://api.mercadopago.com/post-purchase/v1/claims/search',
-      {
-        seller_id: acc.platform_shop_id,
-        limit: 50,
-        offset: 0
-      }
-    );
-
-    await tryCall(
-      '3 - Claims sem seller_id',
-      'https://api.mercadopago.com/post-purchase/v1/claims/search',
-      {
-        limit: 50,
-        offset: 0
-      }
-    );
-
-    await tryCall(
-      '4 - Claims type return',
-      'https://api.mercadopago.com/post-purchase/v1/claims/search',
-      {
-        seller_id: acc.platform_shop_id,
-        type: 'return',
-        limit: 50,
-        offset: 0
-      }
-    );
-
-    await tryCall(
-      '5 - Claims stage claim',
-      'https://api.mercadopago.com/post-purchase/v1/claims/search',
-      {
-        seller_id: acc.platform_shop_id,
-        stage: 'claim',
-        limit: 50,
-        offset: 0
-      }
-    );
-
-    await tryCall(
-      '6 - Claims stage dispute',
-      'https://api.mercadopago.com/post-purchase/v1/claims/search',
-      {
-        seller_id: acc.platform_shop_id,
-        stage: 'dispute',
-        limit: 50,
-        offset: 0
-      }
-    );
-
-    res.json({
-      success: true,
-      account: {
-        id: acc.id,
-        shop_name: acc.shop_name,
-        seller_id: acc.platform_shop_id
-      },
-      days,
-      since,
-      attempts
-    });
-
-  } catch (e) {
-    res.status(500).json({
-      success: false,
-      error: e.message,
-      stack: e.stack
-    });
-  }
-});
-
-
-app.get('/debug/ml-orders-returns-signals', auth, async (req, res) => {
-  try {
-    const { rows } = await db.query(
-      `SELECT *
-       FROM marketplace_accounts
-       WHERE user_id=$1
-         AND platform='mercadolivre'
-         AND is_active=true
-         AND access_token IS NOT NULL
-       LIMIT 1`,
-      [req.user.id]
-    );
-
-    if (!rows.length) return res.status(404).json({ success:false, error:'ML não conectado' });
-
-    const acc = rows[0];
-    const headers = { Authorization: `Bearer ${acc.access_token}` };
-
-    const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
-      headers,
-      params: {
-        seller: acc.platform_shop_id,
-        sort: 'date_desc',
-        limit: 50
-      }
-    });
-
-    const orders = data.results || [];
-
-    const mapped = orders.map(o => ({
-      id: o.id,
-      status: o.status,
-      tags: o.tags,
-      feedback: o.feedback,
-      fulfilled: o.fulfilled,
-      order_request: o.order_request,
-      mediations: o.mediations,
-      pack_id: o.pack_id,
-      shipping_id: o.shipping?.id,
-      payments: (o.payments || []).map(p => ({
-        id: p.id,
-        status: p.status,
-        status_detail: p.status_detail,
-        transaction_amount: p.transaction_amount,
-        total_paid_amount: p.total_paid_amount,
-        shipping_cost: p.shipping_cost,
-        coupon_amount: p.coupon_amount,
-        date_approved: p.date_approved,
-        date_last_modified: p.date_last_modified
-      }))
-    }));
-
-    res.json({
-      success: true,
-      total: mapped.length,
-      data: mapped
-    });
-
-  } catch (e) {
-    res.status(500).json({
-      success:false,
-      status:e.response?.status,
-      error:e.response?.data || e.message
-    });
-  }
-});
-// ══ ETIQUETA MERCADO LIVRE — v5.9 restaurada ══
-app.get('/api/ml/label/:shippingId', auth, async (req, res) => {
-  const { shippingId } = req.params;
-
-  try {
-    const { rows } = await db.query(
-      `SELECT * FROM marketplace_accounts
-       WHERE user_id=$1
-       AND platform='mercadolivre'
-       AND is_active=true
-       AND access_token IS NOT NULL
-       LIMIT 1`,
-      [req.user.id]
-    );
-
-    if (!rows.length) {
-      return res.status(404).json({ error: 'Mercado Livre não conectado' });
-    }
-
-    const acc = rows[0];
-    let token = acc.access_token;
-
-    if (
-      acc.token_expires_at &&
-      new Date(acc.token_expires_at) <= new Date(Date.now() + 5 * 60 * 1000)
-    ) {
-      const newToken = await refreshMLToken(acc);
-      if (newToken) token = newToken;
-    }
-
-    const labelUrl =
-      `https://api.mercadolibre.com/shipment_labels?shipment_ids=${shippingId}&response_type=pdf`;
-
-    const labelResp = await axios.get(labelUrl, {
-      headers: { Authorization: `Bearer ${token}` },
-      responseType: 'arraybuffer'
-    });
-
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="etiqueta-${shippingId}.pdf"`);
-    res.send(Buffer.from(labelResp.data));
-
-  } catch (e) {
-    console.error('[ML Label]', {
-      status: e.response?.status,
-      data: e.response?.data?.toString?.() || e.response?.data || e.message
-    });
-
-    res.status(e.response?.status || 500).json({
-      error: 'Não foi possível baixar a etiqueta',
-      details: {
-        status: e.response?.status,
-        data: e.response?.data?.toString?.() || e.response?.data || e.message
-      }
-    });
-  }
-});
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// v5.7 — EXPEDIÇÃO / ETIQUETAS
-// ═══════════════════════════════════════════════════════════════════════════════
-
-function mlCanShowLabel(orderLike = {}) {
-  const status = String(orderLike.status || '').toLowerCase();
-  const fulfillment = String(orderLike.fulfillment_type || '').toLowerCase();
-  const shippingStatus = String(orderLike.shipping_status || '').toLowerCase();
-  const tags = Array.isArray(orderLike.tags) ? orderLike.tags : [];
-
-  if (fulfillment === 'full') return false;
-  if (!orderLike.shipping_id) return false;
-  if (status === 'cancelled' || status === 'delivered') return false;
-  if (shippingStatus === 'shipped' || shippingStatus === 'delivered') return false;
-  if (tags.includes('delivered') || tags.includes('shipped')) return false;
-
-  return status === 'paid' || tags.includes('paid') || tags.includes('not_delivered');
+function exportCSV(){
+  const h='ID,Título,Plataforma,Conta,SKU,Status,Tipo,Valor,Tarifa,Frete,Imposto,Custo,Lucro,Margem,Data\n';
+  const rows=FILTERED.map(o=>{const l=parseFloat(o.profit||0),m=o.total_amount>0?(l/o.total_amount*100).toFixed(1)+'%':'—';return[o.platform_order_id,o.item_title||'',o.platform,o.shop_name||'',o.item_sku||'',o.status,o.fulfillment_type,o.total_amount,o.platform_fee,o.shipping_fee,o.tax_amount,o.total_cost,l.toFixed(2),m,o.order_date].join(',');}).join('\n');
+  const a=document.createElement('a');a.href='data:text/csv;charset=utf-8,'+encodeURIComponent(h+rows);a.download='salesync.csv';a.click();toast('CSV exportado!');
 }
 
-async function getMagaluAccount(userId) {
-  const { rows } = await db.query(
-    `SELECT * FROM marketplace_accounts
-     WHERE user_id=$1 AND platform='magalu'
-     AND is_active=true AND access_token IS NOT NULL
-     LIMIT 1`,
-    [userId]
-  );
-  if (!rows.length) return null;
-
-  const acc = rows[0];
-  let token = acc.access_token;
-
-  if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 5 * 60 * 1000)) {
-    const newToken = await refreshMagaluToken(acc);
-    if (!newToken) return null;
-    token = newToken;
-  }
-
-  return { ...acc, access_token: token };
-}
-
-function escapeHtml(v) {
-  return String(v ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-function pickMagaluDelivery(order) {
-  const d = order?.deliveries?.[0] || {};
-  const item = d.items?.[0] || {};
-  const info = item.info || {};
-  return { d, item, info };
-}
-
-app.get('/debug/magalu-expedicao', auth, async (req, res) => {
-  try {
-    const acc = await getMagaluAccount(req.user.id);
-    if (!acc) {
-      return res.send('<h2 style="font-family:sans-serif;color:#ef4444;padding:20px">Magalu não conectado ou token expirado. Reconecte a conta.</h2>');
-    }
-
-    const { data } = await axios.get('https://api.magalu.com/seller/v1/orders', {
-      params: { _limit: 1, _sort: 'created_at:desc' },
-      headers: { Authorization: `Bearer ${acc.access_token}` }
-    });
-
-    const order = data.results?.[0];
-    if (!order) {
-      return res.send('<h2 style="font-family:sans-serif;color:#ef4444;padding:20px">Nenhum pedido Magalu encontrado.</h2>');
-    }
-
-    const { d, info } = pickMagaluDelivery(order);
-    const deliveryId = d.id || d.uuid || d.code || d.delivery_id || '';
-    const orderId = order.code || order.id || '';
-    const isFull = d.shipping?.provider?.extras?.is_fulfillment === true;
-    const providerName = d.shipping?.provider?.name || d.shipping?.provider?.description || '—';
-    const status = order.status || d.status || '—';
-    const tokenParam = encodeURIComponent(req.query.token || '');
-
-    const page = `<!doctype html>
-<html lang="pt-BR"><head><meta charset="utf-8"/><title>Debug Magalu Expedição</title>
+let _tt;function toast(msg){const t=document.getElementById('toast');document.getElementById('tmsg').textContent=msg;t.classList.add('on');clearTimeout(_tt);_tt=setTimeout(()=>t.classList.remove('on'),3000);}
+</script>
+<!-- SalesSync v17 — metas, impressões disponíveis e analytics -->
 <style>
-*{box-sizing:border-box}body{font-family:Inter,Segoe UI,Arial,sans-serif;background:#070b16;color:#e5e7eb;margin:0;padding:22px}
-h1{margin:0 0 6px;color:#a78bfa}.sub{color:#64748b;font-size:13px;margin-bottom:18px}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.card{background:#0f172a;border:1px solid rgba(148,163,184,.18);border-radius:14px;padding:16px}
-.card h2{font-size:13px;text-transform:uppercase;letter-spacing:.8px;color:#94a3b8;margin:0 0 12px}
-.row{display:flex;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,.06);padding:7px 0;font-size:12px;gap:10px}
-.l{color:#64748b}.v{font-weight:700;color:#f8fafc;text-align:right;word-break:break-all}
-.btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.btn{border:1px solid rgba(167,139,250,.35);background:rgba(109,40,217,.2);color:#c4b5fd;padding:10px 13px;border-radius:10px;text-decoration:none;font-weight:800;font-size:12px}
-.btn.yellow{border-color:rgba(251,191,36,.35);background:rgba(251,191,36,.1);color:#fbbf24}.bad{color:#f87171}.ok{color:#10b981}
-pre{background:#020617;border:1px solid rgba(148,163,184,.15);border-radius:12px;padding:14px;overflow:auto;max-height:480px;font-size:11px;color:#67e8f9}
-.notice{background:rgba(251,191,36,.09);border:1px solid rgba(251,191,36,.24);color:#fde68a;border-radius:12px;padding:12px;font-size:13px;margin-bottom:14px}
-input{background:#111827;border:1px solid rgba(148,163,184,.22);color:#e5e7eb;border-radius:9px;padding:9px;width:100%;margin-top:6px}
-label{font-size:11px;color:#94a3b8;font-weight:700;text-transform:uppercase}
-</style></head><body>
-<h1>⚡ Debug Magalu Expedição</h1>
-<div class="sub">Último pedido Magalu · ${new Date().toLocaleString('pt-BR')}</div>
-<div class="notice">Para etiqueta Magalu, normalmente o pedido precisa ser <b>envio normal / Magalu Entregas</b> e estar <b>faturado com NF-e</b>. Full/Fulfillment não entra aqui.</div>
-<div class="grid">
-<div class="card"><h2>Pedido</h2>
-<div class="row"><span class="l">Order ID</span><span class="v">${escapeHtml(orderId)}</span></div>
-<div class="row"><span class="l">Delivery ID detectado</span><span class="v">${escapeHtml(deliveryId || 'não encontrado')}</span></div>
-<div class="row"><span class="l">Status</span><span class="v">${escapeHtml(status)}</span></div>
-<div class="row"><span class="l">Full/Fulfillment</span><span class="v ${isFull?'bad':'ok'}">${isFull ? 'SIM — não gerar etiqueta aqui' : 'NÃO — envio normal'}</span></div>
-<div class="row"><span class="l">Transportadora/Provider</span><span class="v">${escapeHtml(providerName)}</span></div>
-<div class="row"><span class="l">Produto</span><span class="v">${escapeHtml(info.name || info.description || '—')}</span></div>
-<div class="row"><span class="l">SKU</span><span class="v">${escapeHtml(info.sku || '—')}</span></div>
-<div class="btns">
-<a class="btn" target="_blank" href="/debug/magalu-expedicao/json?token=${tokenParam}">Ver JSON bruto</a>
-${deliveryId ? `<a class="btn yellow" target="_blank" href="/api/magalu/delivery/${encodeURIComponent(deliveryId)}/debug?token=${tokenParam}">Testar endpoints</a>` : ''}
-${deliveryId ? `<a class="btn" target="_blank" href="/api/magalu/delivery/${encodeURIComponent(deliveryId)}/label?token=${tokenParam}">Tentar etiqueta</a>` : ''}
-</div></div>
-<div class="card"><h2>Possíveis requisitos</h2>
-<div class="row"><span class="l">NF-e / chave</span><span class="v">provável obrigatório</span></div>
-<div class="row"><span class="l">Status faturado/invoiced</span><span class="v">provável obrigatório</span></div>
-<div class="row"><span class="l">Magalu Entregas</span><span class="v">provável obrigatório</span></div>
-<div class="row"><span class="l">Escopo delivery</span><span class="v">pode ser necessário</span></div>
-<div class="row"><span class="l">Full</span><span class="v">não usar etiqueta normal</span></div>
-<div style="margin-top:14px"><label>Delivery ID manual</label><input id="did" placeholder="Cole um delivery id"/>
-<div class="btns">
-<a class="btn" href="#" onclick="this.href='/api/magalu/delivery/'+encodeURIComponent(document.getElementById('did').value)+'/debug?token=${tokenParam}'" target="_blank">Testar ID manual</a>
-<a class="btn" href="#" onclick="this.href='/api/magalu/delivery/'+encodeURIComponent(document.getElementById('did').value)+'/label?token=${tokenParam}'" target="_blank">Etiqueta ID manual</a>
-</div></div></div></div>
-<div class="card" style="margin-top:14px"><h2>delivery[0] bruto</h2><pre>${escapeHtml(JSON.stringify(d, null, 2))}</pre></div>
-<div class="card" style="margin-top:14px"><h2>order bruto</h2><pre>${escapeHtml(JSON.stringify(order, null, 2))}</pre></div>
-</body></html>`;
-
-    res.send(page);
-  } catch (e) {
-    res.send(`<pre style="padding:20px;color:red">${escapeHtml(e.message)}\n${escapeHtml(e.stack)}</pre>`);
+.goal-chip{background:rgba(109,40,217,.12);border:1px solid rgba(139,92,246,.28);border-radius:10px;padding:6px 10px;font-size:10px;color:var(--txt2);display:flex;gap:7px;align-items:center;cursor:pointer}.goal-chip strong{color:var(--p3)}
+.ss-modal{position:fixed;inset:0;background:rgba(6,8,24,.82);backdrop-filter:blur(8px);z-index:9999;display:none;align-items:center;justify-content:center;padding:18px}.ss-modal.on{display:flex}.ss-box{background:var(--bg2);border:1px solid var(--border2);border-radius:18px;width:100%;max-width:760px;max-height:88vh;overflow:auto;box-shadow:0 30px 90px rgba(0,0,0,.65)}.ss-head{padding:16px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}.ss-head h3{font-size:15px;margin:0}.ss-close{width:30px;height:30px;border-radius:8px;background:var(--bg3);border:1px solid var(--border);color:var(--txt3);cursor:pointer}.ss-body{padding:16px 18px;display:flex;flex-direction:column;gap:12px}.ss-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.ss-card{background:var(--bg3);border:1px solid var(--border);border-radius:13px;padding:12px}.ss-card span{display:block;font-size:9px;color:var(--txt3);text-transform:uppercase;letter-spacing:.6px;font-weight:800}.ss-card strong{display:block;font-size:18px;margin-top:4px}.ss-input{background:var(--bg3);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;color:var(--txt);font-size:13px;width:100%;outline:none}.ss-btn{border:0;border-radius:10px;padding:10px 14px;font-size:12px;font-weight:800;cursor:pointer;background:linear-gradient(135deg,var(--p),var(--p2));color:white}.ss-btn.ghost{background:var(--bg4);border:1px solid var(--border2);color:var(--txt2)}.ss-list{display:flex;flex-direction:column;gap:8px}.ss-row{background:var(--bg3);border:1px solid var(--border);border-radius:12px;padding:10px 12px;display:grid;grid-template-columns:28px 1fr auto;gap:10px;align-items:center}.ss-row small{color:var(--txt3)}.ss-badge{font-size:9px;font-weight:800;padding:4px 8px;border-radius:999px;background:rgba(16,185,129,.12);color:var(--green2);border:1px solid rgba(16,185,129,.2)}.ss-progress{height:8px;background:var(--bg4);border-radius:99px;overflow:hidden;margin-top:8px}.ss-progress>div{height:100%;background:linear-gradient(90deg,var(--p),var(--green2));width:0%}@media(max-width:760px){.ss-grid{grid-template-columns:1fr}.ss-box{max-height:94vh}}
+</style>
+<div id="ss-goal-modal" class="ss-modal"><div class="ss-box" style="max-width:460px"><div class="ss-head"><h3>Meta de faturamento mensal</h3><button class="ss-close" onclick="ssCloseModal('ss-goal-modal')">×</button></div><div class="ss-body"><label style="font-size:12px;color:var(--txt2);display:flex;gap:8px;align-items:center"><input type="checkbox" id="ss-goal-enabled"> Usar meta de faturamento</label><input id="ss-goal-value" class="ss-input" type="number" min="0" step="100" placeholder="Ex: 200000"><button class="ss-btn" onclick="ssSaveGoal()">Salvar meta</button></div></div></div>
+<div id="ss-print-modal" class="ss-modal"><div class="ss-box"><div class="ss-head"><h3>Possíveis impressões</h3><button class="ss-close" onclick="ssCloseModal('ss-print-modal')">×</button></div><div class="ss-body"><div style="display:flex;gap:8px;align-items:center;justify-content:space-between"><div style="font-size:12px;color:var(--txt3)">Busca últimos dias e mostra Magalu + Mercado Livre com etiqueta disponível para envio.</div><button class="ss-btn ghost" onclick="ssLoadPrintableDeliveries()">Atualizar</button></div><div id="ss-print-list" class="ss-list"></div><button class="ss-btn" onclick="ssPrintSelectedDeliveries()">Imprimir selecionadas</button></div></div></div>
+<div id="ss-analytics-modal" class="ss-modal"><div class="ss-box"><div class="ss-head"><h3>Resumo SalesSync</h3><button class="ss-close" onclick="ssCloseModal('ss-analytics-modal')">×</button></div><div class="ss-body"><div id="ss-analytics-cards" class="ss-grid"></div><div id="ss-analytics-note" style="font-size:12px;color:var(--txt3)"></div></div></div></div>
+<script>
+function ssToken(){return localStorage.getItem('ss_token')||TOKEN||''}function ssHeaders(){return{Authorization:'Bearer '+ssToken(),'Content-Type':'application/json'}}function ssMoney(v){return Number(v||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'})}function ssCloseModal(id){document.getElementById(id)?.classList.remove('on')}function ssOpenModal(id){document.getElementById(id)?.classList.add('on')}async function ssFetchJson(url,opts={}){const r=await fetch(url,{...opts,headers:{...ssHeaders(),...(opts.headers||{})}});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||j.message||'Erro na requisição');return j}
+async function ssLoadGoal(){try{const j=await ssFetchJson(`${API}/api/user-goals`),g=j.data||{};const en=document.getElementById('ss-goal-enabled'),val=document.getElementById('ss-goal-value');if(en)en.checked=!!g.revenue_goal_enabled;if(val)val.value=Number(g.monthly_revenue_goal||0)||''}catch(e){console.warn(e.message)}}
+async function ssSaveGoal(){await ssFetchJson(`${API}/api/user-goals`,{method:'POST',body:JSON.stringify({revenue_goal_enabled:document.getElementById('ss-goal-enabled')?.checked||false,monthly_revenue_goal:Number(document.getElementById('ss-goal-value')?.value||0)})});ssCloseModal('ss-goal-modal');await ssLoadAnalyticsSummary(true);if(typeof toast==='function')toast('Meta salva')}
+async function ssLoadAnalyticsSummary(updateTop=false){const j=await ssFetchJson(`${API}/api/analytics/summary`),d=j.data||{};if(updateTop){let chip=document.getElementById('ss-goal-chip');if(!chip){chip=document.createElement('div');chip.id='ss-goal-chip';chip.className='goal-chip';chip.onclick=()=>{ssLoadGoal();ssOpenModal('ss-goal-modal')};(document.querySelector('.t-r')||document.getElementById('topbar'))?.prepend(chip)}chip.innerHTML=d.revenue_goal_enabled&&d.monthly_revenue_goal>0?`<span>Meta:</span><strong>${ssMoney(d.monthly_revenue_goal)}</strong><span>Falta:</span><strong>${ssMoney(d.missing_to_goal)}</strong><span>${d.goal_progress_pct}%</span>`:`<span>Meta mensal</span><strong>Configurar</strong>`}return d}
+async function ssOpenAnalytics(){const d=await ssLoadAnalyticsSummary(false);document.getElementById('ss-analytics-cards').innerHTML=`<div class="ss-card"><span>Faturamento mês</span><strong>${ssMoney(d.gross_sales)}</strong></div><div class="ss-card"><span>Lucro líquido</span><strong>${ssMoney(d.net_profit)}</strong></div><div class="ss-card"><span>Previsão mês</span><strong>${ssMoney(d.projected_revenue)}</strong></div><div class="ss-card"><span>Pedidos</span><strong>${d.orders_count}</strong></div><div class="ss-card"><span>Ticket médio</span><strong>${ssMoney(d.avg_ticket)}</strong></div><div class="ss-card"><span>Progresso meta</span><strong>${d.revenue_goal_enabled?d.goal_progress_pct+'%':'—'}</strong><div class="ss-progress"><div style="width:${Math.min(100,d.goal_progress_pct||0)}%"></div></div></div>`;document.getElementById('ss-analytics-note').innerHTML=`Produto mais vendido: <b>${d.best_seller_product||'—'}</b><br>Produto mais lucrativo: <b>${d.most_profitable_product||'—'}</b><br>${d.revenue_goal_enabled?(d.will_hit_goal?'No ritmo atual, deve bater a meta.':'No ritmo atual, ainda precisa acelerar para bater a meta.'):'Meta mensal desativada.'}`;ssOpenModal('ss-analytics-modal')}
+async function ssLoadPrintableDeliveries(){
+  const box=document.getElementById('ss-print-list');
+  box.innerHTML='<div style="color:var(--txt3);font-size:12px">Carregando possíveis impressões...</div>';
+  try{
+    const j=await ssFetchJson(`${API}/api/printable-labels`),arr=j.data||[];
+    if(!arr.length){box.innerHTML='<div style="color:var(--txt3);font-size:12px">Nenhuma impressão disponível agora.</div>';return}
+    box.innerHTML=arr.map(x=>{
+      const isML=x.platform==='mercadolivre';
+      const value=isML?x.shipment_id:x.delivery_id;
+      const badge=isML?'ML':'Magalu';
+      const title=isML?`Envio: ${x.shipment_id}`:`Pedido: ${x.order_code||x.delivery_code}`;
+      const sub=isML?`${x.customer_name||'Cliente'} · ${x.product||''}`:`${x.customer_name||'Cliente'} · ${x.customer_city||''}/${x.customer_state||''}`;
+      const extra=isML?`SKU: ${x.sku||'—'} · ${x.status||'—'}`:`SKU: ${x.sku||'—'} · NF: ${x.invoice_key||'—'} · Status: ${x.status}`;
+      return `<label class="ss-row"><input type="checkbox" class="ss-print-check" data-platform="${x.platform}" value="${value}" checked><div><b>${title}</b><br><small>${sub}</small><br><small>${extra}</small></div><span class="ss-badge">${badge}</span></label>`;
+    }).join('')
+  }catch(e){box.innerHTML=`<div style="color:var(--red2);font-size:12px">${e.message}</div>`}
+}
+function ssOpenPrintable(){ssOpenModal('ss-print-modal');ssLoadPrintableDeliveries()}
+function ssPrintSelectedDeliveries(){
+  const checks=[...document.querySelectorAll('.ss-print-check:checked')];
+  if(!checks.length)return alert('Selecione pelo menos uma venda.');
+  const mg=checks.filter(i=>i.dataset.platform==='magalu').map(i=>i.value);
+  const ml=checks.filter(i=>i.dataset.platform==='mercadolivre').map(i=>i.value);
+  if(mg.length && ml.length){
+    window.open(`${API}/api/magalu/labels/zebra-completo?ids=${encodeURIComponent(mg.join(','))}&token=${encodeURIComponent(ssToken())}`,'_blank');
+    setTimeout(()=>window.open(`${API}/api/ml/labels?shipment_ids=${encodeURIComponent(ml.join(','))}&token=${encodeURIComponent(ssToken())}`,'_blank'),600);
+    return;
   }
-});
+  if(mg.length) return window.open(`${API}/api/magalu/labels/zebra-completo?ids=${encodeURIComponent(mg.join(','))}&token=${encodeURIComponent(ssToken())}`,'_blank');
+  if(ml.length) return window.open(`${API}/api/ml/labels?shipment_ids=${encodeURIComponent(ml.join(','))}&token=${encodeURIComponent(ssToken())}`,'_blank');
+}
+function ssInstallSideButtons(){const sidebar=document.getElementById('sidebar');if(!sidebar)return;if(!document.getElementById('ss-side-print')){const b=document.createElement('div');b.id='ss-side-print';b.className='s-btn';b.innerHTML='<i class="ti ti-printer"></i><span class="s-tip">Possíveis impressões</span>';b.onclick=ssOpenPrintable;sidebar.insertBefore(b,sidebar.querySelector('.s-sp')||null)}if(!document.getElementById('ss-side-analytics')){const b=document.createElement('div');b.id='ss-side-analytics';b.className='s-btn';b.innerHTML='<i class="ti ti-chart-bar"></i><span class="s-tip">Resumo</span>';b.onclick=ssOpenAnalytics;sidebar.insertBefore(b,sidebar.querySelector('.s-sp')||null)}}
+function ssOpenGoalSettings(){ssLoadGoal();ssOpenModal('ss-goal-modal')}
+setTimeout(()=>{ssInstallSideButtons();ssLoadAnalyticsSummary(true).catch(()=>{});fetch(`${API}/api/analytics/monthly-snapshot`,{method:'POST',headers:ssHeaders()}).catch(()=>{})},1400);
+</script>
 
-app.get('/debug/magalu-expedicao/json', auth, async (req, res) => {
-  try {
-    const acc = await getMagaluAccount(req.user.id);
-    if (!acc) return res.status(401).json({ error: 'Magalu não conectado ou token expirado' });
-    const { data } = await axios.get('https://api.magalu.com/seller/v1/orders', {
-      params: { _limit: 1, _sort: 'created_at:desc' },
-      headers: { Authorization: `Bearer ${acc.access_token}` }
-    });
-    res.json(data.results?.[0] || null);
-  } catch(e) {
-    res.status(e.response?.status || 500).json({ error: e.message, data: e.response?.data });
+
+
+<!-- SalesSync v19 — correção resumo: loading, gráfico e compatibilidade data/current_month -->
+<style>
+.ss-loader{width:34px;height:34px;border:3px solid rgba(167,139,250,.18);border-top-color:var(--p2);border-radius:50%;animation:ssspin .75s linear infinite}@keyframes ssspin{to{transform:rotate(360deg)}}
+.ss-loading{min-height:240px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:var(--txt2)}
+.ss-bar-card{background:var(--bg3);border:1px solid var(--border);border-radius:13px;padding:12px;grid-column:1/-1}.ss-bar-title{font-size:12px;font-weight:800;margin-bottom:10px}.ss-bars{display:flex;align-items:flex-end;gap:8px;height:155px;border-bottom:1px solid rgba(255,255,255,.08);padding-top:10px}.ss-bar-wrap{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;gap:5px;min-width:22px}.ss-bar{width:100%;max-width:36px;min-height:4px;border-radius:8px 8px 2px 2px;background:linear-gradient(180deg,var(--p2),var(--p));box-shadow:0 0 12px rgba(139,92,246,.25)}.ss-bar-lbl{font-size:8px;color:var(--txt3);white-space:nowrap}.ss-bar-val{font-size:8px;color:var(--txt2);writing-mode:vertical-rl;transform:rotate(180deg);max-height:58px;overflow:hidden}
+</style>
+<script>
+function ssExtractAnalyticsPayload(j){
+  const cm = j.current_month || j.data || {};
+  return { cm, rows: Array.isArray(j.monthly_revenue) ? j.monthly_revenue : [] };
+}
+function ssBars(rows){
+  rows = Array.isArray(rows) ? rows : [];
+  if(!rows.length) return `<div class="ss-bar-card"><div class="ss-bar-title">Faturamento por mês</div><div style="padding:28px;color:var(--txt3);text-align:center">Sem histórico mensal ainda</div></div>`;
+  const max = Math.max(...rows.map(r=>Number(r.gross_sales||0)), 1);
+  return `<div class="ss-bar-card"><div class="ss-bar-title">Faturamento por mês</div><div class="ss-bars">${rows.map(r=>{const val=Number(r.gross_sales||0); const h=Math.max(4,Math.round((val/max)*125)); return `<div class="ss-bar-wrap" title="${r.label||r.month}: ${ssMoney(val)}"><div class="ss-bar-val">${ssMoney(val)}</div><div class="ss-bar" style="height:${h}px"></div><div class="ss-bar-lbl">${r.label||''}</div></div>`}).join('')}</div></div>`;
+}
+async function ssLoadAnalyticsSummary(updateTop=false){
+  const j = await ssFetchJson(`${API}/api/analytics/summary`);
+  const { cm, rows } = ssExtractAnalyticsPayload(j);
+  const d = cm || {};
+  if(updateTop){
+    let chip=document.getElementById('ss-goal-chip');
+    if(!chip){chip=document.createElement('div');chip.id='ss-goal-chip';chip.className='goal-chip';chip.onclick=()=>{ssLoadGoal();ssOpenModal('ss-goal-modal')};(document.querySelector('.t-r')||document.getElementById('topbar'))?.prepend(chip)}
+    const missing = d.missing_to_goal ?? d.remaining_to_goal;
+    chip.innerHTML=d.revenue_goal_enabled&&d.monthly_revenue_goal>0?`<span>Meta:</span><strong>${ssMoney(d.monthly_revenue_goal)}</strong><span>Falta:</span><strong>${ssMoney(missing)}</strong><span>${Number(d.goal_progress_pct||0).toFixed(1)}%</span>`:`<span>Meta mensal</span><strong>Configurar</strong>`;
   }
-});
-
-app.get('/api/magalu/delivery/:id/debug', auth, async (req, res) => {
-  const deliveryId = req.params.id;
-  try {
-    const acc = await getMagaluAccount(req.user.id);
-    if (!acc) return res.status(401).json({ error: 'Magalu não conectado ou token expirado' });
-
-    const candidates = [
-      `/seller/v1/deliveries/${deliveryId}`,
-      `/seller/v1/deliveries/${deliveryId}/shippings`,
-      `/seller/v1/deliveries/${deliveryId}/labels`,
-      `/seller/v1/deliveries/${deliveryId}/label`,
-      `/seller/v1/deliveries/${deliveryId}/invoices`,
-      `/seller/v1/deliveries/${deliveryId}/histories`,
-      `/seller/v1/orders/${deliveryId}`,
-      `/seller/v1/orders/${deliveryId}/deliveries`
-    ];
-
-    const results = [];
-    for (const path of candidates) {
-      const url = `https://api.magalu.com${path}`;
-      const r = await axios.get(url, {
-        headers: { Authorization: `Bearer ${acc.access_token}` },
-        validateStatus: () => true
-      });
-      results.push({ path, status: r.status, content_type: r.headers?.['content-type'], data: r.data });
-    }
-
-    res.json({
-      delivery_id: deliveryId,
-      note: 'Se etiqueta voltar 404/403/422, provavelmente precisa NF-e/faturamento, Magalu Entregas, escopo delivery ou endpoint específico.',
-      results
-    });
-  } catch(e) {
-    res.status(e.response?.status || 500).json({ error: e.message, data: e.response?.data });
+  return { ...d, monthly_revenue: rows };
+}
+async function ssOpenAnalytics(){
+  ssOpenModal('ss-analytics-modal');
+  const cards=document.getElementById('ss-analytics-cards');
+  const note=document.getElementById('ss-analytics-note');
+  if(cards) cards.innerHTML=`<div class="ss-loading" style="grid-column:1/-1"><div class="ss-loader"></div><div>Carregando resumo...</div><small style="color:var(--txt3)">Buscando vendas, metas e faturamento mensal</small></div>`;
+  if(note) note.innerHTML='';
+  try{
+    const d=await ssLoadAnalyticsSummary(false);
+    cards.innerHTML=`<div class="ss-card"><span>Faturamento mês</span><strong>${ssMoney(d.gross_sales)}</strong></div><div class="ss-card"><span>Lucro líquido</span><strong>${ssMoney(d.net_profit)}</strong></div><div class="ss-card"><span>Previsão mês</span><strong>${ssMoney(d.projected_revenue)}</strong></div><div class="ss-card"><span>Pedidos</span><strong>${d.orders_count||0}</strong></div><div class="ss-card"><span>Ticket médio</span><strong>${ssMoney(d.avg_ticket)}</strong></div><div class="ss-card"><span>Progresso meta</span><strong>${d.revenue_goal_enabled?Number(d.goal_progress_pct||0).toFixed(1)+'%':'—'}</strong><div class="ss-progress"><div style="width:${Math.min(100,d.goal_progress_pct||0)}%"></div></div></div>${ssBars(d.monthly_revenue)}`;
+    note.innerHTML=`Produto mais vendido: <b>${d.best_seller_product||'—'}</b><br>Produto mais lucrativo: <b>${d.most_profitable_product||'—'}</b><br>${d.revenue_goal_enabled?(d.will_hit_goal?'No ritmo atual, deve bater a meta.':'No ritmo atual, ainda precisa acelerar para bater a meta.'):'Meta mensal desativada.'}`;
+  }catch(e){
+    if(cards) cards.innerHTML=`<div style="grid-column:1/-1;color:var(--red2);padding:20px">Erro ao carregar resumo: ${e.message}</div>`;
   }
-});
+}
+</script>
 
-app.get('/api/magalu/delivery/:id/label', auth, async (req, res) => {
-  const deliveryId = req.params.id;
 
-  try {
-    const acc = await getMagaluAccount(req.user.id);
-    if (!acc) return res.status(401).json({ error: 'Magalu não conectado ou token expirado' });
 
-    const attempts = [];
+<!-- SalesSync v20 — rendimentos extras no faturamento bruto -->
+<style>
+.ss-extra-form{display:grid;grid-template-columns:1fr 150px;gap:10px}.ss-check{font-size:12px;color:var(--txt2);display:flex;gap:8px;align-items:center;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:10px 12px}.ss-extra-total{background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.18);border-radius:12px;padding:12px 14px;display:flex;align-items:center;justify-content:space-between}.ss-extra-total span{font-size:10px;color:var(--txt3);text-transform:uppercase;letter-spacing:.6px;font-weight:800}.ss-extra-total strong{font-size:18px;color:var(--green2)}.ss-row .ss-del{width:28px;height:28px;border-radius:8px;background:var(--bg4);border:1px solid var(--border);color:var(--red2);cursor:pointer}.ss-help{font-size:10px;color:var(--txt3);line-height:1.4}.ss-plus-tip{background:rgba(16,185,129,.14)!important;color:var(--green2)!important}@media(max-width:620px){.ss-extra-form{grid-template-columns:1fr}}
+</style>
+<div id="ss-extra-modal" class="ss-modal"><div class="ss-box" style="max-width:560px"><div class="ss-head"><h3>Adicionar rendimento ao faturamento bruto</h3><button class="ss-close" onclick="ssCloseModal('ss-extra-modal')">×</button></div><div class="ss-body"><div class="ss-help">Cadastre entradas extras, como rendimento manual, serviço, venda por fora ou qualquer valor que deve somar no faturamento bruto do resumo.</div><div class="ss-extra-form"><input id="ss-extra-name" class="ss-input" placeholder="Nome do rendimento. Ex: Venda balcão"><input id="ss-extra-value" class="ss-input" placeholder="R$ 0,00" inputmode="decimal" oninput="ssMaskMoneyInput(this)"></div><label class="ss-check"><input type="checkbox" id="ss-extra-recurring"> Esse rendimento entra todo mês?</label><button class="ss-btn" onclick="ssSaveExtraRevenue()"><i class="ti ti-plus"></i> Adicionar no faturamento</button><div class="ss-extra-total"><span>Total extra deste mês</span><strong id="ss-extra-total">R$ 0,00</strong></div><div id="ss-extra-list" class="ss-list"></div></div></div></div>
+<script>
+function ssParseBRMoney(v){v=String(v||'').replace(/[^\d,.-]/g,'').replace(/\./g,'').replace(',','.');const n=Number(v);return Number.isFinite(n)?n:0}
+function ssMaskMoneyInput(el){const raw=String(el.value||'').replace(/\D/g,'');const n=Number(raw||0)/100;el.value=n.toLocaleString('pt-BR',{style:'currency',currency:'BRL'})}
+async function ssLoadExtraRevenues(){const box=document.getElementById('ss-extra-list'),tot=document.getElementById('ss-extra-total');if(box)box.innerHTML='<div style="color:var(--txt3);font-size:12px">Carregando...</div>';try{const j=await ssFetchJson(`${API}/api/additional-revenues`),arr=j.data||[];if(tot)tot.textContent=ssMoney(j.total||0);if(!box)return;if(!arr.length){box.innerHTML='<div style="color:var(--txt3);font-size:12px">Nenhum rendimento extra cadastrado para este mês.</div>';return}box.innerHTML=arr.map(x=>`<div class="ss-row"><i class="ti ti-cash-banknote" style="color:var(--green2);font-size:20px"></i><div><b>${x.name}</b><br><small>${ssMoney(x.amount)} · ${x.recurring?'Todo mês':'Somente este mês'}</small></div><button class="ss-del" title="Remover" onclick="ssDeleteExtraRevenue(${x.id})"><i class="ti ti-trash"></i></button></div>`).join('')}catch(e){if(box)box.innerHTML=`<div style="color:var(--red2);font-size:12px">${e.message}</div>`}}
+async function ssOpenExtraRevenue(){ssOpenModal('ss-extra-modal');document.getElementById('ss-extra-name').value='';document.getElementById('ss-extra-value').value='';document.getElementById('ss-extra-recurring').checked=false;await ssLoadExtraRevenues()}
+async function ssSaveExtraRevenue(){const name=document.getElementById('ss-extra-name')?.value?.trim()||'';const amount=ssParseBRMoney(document.getElementById('ss-extra-value')?.value||'');const recurring=!!document.getElementById('ss-extra-recurring')?.checked;if(!name)return alert('Coloque o nome do rendimento.');if(amount<=0)return alert('Coloque um valor maior que zero.');await ssFetchJson(`${API}/api/additional-revenues`,{method:'POST',body:JSON.stringify({name,amount,recurring})});document.getElementById('ss-extra-name').value='';document.getElementById('ss-extra-value').value='';document.getElementById('ss-extra-recurring').checked=false;await ssLoadExtraRevenues();await ssLoadAnalyticsSummary(true).catch(()=>{});if(typeof toast==='function')toast('Rendimento adicionado ao faturamento bruto')}
+async function ssDeleteExtraRevenue(id){if(!confirm('Remover esse rendimento do faturamento?'))return;await ssFetchJson(`${API}/api/additional-revenues/${id}`,{method:'DELETE'});await ssLoadExtraRevenues();await ssLoadAnalyticsSummary(true).catch(()=>{});if(typeof toast==='function')toast('Rendimento removido')}
+const ssInstallSideButtonsBase=window.ssInstallSideButtons;
+window.ssInstallSideButtons=function(){if(typeof ssInstallSideButtonsBase==='function')ssInstallSideButtonsBase();const sidebar=document.getElementById('sidebar');if(!sidebar||document.getElementById('ss-side-extra'))return;const anchor=document.getElementById('ss-side-analytics')||sidebar.querySelector('.s-sp');const b=document.createElement('div');b.id='ss-side-extra';b.className='s-btn';b.innerHTML='<i class="ti ti-plus"></i><span class="s-tip ss-plus-tip">Adicionar rendimento</span>';b.onclick=ssOpenExtraRevenue;if(anchor&&anchor.nextSibling)sidebar.insertBefore(b,anchor.nextSibling);else sidebar.insertBefore(b,sidebar.querySelector('.s-sp')||null)};
+const ssOpenAnalyticsBase=window.ssOpenAnalytics;
+window.ssOpenAnalytics=async function(){ssOpenModal('ss-analytics-modal');const cards=document.getElementById('ss-analytics-cards'),note=document.getElementById('ss-analytics-note');if(cards)cards.innerHTML=`<div class="ss-loading" style="grid-column:1/-1"><div class="ss-loader"></div><div>Carregando resumo...</div><small style="color:var(--txt3)">Buscando vendas, rendimentos extras, metas e faturamento mensal</small></div>`;if(note)note.innerHTML='';try{const d=await ssLoadAnalyticsSummary(false);cards.innerHTML=`<div class="ss-card"><span>Faturamento bruto mês</span><strong>${ssMoney(d.gross_sales)}</strong></div><div class="ss-card"><span>Vendas marketplaces</span><strong>${ssMoney(d.gross_sales_orders||0)}</strong></div><div class="ss-card"><span>Rendimentos extras</span><strong>${ssMoney(d.additional_revenue_total||0)}</strong></div><div class="ss-card"><span>Lucro líquido</span><strong>${ssMoney(d.net_profit)}</strong></div><div class="ss-card"><span>Previsão mês</span><strong>${ssMoney(d.projected_revenue)}</strong></div><div class="ss-card"><span>Pedidos</span><strong>${d.orders_count||0}</strong></div><div class="ss-card"><span>Ticket médio</span><strong>${ssMoney(d.avg_ticket)}</strong></div><div class="ss-card"><span>Progresso meta</span><strong>${d.revenue_goal_enabled?Number(d.goal_progress_pct||0).toFixed(1)+'%':'—'}</strong><div class="ss-progress"><div style="width:${Math.min(100,d.goal_progress_pct||0)}%"></div></div></div>${ssBars(d.monthly_revenue)}`;const extras=(d.additional_revenues||[]).map(x=>`${x.name}: <b>${ssMoney(x.amount)}</b>${x.recurring?' (todo mês)':''}`).join('<br>');note.innerHTML=`Rendimentos extras:<br>${extras||'<b>—</b>'}<br><br>Produto mais vendido: <b>${d.best_seller_product||'—'}</b><br>Produto mais lucrativo: <b>${d.most_profitable_product||'—'}</b><br>${d.revenue_goal_enabled?(d.will_hit_goal?'No ritmo atual, deve bater a meta.':'No ritmo atual, ainda precisa acelerar para bater a meta.'):'Meta mensal desativada.'}`;}catch(e){if(cards)cards.innerHTML=`<div style="grid-column:1/-1;color:var(--red2);padding:20px">Erro ao carregar resumo: ${e.message}</div>`}}
+setTimeout(()=>{try{window.ssInstallSideButtons()}catch(e){}},300);
+</script>
 
-    for (const payload of magaluLabelPayloads(deliveryId)) {
-      const r = await postMagaluShippingLabel(acc, payload);
-      const ct = r.headers?.['content-type'] || '';
-      const buf = Buffer.from(r.data || '');
-      const pdf = extractPdfBufferFromLabelResponse(r.data, ct);
 
-      if (r.status >= 200 && r.status < 300 && pdf) {
-        res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `inline; filename="magalu-etiqueta-${deliveryId}.pdf"`);
-        return res.send(pdf);
-      }
 
-      let parsed = null;
-      try { parsed = JSON.parse(buf.toString('utf8')); } catch {}
-      attempts.push({ payload, status: r.status, content_type: ct, response: parsed || buf.toString('utf8').slice(0, 1500) });
-    }
+<!-- SalesSync v21 — Devoluções + botões dentro da conta -->
+<style>
+.ss-account-main-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}.ss-account-main-actions .btn{font-size:11px;padding:9px 10px}.ret-cost-inp{width:74px;background:var(--bg4);border:1px solid var(--border2);border-radius:7px;color:var(--txt);padding:5px 7px;font-size:10px;outline:none}.ret-cost-inp:focus{border-color:var(--p2)}.ret-total{font-weight:900;color:var(--red2)}.ss-account-actions{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:8px}.ss-account-actions .btn{font-size:10px;padding:8px 9px}.ret-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.ret-kpi{background:var(--bg3);border:1px solid var(--border);border-radius:12px;padding:10px}.ret-kpi span{font-size:9px;color:var(--txt3);text-transform:uppercase;letter-spacing:.5px;font-weight:800}.ret-kpi strong{display:block;margin-top:4px;font-size:16px}@media(max-width:760px){.ret-kpis{grid-template-columns:1fr 1fr}.ss-account-actions{grid-template-columns:1fr}}
+</style>
+<style>
+/* ── RETURNS MODAL ── */
+.ret-modal-box{max-width:860px;width:100%;}
+.ret-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;}
+.ret-kpi{background:var(--bg3);border:1px solid var(--border2);border-radius:12px;padding:12px 14px;}
+.ret-kpi span{font-size:9px;text-transform:uppercase;letter-spacing:.6px;color:var(--txt3);font-weight:700;display:block;margin-bottom:4px;}
+.ret-kpi strong{font-size:18px;font-weight:800;letter-spacing:-.5px;}
+.ret-kpi.danger strong{color:var(--red2);}
+.ret-kpi.warn strong{color:var(--orange2);}
+.ret-actions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;}
+.ret-search-wrap{display:grid;grid-template-columns:1fr auto;gap:8px;margin-bottom:14px;}
+.ret-search{height:38px;border-radius:10px;border:1px solid var(--border2);background:var(--bg3);color:var(--txt);padding:0 12px;outline:none;font-size:13px;font-family:'Inter',sans-serif;width:100%;}
+.ret-search:focus{border-color:var(--p2);}
+.ret-cards{display:flex;flex-direction:column;gap:10px;max-height:54vh;overflow-y:auto;padding-right:2px;}
+.ret-cards::-webkit-scrollbar{width:4px;}
+.ret-cards::-webkit-scrollbar-thumb{background:var(--bg5);border-radius:4px;}
+.ret-card{background:var(--bg3);border:1px solid var(--border2);border-radius:14px;padding:14px;cursor:pointer;transition:border-color .18s,box-shadow .18s;position:relative;}
+.ret-card:hover{border-color:var(--p2);box-shadow:0 4px 18px rgba(109,40,217,.15);}
+.ret-card-top{display:flex;align-items:center;gap:8px;margin-bottom:8px;}
+.ret-card-id{font-size:12px;font-weight:700;color:var(--txt);letter-spacing:-.2px;}
+.ret-card-date{margin-left:auto;font-size:10px;color:var(--txt3);}
+.ret-card-title{font-size:12px;color:var(--txt2);margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.ret-card-tags{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;}
+.ret-tag{font-size:9px;font-weight:800;padding:2px 8px;border-radius:999px;letter-spacing:.4px;text-transform:uppercase;}
+.ret-tag.refund{background:rgba(248,113,113,.12);color:var(--red2);border:1px solid rgba(248,113,113,.22);}
+.ret-tag.covered{background:rgba(16,185,129,.12);color:var(--green2);border:1px solid rgba(16,185,129,.22);}
+.ret-tag.open{background:rgba(251,191,36,.1);color:var(--yellow2);border:1px solid rgba(251,191,36,.2);}
+.ret-tag.neutral{background:var(--bg4);color:var(--txt3);border:1px solid var(--border2);}
+.ret-tag.protected{background:rgba(16,185,129,.18);color:#34d399;border:1px solid rgba(16,185,129,.35);}
+.ret-costs{display:grid;grid-template-columns:repeat(3,1fr) auto;gap:8px;align-items:end;}
+.ret-cost-field{display:flex;flex-direction:column;gap:3px;}
+.ret-cost-label{font-size:8px;color:var(--txt3);text-transform:uppercase;font-weight:700;letter-spacing:.4px;}
+.ret-cost-inp{background:var(--bg4);border:1px solid var(--border2);border-radius:8px;color:var(--txt);padding:5px 8px;font-size:12px;font-family:'Inter',sans-serif;width:100%;outline:none;transition:border-color .15s;}
+.ret-cost-inp:focus{border-color:var(--p2);}
+.ret-cost-total{font-size:11px;font-weight:800;color:var(--red2);text-align:right;white-space:nowrap;}
+.ret-cost-total small{display:block;font-size:8px;color:var(--txt3);font-weight:600;margin-bottom:2px;}
+.ret-save-btn{margin-top:10px;display:flex;align-items:center;justify-content:flex-end;gap:8px;}
+.ret-empty{padding:40px;text-align:center;color:var(--txt3);font-size:13px;}
+.ret-action-btn{display:inline-flex;align-items:center;gap:5px;padding:6px 12px;border-radius:8px;font-size:11px;font-weight:600;font-family:'Inter',sans-serif;cursor:pointer;border:1px solid var(--border2);background:var(--bg4);color:var(--txt2);transition:all .15s;}
+.ret-action-btn:hover{border-color:var(--txt3);color:var(--txt);}
+.ret-action-btn.primary{background:rgba(109,40,217,.18);border-color:rgba(139,92,246,.4);color:var(--p3);}
+.ret-action-btn.primary:hover{background:rgba(109,40,217,.28);border-color:var(--p2);}
 
-    return res.status(422).json({
-      error: 'Não foi possível gerar etiqueta Magalu',
-      endpoint: 'POST /seller/v1/logistics/shipping-labels',
-      delivery_id: deliveryId,
-      attempts
-    });
-  } catch(e) {
-    res.status(e.response?.status || 500).json({ error: e.message, data: e.response?.data?.toString?.() || e.response?.data });
+/* ── RETURN DETAIL DRAWER ── */
+.ret-detail-box{max-width:600px;width:100%;}
+.ret-detail-section{background:var(--bg3);border:1px solid var(--border2);border-radius:12px;padding:14px;margin-bottom:12px;}
+.ret-detail-section h4{font-size:10px;text-transform:uppercase;letter-spacing:.7px;color:var(--txt3);font-weight:800;margin-bottom:10px;}
+.ret-detail-row{display:flex;justify-content:space-between;align-items:baseline;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.04);}
+.ret-detail-row:last-child{border-bottom:0;}
+.ret-detail-row span{font-size:11px;color:var(--txt3);}
+.ret-detail-row strong{font-size:12px;color:var(--txt);font-weight:600;text-align:right;max-width:60%;word-break:break-all;}
+.ret-detail-cost-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+.ret-detail-cost-item{background:var(--bg4);border-radius:10px;padding:10px 12px;}
+.ret-detail-cost-item span{font-size:9px;text-transform:uppercase;color:var(--txt3);font-weight:700;display:block;margin-bottom:4px;}
+.ret-detail-cost-item strong{font-size:15px;font-weight:800;}
+.ret-detail-cost-item.danger strong{color:var(--red2);}
+.ret-detail-cost-item.safe strong{color:var(--green2);}
+@media(max-width:768px){
+  .ret-kpis{grid-template-columns:1fr 1fr;}
+  .ret-costs{grid-template-columns:1fr 1fr;gap:6px;}
+  .ret-detail-cost-grid{grid-template-columns:1fr 1fr;}
+}
+</style>
+
+<!-- RETURNS MODAL -->
+<div id="ss-returns-modal" class="ss-modal">
+  <div class="ss-box ret-modal-box">
+    <div class="ss-head">
+      <h3><i class="ti ti-rotate-clockwise-2" style="margin-right:6px"></i>Devoluções</h3>
+      <button class="ss-close" onclick="ssCloseModal('ss-returns-modal')">×</button>
+    </div>
+    <div class="ss-body">
+      <div class="ret-kpis">
+        <div class="ret-kpi"><span>Devoluções</span><strong id="ret-qtd">—</strong></div>
+        <div class="ret-kpi warn"><span>Frete reverso</span><strong id="ret-ship">—</strong></div>
+        <div class="ret-kpi warn"><span>Taxas ML</span><strong id="ret-fee">—</strong></div>
+        <div class="ret-kpi danger"><span>Prejuízo total</span><strong id="ret-total">—</strong></div>
+      </div>
+      <div class="ret-actions">
+        <button class="ss-btn ghost" onclick="ssSyncReturns('mercadolivre')"><i class="ti ti-refresh"></i> Sincronizar ML</button>
+        <button class="ss-btn ghost" onclick="ssSyncReturns('magalu')"><i class="ti ti-refresh"></i> Sincronizar Magalu</button>
+        <button class="ss-btn" onclick="ssRefreshReturnsList()"><i class="ti ti-list-check"></i> Atualizar lista</button>
+      </div>
+      <div class="ret-search-wrap">
+        <input id="ss-returns-search" class="ret-search" oninput="ssFilterReturnCards()" placeholder="Buscar por pedido, produto, motivo..."/>
+        <button class="ss-btn ghost" onclick="document.getElementById('ss-returns-search').value='';ssFilterReturnCards()">Limpar</button>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--txt3);cursor:pointer;margin-bottom:10px;user-select:none">
+        <input type="checkbox" id="ret-show-zero" onchange="ssFilterReturnCards()" style="accent-color:var(--p2);width:14px;height:14px;cursor:pointer"/>
+        Exibir devoluções com custo zerado
+      </label>
+      <div id="ss-returns-cards" class="ret-cards">
+        <div class="ret-empty">Clique em "Sincronizar ML" para carregar devoluções</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- RETURN DETAIL MODAL -->
+<div id="ss-return-detail-modal" class="ss-modal">
+  <div class="ss-box ret-detail-box">
+    <div class="ss-head">
+      <h3><i class="ti ti-receipt" style="margin-right:6px"></i>Detalhes da devolução</h3>
+      <button class="ss-close" onclick="ssCloseModal('ss-return-detail-modal')">×</button>
+    </div>
+    <div class="ss-body" id="ss-return-detail-body">
+    </div>
+  </div>
+</div>
+
+<script>
+const R_BRL=(v)=>Number(v||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
+window.SS_RETURNS_DATA=[];
+
+function ssReturnTagHtml(r){
+  const res=String(r.resolution_type||r.reason||r.status||'').toLowerCase();
+  const prot=r.ml_protected===true||r.ml_protected==='true';
+  const tags=[];
+  if(prot){tags.push('<span class="ret-tag protected">✓ ML Protegeu</span>');}
+  if(res.includes('bpp_refunded')||res.includes('refund')){tags.push('<span class="ret-tag refund">Reembolsado</span>');}
+  else if(res.includes('bpp_covered')||res.includes('covered')){tags.push('<span class="ret-tag covered">ML Absorveu</span>');}
+  else if(res.includes('seller_protection')){tags.push('<span class="ret-tag protected">Protegido</span>');}
+  else if(res.includes('open')||res.includes('claimed')){tags.push('<span class="ret-tag open">Em aberto</span>');}
+  else if(res){tags.push(`<span class="ret-tag neutral">${res}</span>`);}
+  const reasonTxt=r.reason||r.claim_reason||'';
+  if(reasonTxt&&!tags.some(t=>t.includes(reasonTxt)))tags.push(`<span class="ret-tag neutral">${reasonTxt}</span>`);
+  return tags.join('');
+}
+
+function ssRenderReturnCards(arr){
+  const wrap=document.getElementById('ss-returns-cards');
+  if(!wrap)return;
+  if(!arr.length){wrap.innerHTML='<div class="ret-empty">Nenhuma devolução encontrada no período.</div>';return;}
+  wrap.innerHTML=arr.map((r,i)=>{
+    const ship=Number(r.return_shipping_cost||0);
+    const fee=Number(r.return_fee||0);
+    const lost=Number(r.lost_product_cost||0);
+    const total=Number(r.return_total_cost||0)||(ship+fee+lost);
+    const prot=r.ml_protected===true||r.ml_protected==='true';
+    const dateStr=r.updated_at?new Date(r.updated_at).toLocaleDateString('pt-BR'):(r.order_date?new Date(r.order_date).toLocaleDateString('pt-BR'):'—');
+    const search=[r.platform_order_id,r.item_title,r.item_sku,r.reason,r.resolution_type,r.status,r.buyer_message].join(' ').toLowerCase();
+    return `<div class="ret-card" data-search="${search.replace(/"/g,'&quot;')}" data-idx="${i}">
+      <div class="ret-card-top" onclick="ssOpenReturnDetail(${i})">
+        <span class="plat-chip ${r.platform||'mercadolivre'}">${r.platform||'ML'}</span>
+        <span class="ret-card-id">#${r.platform_order_id||r.external_return_id||'—'}</span>
+        <span class="ret-card-date">${dateStr}</span>
+      </div>
+      <div class="ret-card-title" onclick="ssOpenReturnDetail(${i})">${r.item_title||'Produto sem título'} ${r.item_sku?'<span style="color:var(--txt3)">· '+r.item_sku+'</span>':''}</div>
+      <div class="ret-card-tags" onclick="ssOpenReturnDetail(${i})">${ssReturnTagHtml(r)}</div>
+      ${prot?`<div style="font-size:10px;color:var(--green2);background:rgba(16,185,129,.07);border:1px solid rgba(16,185,129,.15);border-radius:8px;padding:6px 10px;margin-bottom:8px">✓ ML cobriu o custo — você não teve prejuízo financeiro nessa devolução</div>`:''}
+      <div class="ret-costs">
+        <div class="ret-cost-field">
+          <label class="ret-cost-label">Frete reverso</label>
+          <input class="ret-cost-inp" id="rs-${r.id}" onclick="event.stopPropagation()" value="${ship.toFixed(2)}" type="number" step="0.01" min="0"/>
+        </div>
+        <div class="ret-cost-field">
+          <label class="ret-cost-label">Taxa ML</label>
+          <input class="ret-cost-inp" id="rf-${r.id}" onclick="event.stopPropagation()" value="${fee.toFixed(2)}" type="number" step="0.01" min="0"/>
+        </div>
+        <div class="ret-cost-field">
+          <label class="ret-cost-label">Produto perdido</label>
+          <input class="ret-cost-inp" id="rl-${r.id}" onclick="event.stopPropagation()" value="${lost.toFixed(2)}" type="number" step="0.01" min="0"/>
+        </div>
+        <div class="ret-cost-total"><small>Prejuízo</small>${R_BRL(total)}</div>
+      </div>
+      <div class="ret-save-btn">
+        <button class="ret-action-btn" onclick="event.stopPropagation();ssOpenReturnDetail(${i})"><i class="ti ti-eye"></i> Detalhes</button>
+        <button class="ret-action-btn primary" onclick="event.stopPropagation();ssSaveReturnCost(${r.id})"><i class="ti ti-device-floppy"></i> Salvar</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function ssRefreshReturnsList(){
+  const wrap=document.getElementById('ss-returns-cards');
+  if(wrap)wrap.innerHTML='<div class="ret-empty" style="color:var(--txt3)"><i class="ti ti-loader" style="animation:spin 1s linear infinite;display:inline-block"></i> Carregando...</div>';
+  try{
+    const j=await ssFetchJson(`${API}/api/returns`);
+    const arr=Array.isArray(j.data)?j.data:[];
+    window.SS_RETURNS_DATA=arr;
+    const ship=arr.reduce((s,r)=>s+Number(r.return_shipping_cost||0),0);
+    const fee=arr.reduce((s,r)=>s+Number(r.return_fee||0),0);
+    const total=arr.reduce((s,r)=>s+Number(r.return_total_cost||0),0);
+    document.getElementById('ret-qtd').textContent=arr.length;
+    document.getElementById('ret-ship').textContent=R_BRL(ship);
+    document.getElementById('ret-fee').textContent=R_BRL(fee);
+    document.getElementById('ret-total').textContent=R_BRL(total);
+    ssRenderReturnCards(arr);
+  }catch(e){
+    if(wrap)wrap.innerHTML=`<div class="ret-empty" style="color:var(--red2)">${e.message}</div>`;
   }
-});
-
-
-
-function looksLikePdfBuffer(buf) {
-  if (!buf) return false;
-  const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
-  return b.slice(0, 4).toString() === '%PDF';
 }
 
-
-function parseMagaluLabelResponse(data) {
-  const buf = Buffer.from(data || '');
-  const text = buf.toString('utf8').trim();
-  if (!text) return null;
-  try { return JSON.parse(text); } catch { return null; }
+async function ssLoadReturns(){
+  ssOpenModal('ss-returns-modal');
+  await ssRefreshReturnsList();
 }
 
-function findMagaluSignedUrl(obj) {
-  if (!obj) return null;
-  if (typeof obj === 'string') {
-    if (/^https?:\/\//i.test(obj) && /shipping_label\.(pdf|zip|zpl)/i.test(obj)) return obj;
-    return null;
-  }
-  if (typeof obj !== 'object') return null;
-  if (typeof obj.signed_url === 'string') return obj.signed_url;
-  if (obj.label && typeof obj.label.signed_url === 'string') return obj.label.signed_url;
-  for (const v of Object.values(obj)) {
-    const found = findMagaluSignedUrl(v);
-    if (found) return found;
-  }
-  return null;
-}
-
-function normalizeMagaluLabelOptions(query = {}) {
-  const requestedType = String(query.type || 'full').toLowerCase();
-  const requestedFormat = String(query.format || 'pdf').toLowerCase();
-  return {
-    type: ['full','summary'].includes(requestedType) ? requestedType : 'full',
-    format: ['pdf','zpl'].includes(requestedFormat) ? requestedFormat : 'pdf'
-  };
-}
-
-function magaluSingleLabelPayload(deliveryId, channel, opts = {}) {
-  const { type, format } = normalizeMagaluLabelOptions(opts);
-  return {
-    channel,
-    deliveries: [{ id: deliveryId }],
-    label: { type, format }
-  };
-}
-
-function magaluLabelFilename(deliveryId, type, format) {
-  const suffix = type === 'summary' ? 'danfe-simplificado' : 'etiqueta';
-  const ext = format === 'zpl' ? 'zip' : 'pdf';
-  return `magalu-${suffix}-${deliveryId}.${ext}`;
-}
-
-function extractPdfBufferFromLabelResponse(data, contentType) {
-  const buf = Buffer.from(data || '');
-  if (!buf.length) return null;
-  if (String(contentType || '').toLowerCase().includes('pdf') || looksLikePdfBuffer(buf)) return buf;
-
-  const text = buf.toString('utf8').trim();
-  if (!text) return null;
-
-  const cleanBase64 = (v) => String(v || '').replace(/^data:application\/pdf;base64,/i, '').trim();
-  const tryBase64Pdf = (v) => {
-    const raw = cleanBase64(v);
-    if (!raw || !raw.includes('JVBER')) return null;
-    const start = raw.indexOf('JVBER');
-    const sliced = raw.slice(start).replace(/\s/g, '');
-    try {
-      const pdf = Buffer.from(sliced, 'base64');
-      return looksLikePdfBuffer(pdf) ? pdf : null;
-    } catch { return null; }
-  };
-
-  const direct = tryBase64Pdf(text);
-  if (direct) return direct;
-
-  try {
-    const parsed = JSON.parse(text);
-    const stack = [parsed];
-    const keys = ['file','pdf','content','data','base64','label','document','body','url'];
-    while (stack.length) {
-      const cur = stack.shift();
-      if (typeof cur === 'string') {
-        const pdf = tryBase64Pdf(cur);
-        if (pdf) return pdf;
-      } else if (cur && typeof cur === 'object') {
-        for (const k of keys) if (cur[k] !== undefined) stack.push(cur[k]);
-        for (const v of Object.values(cur)) if (v && typeof v === 'object') stack.push(v);
-      }
-    }
-  } catch {}
-
-  return null;
-}
-
-async function postMagaluShippingLabel(acc, payload) {
-  return axios.post(
-    'https://api.magalu.com/seller/v1/logistics/shipping-labels',
-    payload,
-    {
-      headers: {
-        Authorization: `Bearer ${acc.access_token}`,
-        Accept: 'application/json,application/pdf,*/*',
-        'Content-Type': 'application/json'
-      },
-      responseType: 'arraybuffer',
-      validateStatus: () => true
-    }
-  );
-}
-
-
-function uniq(arr) {
-  return [...new Set(arr.filter(v => v !== undefined && v !== null && String(v).trim() !== '').map(v => String(v).trim()))];
-}
-
-function compactProbe(data) {
-  if (!data || typeof data !== 'object') return data;
-  const delivery = data.delivery || data;
-  return {
-    id: delivery.id || data.id || null,
-    status: delivery.status || data.status || null,
-    channel: delivery.channel || data.channel || data.sales_channel || null,
-    seller: delivery.seller || data.seller || null,
-    shipping: delivery.shipping || data.shipping || null,
-    invoice: delivery.invoice || data.invoice || data.fiscal_document || data.fiscal_documents || null,
-    nf: delivery.nfe || delivery.nf || data.nfe || data.nf || null,
-    raw_keys: Object.keys(data || {})
-  };
-}
-
-async function magaluGetJson(acc, path) {
-  const r = await axios.get(`https://api.magalu.com${path}`, {
-    headers: { Authorization: `Bearer ${acc.access_token}`, Accept: 'application/json' },
-    validateStatus: () => true
-  });
-  return { path, status: r.status, content_type: r.headers?.['content-type'] || '', data: r.data };
-}
-
-async function inspectMagaluDelivery(acc, deliveryId) {
-  const paths = [
-    `/seller/v1/deliveries/${encodeURIComponent(deliveryId)}`,
-    `/seller/v1/deliveries/${encodeURIComponent(deliveryId)}/history`,
-    `/seller/v1/deliveries/${encodeURIComponent(deliveryId)}/invoices`,
-    `/seller/v1/deliveries/${encodeURIComponent(deliveryId)}/shippings`
-  ];
-  const probes = [];
-  for (const path of paths) {
-    try {
-      const r = await magaluGetJson(acc, path);
-      probes.push({ ...r, compact: compactProbe(r.data) });
-    } catch (e) {
-      probes.push({ path, status: e.response?.status || 500, error: e.response?.data || e.message });
-    }
-  }
-  return probes;
-}
-
-function inferMagaluChannelObjectsFromProbe(probes) {
-  const channels = [];
-
-  function pushChannel(id, extras = {}) {
-    if (!id || String(id).trim() === '') return;
-    const cleanId = String(id).trim();
-    if (channels.some(c => c.id === cleanId)) return;
-    channels.push({ id: cleanId, extras: extras && typeof extras === 'object' ? extras : {} });
-  }
-
-  for (const p of probes || []) {
-    const d = p?.data?.delivery || p?.data || {};
-
-    // FORMATO CORRETO da API de etiquetas Magalu:
-    // channel precisa ser OBJETO { id, extras }, não string.
-    // O id bom vem em delivery.order.channel.id, não em source_channel.id.
-    pushChannel(d?.order?.channel?.id, d?.order?.channel?.extras || {});
-    pushChannel(d?.channel?.id, d?.channel?.extras || {});
-    pushChannel(d?.sales_channel?.id, d?.sales_channel?.extras || {});
-
-    // Mantemos esses como fallback/debug, mas geralmente source_channel.id="MagazineLuiza"
-    // NÃO é o id esperado pelo endpoint de etiqueta.
-    pushChannel(d?.order?.source_channel?.id, { description: d?.order?.source_channel?.description || '' });
-  }
-
-  return channels;
-}
-
-function magaluLabelPayloads(deliveryId, options = {}) {
-  const idObj = { id: deliveryId };
-
-  const channelObjects = [];
-  const addChannel = (ch) => {
-    if (!ch) return;
-    if (typeof ch === 'string') ch = { id: ch, extras: {} };
-    if (!ch.id) return;
-    const id = String(ch.id).trim();
-    if (!id) return;
-    if (channelObjects.some(x => x.id === id)) return;
-    channelObjects.push({ id, extras: ch.extras && typeof ch.extras === 'object' ? ch.extras : {} });
-  };
-
-  (options.channels || []).forEach(addChannel);
-  addChannel(options.channel);
-
-  // fallback final apenas para expor validação se o parser não encontrou o UUID
-  addChannel({ id: 'MagazineLuiza', extras: {} });
-
-  // Conforme documentação oficial: format = pdf|zpl, type = summary|full.
-  // A4/ZEBRA era formato de docs antigas/legadas e aqui gera comportamento errado.
-  const labels = [
-    { type: 'full', format: 'pdf' },
-    { type: 'summary', format: 'pdf' },
-    { type: 'full', format: 'zpl' },
-    { type: 'summary', format: 'zpl' }
-  ];
-
-  const payloads = [];
-  for (const channel of channelObjects) {
-    for (const label of labels) payloads.push({ channel, deliveries: [idObj], label });
-  }
-  return payloads;
-}
-
-
-
-function summarizeMagaluLabelDiagnosis(deliveryProbe, results) {
-  const d = (deliveryProbe || []).find(x => x.path && x.path.includes('/seller/v1/deliveries/') && x.status === 200)?.data || {};
-  const invoice = Array.isArray(d.invoices) ? d.invoices[0] : null;
-  const provider = d.shipping?.provider || {};
-  const all500 = Array.isArray(results) && results.length > 0 && results.every(r => Number(r.status) === 500);
-  return {
-    delivery_id: d.id || null,
-    delivery_code: d.code || null,
-    delivery_status: d.status || null,
-    provider_id: provider.id || null,
-    provider_name: provider.description || provider.name || null,
-    is_mle: Boolean(provider.extras?.is_mle),
-    is_fulfillment: Boolean(provider.extras?.is_fulfillment),
-    invoice_key: invoice?.key || null,
-    invoice_status: invoice?.status?.id || null,
-    invoice_description: invoice?.status?.description || null,
-    label_endpoint_all_500: all500,
-    conclusion: all500
-      ? 'Entrega aparenta apta para etiqueta, mas o endpoint oficial retornou 500. Provável falha/instabilidade/processamento interno da Magalu.'
-      : 'Verifique os detalhes dos payloads/retornos para identificar validação ou sucesso parcial.'
-  };
-}
-
-app.get('/api/magalu/delivery/:id/official-label-debug', auth, async (req, res) => {
-  const deliveryId = req.params.id;
-
-  try {
-    const acc = await getMagaluAccount(req.user.id);
-    if (!acc) return res.status(401).json({ error: 'Magalu não conectado' });
-
-    const delivery_probe = await inspectMagaluDelivery(acc, deliveryId);
-    const channels = inferMagaluChannelObjectsFromProbe(delivery_probe);
-    if (req.query.channel) channels.unshift({ id: String(req.query.channel), extras: {} });
-    const payloads = magaluLabelPayloads(deliveryId, { channels }).slice(0, 16);
-    const results = [];
-
-    for (const payload of payloads) {
-      const r = await postMagaluShippingLabel(acc, payload);
-      const ct = r.headers?.['content-type'] || '';
-      const buf = Buffer.from(r.data || '');
-
-      let parsed = null;
-      try { parsed = JSON.parse(buf.toString('utf8')); } catch {}
-
-      results.push({
-        endpoint: 'POST /seller/v1/logistics/shipping-labels',
-        payload,
-        status: r.status,
-        content_type: ct,
-        is_pdf: ct.includes('pdf') || looksLikePdfBuffer(buf),
-        parsed,
-        sample: parsed ? undefined : buf.toString('utf8').slice(0, 1500)
-      });
-
-      if (r.status >= 200 && r.status < 300) break;
-    }
-
-    res.json({
-      delivery_id: deliveryId,
-      support_summary: summarizeMagaluLabelDiagnosis(delivery_probe, results),
-      diagnosis: 'Se delivery_probe retornar 200, status=invoiced, provider.extras.is_mle=true, invoice.status.id=approved e todos os payloads com channel/label retornarem 500, o payload está validado e a falha está no serviço de etiquetas da Magalu ou em processamento interno ainda não liberado.',
-      delivery_probe,
-      inferred_channels: channels,
-      results
-    });
-
-  } catch (e) {
-    res.status(e.response?.status || 500).json({
-      error: e.message,
-      data: e.response?.data?.toString?.() || e.response?.data
-    });
-  }
-});
-
-
-
-function xmlTag(xml, tag) {
-  const m = String(xml || '').match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, 'i'));
-  return m ? m[1].trim() : '';
-}
-function xmlBlock(xml, tag) {
-  const m = String(xml || '').match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i'));
-  return m ? m[1] : '';
-}
-function onlyDateBR(v) {
-  if (!v) return '—';
-  const d = new Date(v);
-  if (!Number.isFinite(d.getTime())) return String(v).slice(0, 10).split('-').reverse().join('/');
-  return d.toLocaleDateString('pt-BR');
-}
-function dateTimeBR(v) {
-  if (!v) return '—';
-  const d = new Date(v);
-  if (!Number.isFinite(d.getTime())) return String(v);
-  return d.toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit', second:'2-digit' });
-}
-function moneyFromCents(v, normalizer = 100) {
-  return (Number(v || 0) / Number(normalizer || 100)).toLocaleString('pt-BR', { style:'currency', currency:'BRL' });
-}
-function parseNFeXml(xml) {
-  const ide = xmlBlock(xml, 'ide');
-  const emit = xmlBlock(xml, 'emit');
-  const dest = xmlBlock(xml, 'dest');
-  const prot = xmlBlock(xml, 'infProt');
-  const total = xmlBlock(xml, 'ICMSTot');
-  return {
-    key: xmlTag(prot, 'chNFe') || (String(xml).match(/Id="NFe(\d{44})"/) || [])[1] || '',
-    number: xmlTag(ide, 'nNF'),
-    series: xmlTag(ide, 'serie'),
-    issuedAt: xmlTag(ide, 'dhEmi'),
-    protocol: xmlTag(prot, 'nProt'),
-    protocolAt: xmlTag(prot, 'dhRecbto'),
-    emitName: xmlTag(emit, 'xNome') || xmlTag(emit, 'xFant'),
-    emitCnpj: xmlTag(emit, 'CNPJ'),
-    emitIe: xmlTag(emit, 'IE'),
-    emitUf: xmlTag(xmlBlock(emit, 'enderEmit'), 'UF'),
-    destName: xmlTag(dest, 'xNome'),
-    destCpfCnpj: xmlTag(dest, 'CPF') || xmlTag(dest, 'CNPJ'),
-    destIe: xmlTag(dest, 'IE'),
-    destUf: xmlTag(xmlBlock(dest, 'enderDest'), 'UF'),
-    value: xmlTag(total, 'vNF')
-  };
-}
-async function fetchMagaluDeliveryAndInvoice(acc, deliveryId) {
-  const headers = { Authorization: `Bearer ${acc.access_token}` };
-  const [deliveryResp, invoicesResp] = await Promise.all([
-    axios.get(`https://api.magalu.com/seller/v1/deliveries/${encodeURIComponent(deliveryId)}`, { headers, validateStatus: () => true }),
-    axios.get(`https://api.magalu.com/seller/v1/deliveries/${encodeURIComponent(deliveryId)}/invoices`, { headers, validateStatus: () => true })
-  ]);
-  if (deliveryResp.status < 200 || deliveryResp.status >= 300) {
-    throw new Error(`Entrega ${deliveryId} não encontrada na Magalu: ${deliveryResp.status}`);
-  }
-  const inv = invoicesResp.data?.results?.[0] || deliveryResp.data?.invoices?.[0] || {};
-  const xml = inv.xml || '';
-  const nfe = xml ? parseNFeXml(xml) : {
-    key: inv.key || deliveryResp.data?.invoices?.[0]?.key || '',
-    number: '', series: '', issuedAt: inv.issued_at || deliveryResp.data?.invoices?.[0]?.issued_at || '',
-    protocol: '', protocolAt: '', emitName: '', emitCnpj: '', emitIe: '', emitUf: '',
-    destName: deliveryResp.data?.shipping?.recipient?.name || '',
-    destCpfCnpj: deliveryResp.data?.shipping?.recipient?.document_number || '',
-    destIe: '', destUf: deliveryResp.data?.shipping?.recipient?.address?.state || '', value: ''
-  };
-  return { delivery: deliveryResp.data, invoice: inv, nfe };
-}
-function shortText(v, max = 38) {
-  v = String(v || '').replace(/\s+/g, ' ').trim();
-  return v.length > max ? v.slice(0, max - 1) + '…' : v;
-}
-function drawBoxText(doc, text, x, y, w, h, opts={}) {
-  doc.rect(x, y, w, h).stroke();
-  doc.font(opts.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(opts.size || 10).text(String(text || ''), x + 4, y + 4, { width: w - 8, align: opts.align || 'center' });
-}
-function fauxBarcode(doc, text, x, y, w, h) {
-  const t = String(text || '1234567890');
-  let cx = x;
-  for (let i = 0; i < 90 && cx < x + w; i++) {
-    const n = (t.charCodeAt(i % t.length) || 47) % 5;
-    const lw = 1 + (n % 3);
-    if (i % 2 === 0) doc.rect(cx, y, lw, h).fill('black');
-    cx += lw + 1;
-  }
-  doc.fillColor('black');
-}
-async function drawBarcode(doc, text, x, y, w, h, rotate=false) {
-  try {
-    if (bwipjs) {
-      const png = await bwipjs.toBuffer({ bcid:'code128', text:String(text || '0'), scale:2, height:12, includetext:false, padding:0 });
-      if (rotate) {
-        doc.save().rotate(90, { origin:[x, y] }).image(png, x, y - w, { width:h, height:w }).restore();
-      } else {
-        doc.image(png, x, y, { width:w, height:h });
-      }
-      return;
-    }
-  } catch {}
-  if (rotate) {
-    doc.save().rotate(90, { origin:[x, y] });
-    fauxBarcode(doc, text, x, y - w, h, w);
-    doc.restore();
-  } else fauxBarcode(doc, text, x, y, w, h);
-}
-async function drawQr(doc, text, x, y, size) {
-  try {
-    if (bwipjs) {
-      const png = await bwipjs.toBuffer({ bcid:'qrcode', text:String(text || ''), scale:3, padding:0 });
-      doc.image(png, x, y, { width:size, height:size });
-      return;
-    }
-  } catch {}
-  doc.rect(x, y, size, size).stroke();
-  doc.fontSize(6).text('QR', x, y + size/2 - 4, { width:size, align:'center' });
-}
-function addressLine(addr = {}) {
-  return [addr.street, addr.number].filter(Boolean).join(', ');
-}
-function cityLine(addr = {}) {
-  return [addr.city, addr.state].filter(Boolean).join(', ');
-}
-async function drawMagaluEtiquetaDanfe(doc, data, y) {
-  const d = data.delivery || {};
-  const nfe = data.nfe || {};
-  const rec = d.shipping?.recipient || {};
-  const ra = rec.address || {};
-  const drop = d.shipping?.drop_details || {};
-  const da = drop.address || {};
-  const orderCode = d.order?.code || d.code || '';
-  const nfNumber = nfe.number || (d.invoices?.[0]?.key ? String(d.invoices[0].key).slice(25, 34).replace(/^0+/, '') : '');
-  const key = nfe.key || d.invoices?.[0]?.key || '';
-  const deadline = d.shipping?.deadline?.limit_date || '';
-  const nfKey = nfe.key || d.invoices?.[0]?.key || '';
-  const cnpjFromKey = nfKey.length >= 20 ? nfKey.slice(6, 20) : '';
-  const emitName = nfe.emitName || '';
-  const emitCnpj = nfe.emitCnpj || cnpjFromKey;
-  const emitIe = nfe.emitIe || '';
-  const emitUf = nfe.emitUf || da.state || '';
-  const destName = nfe.destName || rec.name || '';
-  const destDoc = nfe.destCpfCnpj || rec.document_number || '';
-  const destUf = nfe.destUf || ra.state || '';
-  const firstItem = d.items?.[0] || d.products?.[0] || d.order?.items?.[0] || {};
-  const firstInfo = firstItem.info || firstItem.product || firstItem || {};
-  const skuDanfe = firstInfo.sku || firstInfo.seller_sku || firstInfo.sellerSku || firstInfo.id || d.sku || d.product_sku || '';
-
-  const leftX = 18, leftW = 260, rightX = 300, rightW = 276, h = 392;
-  doc.font('Helvetica-Bold').fontSize(15).text('magalu Entregas', leftX, y + 6);
-  doc.fontSize(9).fillColor('white').rect(leftX, y + 28, 78, 12).fill('black').fillColor('black').text('AGÊNCIA MAGALU', leftX + 3, y + 30);
-  doc.font('Helvetica-Bold').fontSize(10).text('MALHADIRET', leftX, y + 44).text('MALHA-DIRETA', leftX, y + 58);
-  await drawQr(doc, `Pedido:${orderCode}|Entrega:${d.id}|NF:${nfNumber}`, leftX + 170, y + 8, 75);
-
-  await drawBarcode(doc, d.code || d.id || orderCode, leftX + 14, y + 116, 56, 180, true);
-  doc.fontSize(10).rotate(90, { origin:[leftX + 2, y + 172] }).text(String(d.code || d.id || '').replace(/^LU-/, '').slice(-14), leftX + 2, y + 172).rotate(-90, { origin:[leftX + 2, y + 172] });
-
-  drawBoxText(doc, 'AG', leftX + 124, y + 96, 50, 24, { bold:true, size:16 });
-  drawBoxText(doc, '01', leftX + 176, y + 96, 50, 24, { bold:true, size:16 });
-  doc.rect(leftX + 124, y + 123, 50, 24).fill('black');
-  doc.rect(leftX + 176, y + 123, 50, 24).fill('black');
-  doc.fillColor('white').font('Helvetica-Bold').fontSize(16).text((ra.state || 'MG').slice(0,3).toUpperCase(), leftX + 124, y + 127, { width:50, align:'center' }).text((ra.zipcode || '').slice(0,3) || '000', leftX + 176, y + 127, { width:50, align:'center' });
-  doc.fillColor('black');
-
-  doc.font('Helvetica-Bold').fontSize(10).text(`Pedido: ${orderCode}`, leftX + 124, y + 164);
-  doc.font('Helvetica-Bold').fontSize(9).text(`Nota Fiscal: ${nfNumber || '—'}`, leftX + 124, y + 178);
-  doc.text(`Data estimada: ${onlyDateBR(deadline)}`, leftX + 124, y + 190);
-  doc.moveTo(leftX + 124, y + 206).lineTo(leftX + 250, y + 206).stroke();
-  doc.fontSize(7).text('DESTINATÁRIO', leftX + 124, y + 212);
-  doc.font('Helvetica-Bold').fontSize(8).text(shortText(destName, 30).toUpperCase(), leftX + 124, y + 225, { width:130 });
-  doc.font('Helvetica').fontSize(8).text(shortText(addressLine(ra), 32).toUpperCase(), leftX + 124, y + 244, { width:130 });
-  doc.font('Helvetica-Bold').text(`${shortText(ra.district, 22).toUpperCase()} - ${ra.zipcode || ''}`, leftX + 124, y + 264, { width:130 });
-  doc.text(cityLine(ra).toUpperCase(), leftX + 124, y + 282, { width:130 });
-  doc.moveTo(leftX + 124, y + 304).lineTo(leftX + 250, y + 304).stroke();
-  doc.font('Helvetica-Bold').fontSize(7).text('REMETENTE', leftX + 124, y + 310);
-  doc.font('Helvetica-Bold').fontSize(7).text(emitName, leftX + 124, y + 322, { width:130 });
-  doc.font('Helvetica').fontSize(7).text(shortText(addressLine(da).toUpperCase(), 38), leftX + 124, y + 336, { width:130 });
-  doc.text(`${shortText(da.district, 26).toUpperCase()} - ${da.zipcode || ''}`, leftX + 124, y + 356, { width:130 });
-  doc.text(cityLine(da).toUpperCase(), leftX + 124, y + 374, { width:130 });
-
-  // DANFE simplificado à direita
-  doc.rect(rightX, y + 6, rightW, h - 12).stroke();
-  await drawBarcode(doc, key || '00000000000000000000000000000000000000000000', rightX + 45, y + 18, rightW - 90, 46);
-  doc.font('Helvetica').fontSize(7).text(key, rightX + 38, y + 68, { width:rightW - 76, align:'center' });
-  doc.rect(rightX + 8, y + 90, 70, 50).stroke();
-  doc.font('Helvetica').fontSize(7).text('1 - SAÍDA', rightX + 12, y + 96);
-  doc.font('Helvetica-Bold').fontSize(7).text(`Nº ${nfNumber || '—'} / Série ${nfe.series || '1'}`, rightX + 12, y + 111);
-  doc.font('Helvetica').fontSize(7).text(`Emissão: ${onlyDateBR(nfe.issuedAt)}`, rightX + 12, y + 126);
-  doc.font('Helvetica-Bold').fontSize(8).text('Chave de acesso', rightX + 148, y + 96, { width:115, align:'center' });
-  doc.font('Helvetica').fontSize(5.5).text(key, rightX + 115, y + 109, { width:150, align:'center' });
-  doc.font('Helvetica-Bold').fontSize(8).text('Protocolo de autorização de uso', rightX + 112, y + 124, { width:155, align:'center' });
-  doc.font('Helvetica').fontSize(6).text(`${nfe.protocol || '—'} ${dateTimeBR(nfe.protocolAt || nfe.issuedAt)}`, rightX + 112, y + 136, { width:155, align:'center' });
-  doc.moveTo(rightX, y + 158).lineTo(rightX + rightW, y + 158).stroke();
-
-  let yy = y + 245;
-  doc.font('Helvetica-Bold').fontSize(8).text('Emitente:', rightX + 8, yy).font('Helvetica').text(emitName, rightX + 58, yy, { width:190 }); yy += 22;
-  doc.font('Helvetica-Bold').text('CNPJ:', rightX + 8, yy).font('Helvetica').text(emitCnpj, rightX + 58, yy); yy += 18;
-  doc.font('Helvetica-Bold').text('Inscrição Estadual:', rightX + 8, yy).font('Helvetica').text(emitIe || '', rightX + 88, yy).font('Helvetica-Bold').text('UF:', rightX + 240, yy).font('Helvetica').text(emitUf || '', rightX + 258, yy); yy += 32;
-  doc.font('Helvetica-Bold').text('Destinatário:', rightX + 8, yy).font('Helvetica').text(destName, rightX + 68, yy, { width:185 }); yy += 22;
-  doc.font('Helvetica-Bold').text('CNPJ/CPF:', rightX + 8, yy).font('Helvetica').text(destDoc, rightX + 68, yy); yy += 20;
-  doc.font('Helvetica-Bold').text('SKU:', rightX + 8, yy).font('Helvetica').text(skuDanfe || '—', rightX + 68, yy); yy += 20;
-  doc.font('Helvetica-Bold').text('Inscrição Estadual:', rightX + 8, yy).font('Helvetica').text(nfe.destIe || '', rightX + 88, yy).font('Helvetica-Bold').text('UF:', rightX + 240, yy).font('Helvetica').text(destUf || '', rightX + 258, yy); yy += 22;
-  doc.font('Helvetica-Bold').fontSize(10).text('DANFE SIMPLIFICADO', rightX + 8, y + h - 24);
-}
-async function buildMagaluSimplifiedPdfBuffer(items) {
-  if (!PDFDocument) throw new Error('Dependência pdfkit não instalada. Rode: npm install pdfkit bwip-js');
-  return await new Promise(async (resolve, reject) => {
-    try {
-      const doc = new PDFDocument({ size:'A4', margin:0, bufferPages:false });
-      const chunks = [];
-      doc.on('data', c => chunks.push(c));
-      doc.on('end', () => resolve(Buffer.concat(chunks)));
-      doc.on('error', reject);
-      for (let i = 0; i < items.length; i++) {
-        if (i > 0 && i % 2 === 0) doc.addPage({ size:'A4', margin:0 });
-        const y = (i % 2 === 0) ? 14 : 426;
-        await drawMagaluEtiquetaDanfe(doc, items[i], y);
-        if (i % 2 === 0) doc.moveTo(14, 414).lineTo(581, 414).dash(3, { space:4 }).stroke().undash();
-      }
-      doc.end();
-    } catch (e) { reject(e); }
+function ssFilterReturnCards(){
+  const v=(document.getElementById('ss-returns-search')?.value||'').toLowerCase().trim();
+  const showZero=document.getElementById('ret-show-zero')?.checked||false;
+  document.querySelectorAll('#ss-returns-cards .ret-card').forEach(el=>{
+    const idx=parseInt(el.dataset.idx||'0');
+    const r=window.SS_RETURNS_DATA[idx]||{};
+    const total=Number(r.return_total_cost||0)||Number(r.return_shipping_cost||0)+Number(r.return_fee||0)+Number(r.lost_product_cost||0);
+    const isZero=total===0;
+    const matchSearch=(el.dataset.search||'').includes(v);
+    el.style.display=(matchSearch&&(!isZero||showZero))?'':'none';
   });
 }
 
+function ssOpenReturnDetail(idx){
+  const r=window.SS_RETURNS_DATA[idx];
+  if(!r)return;
+  const ship=Number(r.return_shipping_cost||0);
+  const fee=Number(r.return_fee||0);
+  const lost=Number(r.lost_product_cost||0);
+  const total=Number(r.return_total_cost||0)||(ship+fee+lost);
+  const prot=r.ml_protected===true||r.ml_protected==='true';
+  const body=document.getElementById('ss-return-detail-body');
+  if(!body)return;
+  body.innerHTML=`
+    <div class="ret-detail-section">
+      <h4>Pedido</h4>
+      ${r.item_title?`<div style="font-size:14px;font-weight:700;margin-bottom:10px">${r.item_title}</div>`:''}
+      <div class="ret-detail-row"><span>ID do pedido</span><strong>#${r.platform_order_id||'—'}</strong></div>
+      <div class="ret-detail-row"><span>Plataforma</span><strong><span class="plat-chip ${r.platform||''}" style="font-size:9px">${r.platform||'—'}</span></strong></div>
+      ${r.item_sku?`<div class="ret-detail-row"><span>SKU</span><strong>${r.item_sku}</strong></div>`:''}
+      ${r.total_amount?`<div class="ret-detail-row"><span>Valor do pedido</span><strong>${R_BRL(r.total_amount)}</strong></div>`:''}
+      ${r.order_date?`<div class="ret-detail-row"><span>Data do pedido</span><strong>${new Date(r.order_date).toLocaleString('pt-BR')}</strong></div>`:''}
+    </div>
+    <div class="ret-detail-section">
+      <h4>Devolução</h4>
+      <div class="ret-detail-row"><span>Status</span><strong>${r.status||'—'}</strong></div>
+      <div class="ret-detail-row"><span>Motivo</span><strong>${r.reason||'—'}</strong></div>
+      <div class="ret-detail-row"><span>Tipo de resolução</span><strong>${r.resolution_type||'—'}</strong></div>
+      ${r.return_tracking_code?`<div class="ret-detail-row"><span>Rastreio retorno</span><strong>${r.return_tracking_code}</strong></div>`:''}
+      ${r.buyer_message?`<div class="ret-detail-row"><span>Mensagem do comprador</span><strong>${r.buyer_message}</strong></div>`:''}
+      <div class="ret-detail-row"><span>Atualizado em</span><strong>${r.updated_at?new Date(r.updated_at).toLocaleString('pt-BR'):'—'}</strong></div>
+    </div>
+    <div class="ret-detail-section">
+      <h4>Impacto financeiro</h4>
+      ${prot?`<div style="background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.2);border-radius:10px;padding:10px 12px;margin-bottom:10px;font-size:11px;color:var(--green2)">✓ ML Protegeu o vendedor — custo foi absorvido pelo Mercado Livre</div>`:''}
+      <div class="ret-detail-cost-grid">
+        <div class="ret-detail-cost-item ${ship>0?'danger':''}"><span>Frete reverso</span><strong>${R_BRL(ship)}</strong></div>
+        <div class="ret-detail-cost-item ${fee>0?'danger':''}"><span>Taxa ML</span><strong>${R_BRL(fee)}</strong></div>
+        <div class="ret-detail-cost-item ${lost>0?'danger':''}"><span>Produto perdido</span><strong>${R_BRL(lost)}</strong></div>
+        <div class="ret-detail-cost-item ${total>0&&!prot?'danger':'safe'}"><span>Prejuízo total</span><strong>${prot?'R$ 0,00':R_BRL(total)}</strong></div>
+      </div>
+    </div>
+    ${r.platform_order_id?`<div style="text-align:right"><a href="https://www.mercadolivre.com.br/vendas/${r.platform_order_id}/detalhe" target="_blank" class="ss-btn ghost" style="font-size:11px"><i class="ti ti-external-link"></i> Ver no Mercado Livre</a></div>`:''}
+  `;
+  ssOpenModal('ss-return-detail-modal');
+}
 
+async function ssSyncReturns(platform){
+  try{
+    toast('Sincronizando devoluções '+platform+'...');
+    await ssFetchJson(`${API}/api/returns/sync/${platform}`,{method:'POST'});
+    await ssRefreshReturnsList();
+    toast('Devoluções sincronizadas');
+  }catch(e){toast('Erro: '+e.message)}
+}
 
-// v12 — DANFE simplificado separado: não redesenha/não altera a etiqueta oficial.
-// A etiqueta continua vindo oficial da Magalu. Aqui geramos somente a nota fiscal reduzida.
-function danfeDataFromDelivery(data) {
-  const d = data.delivery || {};
-  const nfe = data.nfe || {};
-  const rec = d.shipping?.recipient || {};
-  const ra = rec.address || {};
-  const drop = d.shipping?.drop_details || {};
-  const da = drop.address || {};
-  const key = nfe.key || d.invoices?.[0]?.key || '';
-  const firstItem = d.items?.[0] || d.products?.[0] || d.order?.items?.[0] || {};
-  const firstInfo = firstItem.info || firstItem.product || firstItem || {};
-  const sku = firstInfo.sku || firstInfo.seller_sku || firstInfo.sellerSku || firstInfo.id || d.sku || d.product_sku || '';
-  return {
-    key,
-    nfNumber: nfe.number || (key ? String(key).slice(25, 34).replace(/^0+/, '') : ''),
-    series: nfe.series || '1',
-    issuedAt: nfe.issuedAt || d.invoices?.[0]?.issued_at || '',
-    protocol: nfe.protocol || '',
-    protocolAt: nfe.protocolAt || nfe.issuedAt || d.invoices?.[0]?.issued_at || '',
-    emitName: nfe.emitName || '',
-    emitCnpj: nfe.emitCnpj || (key.length >= 20 ? key.slice(6, 20) : ''),
-    emitIe: nfe.emitIe || '',
-    emitUf: nfe.emitUf || da.state || '',
-    destName: nfe.destName || rec.name || '',
-    destDoc: nfe.destCpfCnpj || rec.document_number || '',
-    destIe: nfe.destIe || '',
-    destUf: nfe.destUf || ra.state || '',
-    value: nfe.value || '',
-    orderCode: d.order?.code || d.code || '',
-    deliveryId: d.id || '',
-    sku,
+async function ssSaveReturnCost(id){
+  const body={
+    return_shipping_cost:parseFloat(document.getElementById('rs-'+id)?.value||0),
+    return_fee:parseFloat(document.getElementById('rf-'+id)?.value||0),
+    lost_product_cost:parseFloat(document.getElementById('rl-'+id)?.value||0),
+    refund_adjustment:0
   };
+  await ssFetchJson(`${API}/api/returns/${id}/cost`,{method:'POST',body:JSON.stringify(body)});
+  await ssRefreshReturnsList();
+  await loadData();
+  toast('Custo salvo');
 }
-
-async function drawDanfeSimplificadoOnly(doc, data, box, opts = {}) {
-  const info = danfeDataFromDelivery(data);
-  const x = box.x, y = box.y, w = box.w, h = box.h;
-  const scale = Math.min(w / 276, h / 380);
-  const fs = (n) => Math.max(4.2, n * scale);
-  const pad = 8 * scale;
-
-  doc.rect(x, y, w, h).stroke();
-
-  const barcodeH = Math.max(28, 46 * scale);
-  await drawBarcode(doc, info.key || '00000000000000000000000000000000000000000000', x + w * 0.12, y + pad, w * 0.76, barcodeH);
-  doc.font('Helvetica').fontSize(fs(7)).text(info.key, x + pad, y + pad + barcodeH + 4, { width: w - pad*2, align:'center' });
-
-  const rowY = y + pad + barcodeH + 26 * scale;
-  const leftW = w * 0.26;
-  doc.rect(x + pad, rowY, leftW, 50 * scale).stroke();
-  doc.font('Helvetica').fontSize(fs(7)).text('1 - SAÍDA', x + pad + 4, rowY + 6 * scale);
-  doc.font('Helvetica-Bold').fontSize(fs(7)).text(`Nº ${info.nfNumber || '—'} / Série ${info.series || '1'}`, x + pad + 4, rowY + 21 * scale, { width:leftW - 8 });
-  doc.font('Helvetica').fontSize(fs(7)).text(`Emissão: ${onlyDateBR(info.issuedAt)}`, x + pad + 4, rowY + 36 * scale, { width:leftW - 8 });
-
-  const midX = x + pad + leftW + 8 * scale;
-  doc.font('Helvetica-Bold').fontSize(fs(8)).text('Chave de acesso', midX, rowY + 5 * scale, { width:w - leftW - pad*3 - 8*scale, align:'center' });
-  doc.font('Helvetica').fontSize(fs(5.5)).text(info.key, midX, rowY + 18 * scale, { width:w - leftW - pad*3 - 8*scale, align:'center' });
-  doc.font('Helvetica-Bold').fontSize(fs(8)).text('Protocolo de autorização de uso', midX, rowY + 34 * scale, { width:w - leftW - pad*3 - 8*scale, align:'center' });
-  doc.font('Helvetica').fontSize(fs(6)).text(`${info.protocol || '—'} ${dateTimeBR(info.protocolAt)}`, midX, rowY + 47 * scale, { width:w - leftW - pad*3 - 8*scale, align:'center' });
-
-  doc.moveTo(x, y + h * 0.34).lineTo(x + w, y + h * 0.34).stroke();
-
-  const line = Math.min(20 * scale, 26);
-  const labelW = Math.min(90 * scale, w * 0.32);
-  const valX = x + pad + labelW;
-  const ufX = x + w - 44 * scale;
-  // 7 kv rows + 1 extra gap; anchor from bottom so text never overflows "DANFE SIMPLIFICADO"
-  const numKvRows = 7;
-  let yy = y + h - 44 * scale - numKvRows * line - 10 * scale;
-
-  function kv(label, value, uf) {
-    doc.font('Helvetica-Bold').fontSize(fs(8)).text(label, x + pad, yy, { width: labelW });
-    doc.font('Helvetica').fontSize(fs(8)).text(String(value || ''), valX, yy, { width: uf ? (ufX - valX - 6) : (w - valX - pad) });
-    if (uf !== undefined) {
-      doc.font('Helvetica-Bold').fontSize(fs(8)).text('UF:', ufX, yy);
-      doc.font('Helvetica').fontSize(fs(8)).text(String(uf || ''), ufX + 18 * scale, yy);
-    }
-    yy += line;
+const ssInstallSideButtonsV21=window.ssInstallSideButtons;
+window.ssInstallSideButtons=function(){
+  if(typeof ssInstallSideButtonsV21==='function')ssInstallSideButtonsV21();
+  const sidebar=document.getElementById('sidebar');
+  if(!sidebar)return;
+  // Remove Resumo e Adicionar faturamento da lateral. Agora ficam em Minha Conta.
+  ['ss-side-extra','ss-side-analytics'].forEach(id=>{const el=document.getElementById(id);if(el)el.remove();});
+  if(!document.getElementById('ss-side-returns')){
+    const b=document.createElement('div');b.id='ss-side-returns';b.className='s-btn';
+    b.innerHTML='<i class="ti ti-rotate-clockwise-2"></i><span class="s-tip">Devoluções</span>';
+    b.onclick=ssLoadReturns;sidebar.insertBefore(b,sidebar.querySelector('.s-sp')||null)
   }
-
-  kv('Emitente:', info.emitName);
-  kv('CNPJ:', info.emitCnpj);
-  kv('Inscrição Estadual:', info.emitIe, info.emitUf);
-  yy += 10 * scale;
-  kv('Destinatário:', info.destName);
-  kv('CNPJ/CPF:', info.destDoc);
-  kv('SKU:', info.sku || '—');
-  kv('Inscrição Estadual:', info.destIe, info.destUf);
-
-  // Assinatura discreta da plataforma no DANFE criado pelo SalesSync.
-  doc.font('Helvetica-Bold')
-    .fontSize(fs(6.5))
-    .fillColor('#444444')
-    .text('IMPRESSO POR SALES SYNC', x + pad, y + h - 38 * scale, { width:w - pad*2, align:'right' });
-  doc.fillColor('black');
-
-  doc.font('Helvetica-Bold').fontSize(fs(10)).text('DANFE SIMPLIFICADO', x + pad, y + h - 24 * scale, { width:w - pad*2 });
-}
-
-async function buildMagaluDanfeOnlyPdfBuffer(items, opts = {}) {
-  if (!PDFDocument) throw new Error('Dependência pdfkit não instalada. Rode: npm install pdfkit bwip-js');
-  const mode = String(opts.mode || opts.size || 'a4').toLowerCase();
-  const isZebra = ['zebra','thermal','termica','4x6'].includes(mode);
-  return await new Promise(async (resolve, reject) => {
-    try {
-      const doc = new PDFDocument({ size: isZebra ? [288, 432] : 'A4', margin: 0, bufferPages: false });
-      const chunks = [];
-      doc.on('data', c => chunks.push(c));
-      doc.on('end', () => resolve(Buffer.concat(chunks)));
-      doc.on('error', reject);
-      for (let i = 0; i < items.length; i++) {
-        if (i > 0) doc.addPage({ size: isZebra ? [288, 432] : 'A4', margin: 0 });
-        if (isZebra) {
-          await drawDanfeSimplificadoOnly(doc, items[i], { x: 8, y: 8, w: 272, h: 416 }, { zebra:true });
-        } else {
-          // Uma nota por página A4, sem mexer na etiqueta oficial.
-          await drawDanfeSimplificadoOnly(doc, items[i], { x: 70, y: 90, w: 455, h: 620 }, { zebra:false });
-        }
-      }
-      doc.end();
-    } catch (e) { reject(e); }
-  });
-}
-
-
-
-// v13 — Combo Zebra: mantém a etiqueta oficial da Magalu e adiciona o DANFE SalesSync separado.
-// Saída final: 1 página Zebra para etiqueta oficial + 1 página Zebra para DANFE criado, repetindo por venda.
-async function fetchMagaluOfficialLabelPdfBuffer(acc, deliveryId, opts = {}) {
-  const deliveryProbe = opts.delivery_probe || await inspectMagaluDelivery(acc, deliveryId);
-  const channels = inferMagaluChannelObjectsFromProbe(deliveryProbe);
-  if (opts.channel) channels.unshift({ id: String(opts.channel), extras: {} });
-  const channel = channels[0];
-  if (!channel?.id) {
-    const e = new Error('Canal Magalu não encontrado para gerar etiqueta oficial');
-    e.delivery_probe = deliveryProbe;
-    throw e;
-  }
-
-  const payload = {
-    channel,
-    deliveries: [{ id: deliveryId }],
-    label: { type: 'full', format: 'pdf' }
-  };
-
-  const r = await postMagaluShippingLabel(acc, payload);
-  const ct = r.headers?.['content-type'] || '';
-  const directPdf = extractPdfBufferFromLabelResponse(r.data, ct);
-  if (r.status >= 200 && r.status < 300 && directPdf) {
-    return { pdf: directPdf, payload, response: null, delivery_probe: deliveryProbe };
-  }
-
-  const parsed = parseMagaluLabelResponse(r.data);
-  const signedUrl = findMagaluSignedUrl(parsed);
-  if (r.status >= 200 && r.status < 300 && signedUrl) {
-    const file = await axios.get(signedUrl, {
-      responseType: 'arraybuffer',
-      validateStatus: () => true
-    });
-    const fileCt = file.headers?.['content-type'] || '';
-    const buf = Buffer.from(file.data || '');
-    if (file.status >= 200 && file.status < 300 && (looksLikePdfBuffer(buf) || String(fileCt).toLowerCase().includes('pdf'))) {
-      return { pdf: buf, payload, response: parsed, signed_url: signedUrl, delivery_probe: deliveryProbe };
-    }
-    const e = new Error('A URL assinada da Magalu não retornou PDF válido');
-    e.status = file.status;
-    e.content_type = fileCt;
-    e.payload = payload;
-    e.response = parsed;
-    throw e;
-  }
-
-  const e = new Error('A Magalu não retornou etiqueta PDF nem signed_url');
-  e.status = r.status;
-  e.content_type = ct;
-  e.payload = payload;
-  e.response = parsed || Buffer.from(r.data || '').toString('utf8').slice(0, 1500);
-  e.delivery_probe = deliveryProbe;
-  throw e;
-}
-
-async function appendPdfPagesFitted(outDoc, sourceBuffer, targetSize = [288, 432], opts = {}) {
-  const src = await PDFLib.PDFDocument.load(sourceBuffer);
-  const indices = opts.onlyFirstPage ? [0] : src.getPageIndices();
-  const embeddedPages = await outDoc.embedPdf(sourceBuffer, indices);
-  for (const ep of embeddedPages) {
-    const page = outDoc.addPage(targetSize);
-    const pageW = targetSize[0], pageH = targetSize[1];
-    const margin = opts.margin ?? 0;
-    const scale = Math.min((pageW - margin * 2) / ep.width, (pageH - margin * 2) / ep.height);
-    const drawW = ep.width * scale;
-    const drawH = ep.height * scale;
-    page.drawPage(ep, {
-      x: (pageW - drawW) / 2,
-      y: (pageH - drawH) / 2,
-      width: drawW,
-      height: drawH
-    });
-  }
-}
-
-// Recorta apenas a ETIQUETA oficial da Magalu e encaixa em 4x6/Zebra.
-// Importante: não redesenha a etiqueta; só usa a página oficial e remove a área de NF/DANFE que vem junto
-// em alguns PDFs da Magalu/Bling. Também ignora páginas seguintes de nota normal.
-async function appendMagaluOfficialLabelOnlyZebra(outDoc, sourceBuffer, targetSize = [288, 432]) {
-  const src = await PDFLib.PDFDocument.load(sourceBuffer);
-  const first = src.getPage(0);
-  const { width, height } = first.getSize();
-
-  let embedded;
-  const isLargeSheet = width > 420 || height > 620;
-
-  if (isLargeSheet) {
-    // PDFs de etiqueta + DANFE geralmente vêm em folha grande:
-    // esquerda = etiqueta, direita = DANFE, e às vezes 2 etiquetas por folha.
-    // Pegamos a etiqueta superior esquerda e ampliamos para o papel Zebra.
-    const crop = {
-      left: 0,
-      bottom: height * 0.50,
-      right: width * 0.52,
-      top: height
-    };
-    embedded = await outDoc.embedPage(first, crop);
-  } else {
-    // Se a Magalu já retornou a etiqueta em 4x6, mantém a página inteira.
-    embedded = await outDoc.embedPage(first);
-  }
-
-  const page = outDoc.addPage(targetSize);
-  const pageW = targetSize[0], pageH = targetSize[1];
-  const margin = 2;
-  const scale = Math.min((pageW - margin * 2) / embedded.width, (pageH - margin * 2) / embedded.height);
-  const drawW = embedded.width * scale;
-  const drawH = embedded.height * scale;
-  page.drawPage(embedded, {
-    x: (pageW - drawW) / 2,
-    y: (pageH - drawH) / 2,
-    width: drawW,
-    height: drawH
-  });
-}
-
-async function buildMagaluZebraLabelDanfePdfBuffer(acc, deliveryIds) {
-  if (!PDFLib) throw new Error('Dependência pdf-lib não instalada. Rode: npm install pdf-lib');
-  if (!PDFDocument) throw new Error('Dependência pdfkit não instalada. Rode: npm install pdfkit bwip-js');
-
-  const out = await PDFLib.PDFDocument.create();
-  const pageSize = [288, 432]; // Zebra/thermal 4x6, em pontos PDF.
-
-  for (const deliveryId of deliveryIds) {
-    const data = await fetchMagaluDeliveryAndInvoice(acc, deliveryId);
-
-    // 1) Página da etiqueta oficial Magalu: NÃO redesenha.
-    // Recorta somente a área da etiqueta oficial, ignora nota normal/páginas extras e amplia para Zebra.
-    const label = await fetchMagaluOfficialLabelPdfBuffer(acc, deliveryId);
-    await appendMagaluOfficialLabelOnlyZebra(out, label.pdf, pageSize);
-
-    // 2) Página do DANFE simplificado criado pelo SalesSync, sempre em Zebra.
-    const danfePdf = await buildMagaluDanfeOnlyPdfBuffer([data], { mode: 'zebra' });
-    await appendPdfPagesFitted(out, danfePdf, pageSize);
-  }
-
-  return Buffer.from(await out.save());
-}
-
-app.get('/api/magalu/labels/zebra-completo', auth, async (req, res) => {
-  try {
-    const rawIds = String(req.query.ids || req.query.id || '').split(',').map(x => x.trim()).filter(Boolean);
-    const deliveryIds = [...new Set(rawIds)].slice(0, 20);
-    if (!deliveryIds.length) return res.status(400).json({ error: 'Informe ao menos um delivery id em ?ids=' });
-
-    const acc = await getMagaluAccount(req.user.id);
-    if (!acc) return res.status(401).json({ error: 'Magalu não conectado' });
-
-    const pdf = await buildMagaluZebraLabelDanfePdfBuffer(acc, deliveryIds);
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="magalu-zebra-etiqueta-danfe-${deliveryIds.length}.pdf"`);
-    return res.send(pdf);
-  } catch (e) {
-    res.status(e.status || e.response?.status || 500).json({
-      error: 'Não foi possível gerar Zebra PDF com etiqueta oficial + DANFE simplificado',
-      message: e.message,
-      payload: e.payload || null,
-      response: e.response || e.response?.data || null,
-      content_type: e.content_type || null,
-      install: 'Dependências necessárias: pdfkit, bwip-js e pdf-lib'
-    });
-  }
-});
-
-app.get('/api/magalu/labels/danfe-simplificado', auth, async (req, res) => {
-  try {
-    const rawIds = String(req.query.ids || req.query.id || '').split(',').map(x => x.trim()).filter(Boolean);
-    const deliveryIds = [...new Set(rawIds)].slice(0, 30);
-    if (!deliveryIds.length) return res.status(400).json({ error: 'Informe ao menos um delivery id em ?ids=' });
-
-    const acc = await getMagaluAccount(req.user.id);
-    if (!acc) return res.status(401).json({ error: 'Magalu não conectado' });
-
-    const items = [];
-    for (const id of deliveryIds) items.push(await fetchMagaluDeliveryAndInvoice(acc, id));
-    const mode = String(req.query.size || req.query.mode || 'a4').toLowerCase();
-    const pdf = await buildMagaluDanfeOnlyPdfBuffer(items, { mode });
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="magalu-danfe-simplificado-${mode}-${deliveryIds.length}.pdf"`);
-    return res.send(pdf);
-  } catch (e) {
-    res.status(500).json({
-      error: 'Não foi possível gerar DANFE simplificado',
-      message: e.message,
-      install: 'Se faltar dependência, rode: npm install pdfkit bwip-js'
-    });
-  }
-});
-
-app.get('/api/magalu/labels/salesync-pdf', auth, async (req, res) => {
-  try {
-    const rawIds = String(req.query.ids || req.query.id || '').split(',').map(x => x.trim()).filter(Boolean);
-    const deliveryIds = [...new Set(rawIds)].slice(0, 20);
-    if (!deliveryIds.length) return res.status(400).json({ error: 'Informe ao menos um delivery id em ?ids=' });
-
-    const acc = await getMagaluAccount(req.user.id);
-    if (!acc) return res.status(401).json({ error: 'Magalu não conectado' });
-
-    const items = [];
-    for (const id of deliveryIds) items.push(await fetchMagaluDeliveryAndInvoice(acc, id));
-    const pdf = await buildMagaluSimplifiedPdfBuffer(items);
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="magalu-etiquetas-danfe-salesync-${deliveryIds.length}.pdf"`);
-    return res.send(pdf);
-  } catch (e) {
-    res.status(500).json({
-      error: 'Não foi possível gerar PDF SalesSync etiqueta + DANFE simplificado',
-      message: e.message,
-      install: 'Se faltar dependência, rode: npm install pdfkit bwip-js'
-    });
-  }
-});
-
-app.get('/api/magalu/labels/official', auth, async (req, res) => {
-  try {
-    const rawIds = String(req.query.ids || req.query.id || '').split(',').map(x => x.trim()).filter(Boolean);
-    const deliveryIds = [...new Set(rawIds)].slice(0, 30);
-    if (!deliveryIds.length) return res.status(400).json({ error: 'Informe ao menos um delivery id em ?ids=' });
-
-    const acc = await getMagaluAccount(req.user.id);
-    if (!acc) return res.status(401).json({ error: 'Magalu não conectado' });
-
-    const firstProbe = await inspectMagaluDelivery(acc, deliveryIds[0]);
-    const channels = inferMagaluChannelObjectsFromProbe(firstProbe);
-    if (req.query.channel) channels.unshift({ id: String(req.query.channel), extras: {} });
-    const channel = channels[0];
-    if (!channel?.id) {
-      return res.status(422).json({
-        error: 'Canal Magalu não encontrado para gerar etiqueta',
-        hint: 'A API exige channel como objeto { id, extras }. Verifique delivery.order.channel.id no debug.',
-        delivery_ids: deliveryIds,
-        delivery_probe: firstProbe
-      });
-    }
-
-    const opts = normalizeMagaluLabelOptions(req.query);
-    const payload = {
-      channel,
-      deliveries: deliveryIds.map(id => ({ id })),
-      label: { type: opts.type, format: opts.format }
-    };
-
-    const r = await postMagaluShippingLabel(acc, payload);
-    const ct = r.headers?.['content-type'] || '';
-    const buf = Buffer.from(r.data || '');
-
-    const pdf = extractPdfBufferFromLabelResponse(r.data, ct);
-    if (r.status >= 200 && r.status < 300 && pdf) {
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `inline; filename="magalu-etiquetas-${deliveryIds.length}-${opts.type}.pdf"`);
-      return res.send(pdf);
-    }
-
-    const parsed = parseMagaluLabelResponse(r.data);
-    const signedUrl = findMagaluSignedUrl(parsed);
-    if (r.status >= 200 && r.status < 300 && signedUrl) {
-      if (String(req.query.redirect || '1') !== '0') return res.redirect(302, signedUrl);
-      return res.json({ success: true, delivery_ids: deliveryIds, payload, ...parsed });
-    }
-
-    return res.status(r.status || 422).json({
-      error: 'Não foi possível gerar etiquetas Magalu em lote',
-      hint: 'Use type=full&format=pdf para etiqueta + DANFE simplificado. Use format=zpl para Zebra.',
-      endpoint: 'POST /seller/v1/logistics/shipping-labels',
-      delivery_ids: deliveryIds,
-      payload,
-      status: r.status,
-      content_type: ct,
-      response: parsed || buf.toString('utf8').slice(0, 2500),
-      first_delivery_probe: firstProbe
-    });
-  } catch (e) {
-    res.status(e.response?.status || 500).json({
-      error: e.message,
-      data: e.response?.data?.toString?.() || e.response?.data
-    });
-  }
-});
-
-app.get('/api/magalu/delivery/:id/official-label', auth, async (req, res) => {
-  const deliveryId = req.params.id;
-
-  try {
-    const acc = await getMagaluAccount(req.user.id);
-    if (!acc) return res.status(401).json({ error: 'Magalu não conectado' });
-
-    const delivery_probe = await inspectMagaluDelivery(acc, deliveryId);
-    const channels = inferMagaluChannelObjectsFromProbe(delivery_probe);
-    if (req.query.channel) channels.unshift({ id: String(req.query.channel), extras: {} });
-
-    const channel = channels[0];
-    if (!channel?.id) {
-      return res.status(422).json({
-        error: 'Canal Magalu não encontrado para gerar etiqueta',
-        hint: 'A API exige channel como objeto { id, extras }. Verifique delivery.order.channel.id no debug.',
-        delivery_id: deliveryId,
-        delivery_probe
-      });
-    }
-
-    const opts = normalizeMagaluLabelOptions(req.query);
-    const payload = magaluSingleLabelPayload(deliveryId, channel, opts);
-    const r = await postMagaluShippingLabel(acc, payload);
-    const ct = r.headers?.['content-type'] || '';
-    const buf = Buffer.from(r.data || '');
-
-    // 1) PDF direto ou base64 PDF legado
-    const pdf = extractPdfBufferFromLabelResponse(r.data, ct);
-    if (r.status >= 200 && r.status < 300 && pdf) {
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `inline; filename="${magaluLabelFilename(deliveryId, opts.type, 'pdf')}"`);
-      return res.send(pdf);
-    }
-
-    // 2) Fluxo oficial atual da Magalu: JSON com label.signed_url.
-    const parsed = parseMagaluLabelResponse(r.data);
-    const signedUrl = findMagaluSignedUrl(parsed);
-    if (r.status >= 200 && r.status < 300 && signedUrl) {
-      // Por padrão abre o PDF/ZIP assinado direto. Use ?redirect=0 para receber JSON.
-      if (String(req.query.redirect || '1') !== '0') return res.redirect(302, signedUrl);
-      return res.json({ success: true, delivery_id: deliveryId, payload, ...parsed });
-    }
-
-    return res.status(r.status || 422).json({
-      error: 'Não foi possível gerar etiqueta Magalu',
-      hint: 'A rota usa o formato oficial: channel como objeto {id, extras}, label.format=pdf|zpl e label.type=full|summary.',
-      endpoint: 'POST /seller/v1/logistics/shipping-labels',
-      delivery_id: deliveryId,
-      payload,
-      status: r.status,
-      content_type: ct,
-      response: parsed || buf.toString('utf8').slice(0, 2000),
-      delivery_probe
-    });
-
-  } catch (e) {
-    res.status(e.response?.status || 500).json({
-      error: e.message,
-      data: e.response?.data?.toString?.() || e.response?.data
-    });
-  }
-});
-
-// ─────────────────────────────────────────────────────────────
-// SalesSync v17 — possíveis impressões + metas + analytics
-// ─────────────────────────────────────────────────────────────
-function ssNum(v) {
-  const n = Number(v || 0);
-  return Number.isFinite(n) ? n : 0;
-}
-function ssMoneyNum(v) { return Math.round(ssNum(v) * 100) / 100; }
-function ssFirstMonth(d = new Date()) { return new Date(d.getFullYear(), d.getMonth(), 1); }
-function ssDaysInMonth(d = new Date()) { return new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate(); }
-function ssElapsedDays(d = new Date()) { return Math.max(1, d.getDate()); }
-function ssOrderAmount(o) { return ssNum(o.total_amount ?? o.paid_amount ?? o.amount ?? o.total ?? 0); }
-function ssOrderProfit(o) { return ssNum(o.profit ?? o.net_profit ?? o.lucro ?? 0); }
-function ssOrderProduct(o) { return String(o.item_title || o.product_name || o.name || o.item_sku || 'Produto sem nome'); }
-function ssDateOnlyBR(v) { try { return new Date(v).toLocaleDateString('pt-BR'); } catch { return ''; } }
-
-
-
-async function ssGetAdditionalRevenues(userId, monthDate = new Date()) {
-  const monthStart = ssFirstMonth(monthDate).toISOString().slice(0, 10);
-  const { rows } = await db.query(
-    `SELECT id, name, amount, recurring, starts_at, created_at, updated_at
-     FROM additional_revenues
-     WHERE user_id=$1
-       AND is_active=true
-       AND (
-         recurring=true
-         OR DATE_TRUNC('month', starts_at)::date = DATE_TRUNC('month', $2::date)::date
-       )
-     ORDER BY created_at DESC, id DESC`,
-    [userId, monthStart]
-  );
-  return (rows || []).map(r => ({
-    ...r,
-    amount: ssMoneyNum(r.amount),
-    recurring: !!r.recurring
-  }));
-}
-function ssAdditionalRevenueTotal(items = []) {
-  return ssMoneyNum((items || []).reduce((s, r) => s + ssNum(r.amount), 0));
-}
-
-function ssNormalizeAnalyticsResponse(summary, monthlyRows = [], platformRows = []) {
-  const cm = summary || {};
-
-  const monthMap = {};
-  for (const r of monthlyRows || []) {
-    const rawMonth = r.snapshot_month;
-    const key = rawMonth instanceof Date
-      ? rawMonth.toISOString().slice(0, 10)
-      : String(rawMonth).slice(0, 10);
-
-    monthMap[key] = {
-      month: key,
-      label: new Date(key + 'T00:00:00Z').toLocaleDateString('pt-BR', { month:'short', year:'2-digit', timeZone:'UTC' }),
-      gross_sales: Number(r.gross_sales || 0),
-      net_profit: Number(r.net_profit || 0),
-      orders_count: Number(r.orders_count || 0),
-      magalu: 0,
-      mercadolivre: 0,
-      platforms: []
-    };
-  }
-
-  for (const r of platformRows || []) {
-    const rawMonth = r.snapshot_month || r.month;
-    const key = rawMonth instanceof Date
-      ? rawMonth.toISOString().slice(0, 10)
-      : String(rawMonth).slice(0, 10);
-
-    if (!monthMap[key]) {
-      monthMap[key] = {
-        month: key,
-        label: new Date(key + 'T00:00:00Z').toLocaleDateString('pt-BR', { month:'short', year:'2-digit', timeZone:'UTC' }),
-        gross_sales: 0,
-        net_profit: 0,
-        orders_count: 0,
-        magalu: 0,
-        mercadolivre: 0,
-        platforms: []
-      };
-    }
-
-    const platform = String(r.platform || '').toLowerCase();
-    const value = Number(r.gross_sales || 0);
-    const orders = Number(r.orders_count || 0);
-    monthMap[key][platform] = value;
-    monthMap[key].platforms.push({
-      platform,
-      label: platform === 'magalu' ? 'Magalu' : platform === 'mercadolivre' ? 'Mercado Livre' : platform,
-      gross_sales: value,
-      orders_count: orders,
-      percentage: 0
-    });
-
-    // Se monthly_snapshots ainda não tiver esse mês, soma total pelas plataformas.
-    if (!monthMap[key].gross_sales) monthMap[key].gross_sales = 0;
-  }
-
-  const monthlyRevenue = Object.values(monthMap)
-    .sort((a,b) => String(a.month).localeCompare(String(b.month)))
-    .map(m => {
-      const platformTotal = (m.platforms || []).reduce((s,p) => s + Number(p.gross_sales || 0), 0);
-      if (platformTotal > 0) m.gross_sales = platformTotal;
-      if ((m.platforms || []).length) m.orders_count = (m.platforms || []).reduce((s,p) => s + Number(p.orders_count || 0), 0);
-      m.platforms = (m.platforms || []).map(p => ({
-        ...p,
-        percentage: m.gross_sales > 0 ? Math.round((p.gross_sales / m.gross_sales) * 10000) / 100 : 0
-      }));
-      m.tooltip = {
-        total: m.gross_sales,
-        magalu: m.magalu || 0,
-        mercadolivre: m.mercadolivre || 0,
-        magalu_pct: m.gross_sales > 0 ? Math.round(((m.magalu || 0) / m.gross_sales) * 10000) / 100 : 0,
-        mercadolivre_pct: m.gross_sales > 0 ? Math.round(((m.mercadolivre || 0) / m.gross_sales) * 10000) / 100 : 0
-      };
-      return m;
-    });
-
-  return {
-    success: true,
-    data: {
-      ...cm,
-      monthly_revenue: monthlyRevenue,
-      monthly_platform_chart: monthlyRevenue
-    },
-    current_month: {
-      gross_sales: ssMoneyNum(cm.gross_sales),
-      gross_sales_orders: ssMoneyNum(cm.gross_sales_orders),
-      additional_revenue_total: ssMoneyNum(cm.additional_revenue_total),
-      additional_revenues: Array.isArray(cm.additional_revenues) ? cm.additional_revenues : [],
-      net_profit: ssMoneyNum(cm.net_profit),
-      orders_count: Number(cm.orders_count || 0),
-      avg_ticket: ssMoneyNum(cm.avg_ticket),
-      best_seller_product: cm.best_seller_product || null,
-      most_profitable_product: cm.most_profitable_product || null,
-      projected_revenue: ssMoneyNum(cm.projected_revenue),
-      revenue_goal_enabled: !!cm.revenue_goal_enabled,
-      monthly_revenue_goal: ssMoneyNum(cm.monthly_revenue_goal),
-      missing_to_goal: ssMoneyNum(cm.missing_to_goal ?? cm.remaining_to_goal),
-      remaining_to_goal: ssMoneyNum(cm.missing_to_goal ?? cm.remaining_to_goal),
-      goal_progress_pct: Number(cm.goal_progress_pct || 0),
-      will_hit_goal: !!cm.will_hit_goal,
-      cancelled_count: Number(cm.cancelled_count || 0)
-    },
-    monthly_revenue: monthlyRevenue,
-    monthly_platform_chart: monthlyRevenue
-  };
-}
-
-async function ssGetAccounts(userId, platform = null) {
-  const params = [userId];
-  let sql = `SELECT * FROM marketplace_accounts WHERE user_id=$1 AND is_active=true AND access_token IS NOT NULL`;
-  if (platform) { sql += ` AND platform=$2`; params.push(platform); }
-  const { rows } = await db.query(sql, params);
-  return rows || [];
-}
-
-async function ssFetchOrdersInternal(userId, opts = {}) {
-  let allOrders = await ssLoadOrdersFromSql(userId, { period: opts.days || 30, platform: opts.platform || null, date_from: opts.date_from, date_to: opts.date_to });
-  if (!allOrders.length) {
-    await ssSyncOrdersForUser(userId, opts.platform || null, opts.days || 45);
-    allOrders = await ssLoadOrdersFromSql(userId, { period: opts.days || 30, platform: opts.platform || null, date_from: opts.date_from, date_to: opts.date_to });
-  }
-  return await enrichWithCosts(allOrders, userId);
-}
-
-function ssSummarizeOrders(orders, goal = null, additionalRevenue = 0, additionalItems = []) {
-  const paid = (orders || []).filter(o => String(o.status || '').toLowerCase() !== 'cancelled');
-  const grossOrders = paid.reduce((s,o)=>s + ssOrderAmount(o), 0);
-  const gross = grossOrders + ssNum(additionalRevenue);
-  const profit = paid.reduce((s,o)=>s + ssOrderProfit(o), 0);
-  const qty = paid.length;
-  const avg = qty ? grossOrders / qty : 0;
-  const byQty = {};
-  const byProfit = {};
-  for (const o of paid) {
-    const name = ssOrderProduct(o);
-    byQty[name] = (byQty[name] || 0) + ssNum(o.quantity || 1);
-    byProfit[name] = (byProfit[name] || 0) + ssOrderProfit(o);
-  }
-  const bestSeller = Object.entries(byQty).sort((a,b)=>b[1]-a[1])[0]?.[0] || null;
-  const mostProfit = Object.entries(byProfit).sort((a,b)=>b[1]-a[1])[0]?.[0] || null;
-  const today = new Date();
-  const projectedRevenue = gross / ssElapsedDays(today) * ssDaysInMonth(today);
-  const goalEnabled = Boolean(goal?.revenue_goal_enabled);
-  const goalValue = ssNum(goal?.monthly_revenue_goal);
-  const progress = goalEnabled && goalValue > 0 ? Math.min(999, gross / goalValue * 100) : 0;
-  return {
-    gross_sales: ssMoneyNum(gross),
-    gross_sales_orders: ssMoneyNum(grossOrders),
-    additional_revenue_total: ssMoneyNum(additionalRevenue),
-    additional_revenues: additionalItems || [],
-    net_profit: ssMoneyNum(profit),
-    orders_count: qty,
-    avg_ticket: ssMoneyNum(avg),
-    best_seller_product: bestSeller,
-    most_profitable_product: mostProfit,
-    projected_revenue: ssMoneyNum(projectedRevenue),
-    revenue_goal_enabled: goalEnabled,
-    monthly_revenue_goal: ssMoneyNum(goalValue),
-    missing_to_goal: ssMoneyNum(Math.max(0, goalValue - gross)),
-    goal_progress_pct: Math.round(progress * 10) / 10,
-    will_hit_goal: goalEnabled && goalValue > 0 ? projectedRevenue >= goalValue : false,
-    cancelled_count: (orders || []).filter(o => String(o.status || '').toLowerCase() === 'cancelled').length
-  };
-}
-
-async function ssGetGoal(userId) {
-  const { rows } = await db.query(
-    `SELECT revenue_goal_enabled, monthly_revenue_goal, updated_at FROM user_goals WHERE user_id=$1 LIMIT 1`,
-    [userId]
-  );
-  return rows[0] || { revenue_goal_enabled: false, monthly_revenue_goal: 0, updated_at: null };
-}
-
-app.get('/api/user-goals', auth, async (req, res) => {
-  try { res.json({ success: true, data: await ssGetGoal(req.user.id) }); }
-  catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/user-goals', auth, async (req, res) => {
-  try {
-    const enabled = Boolean(req.body.revenue_goal_enabled);
-    const goal = Math.max(0, Number(req.body.monthly_revenue_goal || 0));
-    const { rows } = await db.query(
-      `INSERT INTO user_goals (user_id, revenue_goal_enabled, monthly_revenue_goal, updated_at)
-       VALUES ($1,$2,$3,NOW())
-       ON CONFLICT (user_id) DO UPDATE SET
-         revenue_goal_enabled=EXCLUDED.revenue_goal_enabled,
-         monthly_revenue_goal=EXCLUDED.monthly_revenue_goal,
-         updated_at=NOW()
-       RETURNING revenue_goal_enabled, monthly_revenue_goal, updated_at`,
-      [req.user.id, enabled, goal]
-    );
-    res.json({ success: true, data: rows[0] });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-
-/* Endpoint para a IA: lista TODOS os rendimentos ativos sem filtro de mês */
-app.get('/api/additional-revenues/all', auth, async (req, res) => {
-  try {
-    const { rows } = await db.query(
-      `SELECT id, name, amount, recurring, starts_at, created_at
-       FROM additional_revenues
-       WHERE user_id=$1 AND is_active=true
-       ORDER BY created_at DESC, id DESC`,
-      [req.user.id]
-    );
-    const items = (rows || []).map(r => ({
-      ...r,
-      amount: parseFloat(r.amount || 0),
-      recurring: !!r.recurring
-    }));
-    res.json({ items });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/api/additional-revenues', auth, async (req, res) => {
-  try {
-    const month = req.query.month ? new Date(String(req.query.month) + '-01T00:00:00-03:00') : new Date();
-    const items = await ssGetAdditionalRevenues(req.user.id, Number.isFinite(month.getTime()) ? month : new Date());
-    res.json({ success: true, total: ssAdditionalRevenueTotal(items), data: items });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/additional-revenues', auth, async (req, res) => {
-  try {
-    const name = String(req.body.name || '').trim();
-    const amount = Math.max(0, Number(String(req.body.amount || 0).replace(',', '.')) || 0);
-    const recurring = Boolean(req.body.recurring);
-    const startsAt = req.body.starts_at ? String(req.body.starts_at).slice(0, 10) : ssFirstMonth(new Date()).toISOString().slice(0, 10);
-    if (!name) return res.status(400).json({ error: 'Nome do rendimento é obrigatório' });
-    if (amount <= 0) return res.status(400).json({ error: 'Valor precisa ser maior que zero' });
-    const { rows } = await db.query(
-      `INSERT INTO additional_revenues (user_id, name, amount, recurring, starts_at, is_active, created_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,true,NOW(),NOW())
-       RETURNING id, name, amount, recurring, starts_at, created_at, updated_at`,
-      [req.user.id, name, amount, recurring, startsAt]
-    );
-    Object.keys(CACHE).forEach(k => { if (k.startsWith(req.user.id)) delete CACHE[k]; });
-    res.json({ success: true, data: rows[0] });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.patch('/api/additional-revenues/:id', auth, async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ error: 'ID inválido' });
-    const name = req.body.name ? String(req.body.name).trim() : null;
-    const amount = req.body.amount != null ? Math.max(0, Number(String(req.body.amount).replace(',', '.')) || 0) : null;
-    const recurring = req.body.recurring != null ? Boolean(req.body.recurring) : null;
-    const starts_at = req.body.starts_at ? String(req.body.starts_at) : null;
-    const sets = [], vals = [id, req.user.id];
-    if (name) { sets.push(`name=$${vals.length+1}`); vals.push(name); }
-    if (amount != null) { sets.push(`amount=$${vals.length+1}`); vals.push(amount); }
-    if (recurring != null) { sets.push(`recurring=$${vals.length+1}`); vals.push(recurring); }
-    if (starts_at) { sets.push(`starts_at=$${vals.length+1}`); vals.push(starts_at); }
-    if (!sets.length) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
-    sets.push(`updated_at=NOW()`);
-    const { rows } = await db.query(
-      `UPDATE additional_revenues SET ${sets.join(',')} WHERE id=$1 AND user_id=$2 AND is_active=true RETURNING id, name, amount, recurring, starts_at`,
-      vals
-    );
-    Object.keys(CACHE).forEach(k => { if (k.startsWith(req.user.id)) delete CACHE[k]; });
-    if (!rows.length) return res.status(404).json({ error: 'Rendimento não encontrado' });
-    res.json({ success: true, item: rows[0] });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.delete('/api/additional-revenues/:id', auth, async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ error: 'ID inválido' });
-    const { rowCount } = await db.query(
-      `UPDATE additional_revenues SET is_active=false, updated_at=NOW() WHERE id=$1 AND user_id=$2`,
-      [id, req.user.id]
-    );
-    Object.keys(CACHE).forEach(k => { if (k.startsWith(req.user.id)) delete CACHE[k]; });
-    res.json({ success: true, deleted: rowCount });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/api/analytics/summary', auth, async (req, res) => {
-  try {
-    const now = new Date();
-    const from = ssFirstMonth(now).toISOString().slice(0,10);
-    const to = now.toISOString().slice(0,10);
-
-    const orders = await ssFetchOrdersInternal(req.user.id, { days: 45, date_from: from, date_to: to });
-    const goal = await ssGetGoal(req.user.id);
-    const additionalRevenues = await ssGetAdditionalRevenues(req.user.id, now);
-    const summary = ssSummarizeOrders(orders, goal, ssAdditionalRevenueTotal(additionalRevenues), additionalRevenues);
-
-    // Mantém snapshot do mês atual atualizado sem depender do botão do frontend.
-    try {
-      const month = ssFirstMonth(now).toISOString().slice(0,10);
-      await db.query(
-        `INSERT INTO monthly_snapshots
-         (user_id, snapshot_month, gross_sales, net_profit, orders_count, avg_ticket, best_seller_product, most_profitable_product, created_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
-         ON CONFLICT (user_id, snapshot_month) DO UPDATE SET
-           gross_sales=EXCLUDED.gross_sales,
-           net_profit=EXCLUDED.net_profit,
-           orders_count=EXCLUDED.orders_count,
-           avg_ticket=EXCLUDED.avg_ticket,
-           best_seller_product=EXCLUDED.best_seller_product,
-           most_profitable_product=EXCLUDED.most_profitable_product,
-           created_at=NOW()`,
-        [req.user.id, month, summary.gross_sales, summary.net_profit, summary.orders_count, summary.avg_ticket, summary.best_seller_product, summary.most_profitable_product]
-      );
-    } catch(e) { console.error('[analytics snapshot inline]', e.message); }
-
-    const { rows: monthlyRows } = await db.query(
-      `SELECT snapshot_month, gross_sales, net_profit, orders_count, avg_ticket, best_seller_product, most_profitable_product
-       FROM monthly_snapshots
-       WHERE user_id=$1
-         AND snapshot_month >= (DATE_TRUNC('month', NOW()) - INTERVAL '11 months')::date
-       ORDER BY snapshot_month ASC`,
-      [req.user.id]
-    );
-
-    const { rows: platformRows } = await db.query(
-      `SELECT snapshot_month, platform, gross_sales, orders_count
-       FROM platform_monthly_snapshots
-       WHERE user_id=$1
-         AND snapshot_month >= (DATE_TRUNC('month', NOW()) - INTERVAL '11 months')::date
-       ORDER BY snapshot_month ASC, platform ASC`,
-      [req.user.id]
-    );
-
-    res.json(ssNormalizeAnalyticsResponse(summary, monthlyRows, platformRows));
-  } catch (e) {
-    console.error('[analytics summary]', e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/api/analytics/monthly-snapshot', auth, async (req, res) => {
-  try {
-    const now = new Date();
-    const month = ssFirstMonth(now).toISOString().slice(0,10);
-    const orders = await ssFetchOrdersInternal(req.user.id, { days: 45, date_from: month, date_to: now.toISOString().slice(0,10) });
-    const additionalRevenues = await ssGetAdditionalRevenues(req.user.id, now);
-    const d = ssSummarizeOrders(orders, await ssGetGoal(req.user.id), ssAdditionalRevenueTotal(additionalRevenues), additionalRevenues);
-    const { rows } = await db.query(
-      `INSERT INTO monthly_snapshots
-       (user_id, snapshot_month, gross_sales, net_profit, orders_count, avg_ticket, best_seller_product, most_profitable_product, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
-       ON CONFLICT (user_id, snapshot_month) DO UPDATE SET
-         gross_sales=EXCLUDED.gross_sales,
-         net_profit=EXCLUDED.net_profit,
-         orders_count=EXCLUDED.orders_count,
-         avg_ticket=EXCLUDED.avg_ticket,
-         best_seller_product=EXCLUDED.best_seller_product,
-         most_profitable_product=EXCLUDED.most_profitable_product,
-         created_at=NOW()
-       RETURNING *`,
-      [req.user.id, month, d.gross_sales, d.net_profit, d.orders_count, d.avg_ticket, d.best_seller_product, d.most_profitable_product]
-    );
-    await db.query(`DELETE FROM monthly_snapshots WHERE user_id=$1 AND snapshot_month < (DATE_TRUNC('month', NOW()) - INTERVAL '12 months')`, [req.user.id]);
-    res.json({ success: true, data: rows[0] });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-function ssLookbackDaysForPrint() { return new Date().getDay() === 1 ? 4 : 3; }
-function ssDeliveryPrintable(d) {
-  const status = String(d?.status || '').toLowerCase();
-  const provider = d?.shipping?.provider?.extras || {};
-  const inv = Array.isArray(d?.invoices) ? d.invoices[0] : null;
-  const invStatus = String(inv?.status?.id || inv?.status || '').toLowerCase();
-  const blocked = ['shipped','delivered','cancelled','canceled','finished','closed','dispatched','posted','sent'];
-  return !blocked.includes(status)
-    && ['invoiced','approved','ready_to_ship','ready','processing'].includes(status)
-    && provider.is_mle === true
-    && provider.is_fulfillment !== true
-    && invStatus === 'approved';
-}
-
-
-async function ssGetMLTokenForUser(userId) {
-  const { rows } = await db.query(
-    `SELECT * FROM marketplace_accounts
-     WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND access_token IS NOT NULL
-     LIMIT 1`,
-    [userId]
-  );
-  if (!rows.length) return null;
-  const acc = rows[0];
-  let token = acc.access_token;
-  if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 5*60*1000)) {
-    const newToken = await refreshMLToken(acc);
-    if (newToken) token = newToken;
-  }
-  return { acc, token };
-}
-
-async function ssDownloadMLLabels(userId, shipmentIds = []) {
-  const clean = [...new Set((shipmentIds || []).map(x => String(x || '').trim()).filter(Boolean))];
-  if (!clean.length) throw new Error('Nenhum envio ML selecionado');
-  const authData = await ssGetMLTokenForUser(userId);
-  if (!authData) {
-    const err = new Error('Mercado Livre não conectado');
-    err.status = 404;
-    throw err;
-  }
-  const { token } = authData;
-  const { data } = await axios.get('https://api.mercadolibre.com/shipment_labels', {
-    params: { shipment_ids: clean.join(','), response_type: 'pdf' },
-    headers: { Authorization: `Bearer ${token}` },
-    responseType: 'arraybuffer'
-  });
-  return Buffer.from(data);
-}
-
-app.get('/api/ml/labels', auth, async (req, res) => {
-  try {
-    const ids = String(req.query.shipment_ids || req.query.ids || '').split(',');
-    const pdf = await ssDownloadMLLabels(req.user.id, ids);
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="etiquetas-ml.pdf"`);
-    res.send(pdf);
-  } catch(e) {
-    res.status(e.status || e.response?.status || 500).json({ error: e.response?.data || e.message });
-  }
-});
-
-app.post('/api/ml/generate-labels', auth, async (req, res) => {
-  try {
-    const ids = req.body?.shipment_ids || req.body?.ids || [];
-    const pdf = await ssDownloadMLLabels(req.user.id, ids);
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="etiquetas-ml.pdf"`);
-    res.send(pdf);
-  } catch(e) {
-    res.status(e.status || e.response?.status || 500).json({ error: e.response?.data || e.message });
-  }
-});
-
-app.get('/api/printable-labels', auth, async (req, res) => {
-  try {
-    const days = Math.min(Math.max(parseInt(req.query.days || ssLookbackDaysForPrint()) || 3, 1), 7);
-    const data = [];
-
-    // Magalu: reaproveita a regra de entrega imprimível, mas limita e não trava a tela.
-    try {
-      const accs = await ssGetAccounts(req.user.id, 'magalu');
-      const acc = accs[0];
-      if (acc) {
-        const orders = await fetchMagalu(acc, days);
-        const ids = [...new Set((orders || []).map(o => o.magalu_delivery_id || o.delivery_id).filter(Boolean))].slice(0, 60);
-        await ssMapLimit(ids, 6, async id => {
-          try {
-            const probe = await inspectMagaluDelivery(acc, id);
-            const d = probe?.[0]?.data || null;
-            if (!d || !ssDeliveryPrintable(d)) return;
-            const rec = d.shipping?.recipient || {};
-            const addr = rec.address || {};
-            const inv = d.invoices?.[0] || {};
-            const firstItem = d.items?.[0] || d.products?.[0] || d.order?.items?.[0] || {};
-            const firstInfo = firstItem.info || firstItem.product || firstItem || {};
-            data.push({
-              platform:'magalu',
-              id:String(d.id),
-              delivery_id:d.id,
-              delivery_code:d.code,
-              order_code:d.order?.code || d.code,
-              status:d.status,
-              customer_name:rec.name || '',
-              customer_city:addr.city || '',
-              customer_state:addr.state || '',
-              invoice_key:inv.key || '',
-              invoice_status:inv.status?.id || inv.status || '',
-              sku:firstInfo.sku || firstInfo.seller_sku || '',
-              deadline:d.shipping?.deadline?.limit_date || null
-            });
-          } catch(e) { console.error('[printable magalu]', id, e.message); }
-        });
-      }
-    } catch(e) { console.error('[printable magalu block]', e.message); }
-
-    // Mercado Livre: usa pedidos já sincronizados para ser rápido.
-    try {
-      let mlOrders = await ssLoadOrdersFromSql(req.user.id, { period: days, platform: 'mercadolivre' });
-      if (!mlOrders.length) {
-        await ssSyncOrdersForUser(req.user.id, 'mercadolivre', days);
-        mlOrders = await ssLoadOrdersFromSql(req.user.id, { period: days, platform: 'mercadolivre' });
-      }
-      for (const o of mlOrders) {
-        const sid = o.ml_shipping_id || o.shipping_id || o.ml_shipping?.id;
-        const st = String(o.ml_shipping_status || o.status || '').toLowerCase();
-        const tags = Array.isArray(o.tags) ? o.tags : [];
-        if (!sid) continue;
-        if (String(o.status || '').toLowerCase() === 'cancelled') continue;
-        if (tags.includes('not_paid')) continue;
-        if (['delivered','cancelled','canceled'].includes(st)) continue;
-        data.push({
-          platform:'mercadolivre',
-          id:String(sid),
-          shipment_id:String(sid),
-          order_code:o.platform_order_id || o.id,
-          status:o.ml_shipping_status_label || o.ml_shipping_status || o.status,
-          customer_name:o.buyer_name || '',
-          customer_city:o.ml_receiver_city || '',
-          customer_state:o.ml_receiver_state || '',
-          sku:o.item_sku || '',
-          product:o.item_title || '',
-          logistic_type:o.ml_logistic_type || o.fulfillment_type || ''
-        });
-      }
-    } catch(e) { console.error('[printable ml block]', e.message); }
-
-    data.sort((a,b) => String(a.platform).localeCompare(String(b.platform)) || String(a.order_code || '').localeCompare(String(b.order_code || '')));
-    res.json({ success:true, days, count:data.length, data });
-  } catch(e) {
-    res.status(500).json({ error:e.message });
-  }
-});
-
-app.get('/api/magalu/printable-deliveries', auth, async (req, res) => {
-  try {
-    const accs = await ssGetAccounts(req.user.id, 'magalu');
-    const acc = accs[0];
-    if (!acc) return res.json({ success: true, data: [] });
-    const days = Math.min(Math.max(parseInt(req.query.days || ssLookbackDaysForPrint()) || 3, 1), 7);
-    const orders = await fetchMagalu(acc, days);
-    const ids = [...new Set((orders || []).map(o => o.magalu_delivery_id || o.delivery_id).filter(Boolean))].slice(0, 60);
-    const out = [];
-    for (const id of ids) {
-      try {
-        const probe = await inspectMagaluDelivery(acc, id);
-        const d = probe?.[0]?.data || null;
-        if (!d || !ssDeliveryPrintable(d)) continue;
-        const rec = d.shipping?.recipient || {};
-        const addr = rec.address || {};
-        const inv = d.invoices?.[0] || {};
-        out.push({
-          delivery_id: d.id,
-          delivery_code: d.code,
-          order_code: d.order?.code || d.code,
-          status: d.status,
-          customer_name: rec.name || '',
-          customer_city: addr.city || '',
-          customer_state: addr.state || '',
-          invoice_key: inv.key || '',
-          invoice_status: inv.status?.id || inv.status || '',
-          issued_at: inv.issued_at || d.invoiced_at || d.approved_at,
-          deadline: d.shipping?.deadline?.limit_date || null
-        });
-      } catch (e) { console.error('[printable delivery]', id, e.message); }
-    }
-    res.json({ success: true, days, count: out.length, data: out });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// Alias usado pelo popup novo; redireciona para o gerador Zebra completo existente.
-app.get('/api/magalu/labels/combo-zebra', auth, async (req, res) => {
-  const qs = new URLSearchParams(req.query).toString();
-  return res.redirect(302, '/api/magalu/labels/zebra-completo?' + qs);
-});
-
-
-
-// ── DEBUG ML: pedido + shipment + costs via backend (evita CORS no navegador) ──
-app.get('/api/debug/ml-order/:id', auth, async (req, res) => {
-  try {
-    const orderId = String(req.params.id || '').trim();
-    if (!orderId) return res.status(400).json({ error: 'ID do pedido obrigatório' });
-
-    const { rows } = await db.query(
-      `SELECT * FROM marketplace_accounts
-       WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND access_token IS NOT NULL
-       LIMIT 1`,
-      [req.user.id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Conta Mercado Livre não conectada' });
-
-    const acc = rows[0];
-    const token = acc.access_token;
-    const headers = { Authorization: `Bearer ${token}` };
-
-    const { data: order } = await axios.get(`https://api.mercadolibre.com/orders/${orderId}`, { headers });
-    const shipmentId = order?.shipping?.id || order?.shipping?.shipment_id || null;
-
-    let shipment = null;
-    let costs = null;
-
-    if (shipmentId) {
-      try {
-        const r1 = await axios.get(`https://api.mercadolibre.com/shipments/${shipmentId}`, { headers });
-        shipment = r1.data;
-      } catch (e) {
-        shipment = { error: e.response?.data || e.message, status: e.response?.status || null };
-      }
-
-      try {
-        const r2 = await axios.get(`https://api.mercadolibre.com/shipments/${shipmentId}/costs`, { headers });
-        costs = r2.data;
-      } catch (e) {
-        costs = { error: e.response?.data || e.message, status: e.response?.status || null };
-      }
-    }
-
-    const totalAmount = Number(order?.total_amount || 0);
-    const paidAmount = Number(order?.paid_amount || order?.payments?.[0]?.total_paid_amount || 0);
-    const shipping = resolveMLShippingFee({ order, shipment, shipmentCosts: costs, totalAmount, paidAmount });
-
-    res.json({
-      success: true,
-      account: { shop_name: acc.shop_name, seller_id: acc.platform_shop_id },
-      order,
-      shipment,
-      costs,
-      resumo: {
-        order_id: orderId,
-        shipping_id: shipmentId,
-        order_total: totalAmount,
-        paid_amount: paidAmount,
-        frete_escolhido: shipping.value,
-        fonte_frete: shipping.source,
-        sender_cost: shipping.sender_cost,
-        shipment_costs_fee: shipping.costs_endpoint_fee,
-        payment_shipping_fee: shipping.payment_shipping_fee,
-        order_shipping_fee: shipping.order_shipping_fee,
-        shipment_shipping_fee: shipping.shipment_cost,
-        paid_minus_total: shipping.paid_diff,
-        senders: costs?.senders || null,
-        receivers: costs?.receivers || null,
-        marketplace: costs?.marketplace || null
-      }
-    });
-  } catch (e) {
-    res.status(500).json({ success:false, error: e.response?.data || e.message });
-  }
-});
-
-// ── DEBUG DEVOLUÇÕES: consulta mês passado no ML e retorna se achou sinal de devolução ──
-app.get('/api/debug/returns-last-month', auth, async (req, res) => {
-  try {
-    const { rows } = await db.query(
-      `SELECT * FROM marketplace_accounts
-       WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND access_token IS NOT NULL
-       LIMIT 1`,
-      [req.user.id]
-    );
-    if (!rows.length) return res.status(404).json({ success:false, error:'Conta Mercado Livre não conectada' });
-
-    const acc = rows[0];
-    const headers = { Authorization: `Bearer ${acc.access_token}` };
-
-    const now = new Date();
-    const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1, 0, 0, 0));
-    const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0));
-
-    const orders = [];
-    const limit = 50;
-    for (let page = 0; page < 20; page++) {
-      const offset = page * limit;
-      const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
-        headers,
-        params: {
-          seller: acc.platform_shop_id,
-          sort: 'date_desc',
-          'order.date_created.from': start.toISOString(),
-          'order.date_created.to': end.toISOString(),
-          limit,
-          offset
-        }
-      });
-      const arr = Array.isArray(data.results) ? data.results : [];
-      orders.push(...arr);
-      if (!arr.length || arr.length < limit) break;
-      if (data.paging?.total && offset + limit >= Number(data.paging.total)) break;
-    }
-
-    const signals = orders.map(o => {
-      const tags = Array.isArray(o.tags) ? o.tags : [];
-      const payments = Array.isArray(o.payments) ? o.payments : [];
-      const pDetails = payments.map(p => String(p.status_detail || '')).filter(Boolean);
-      const pStatus = payments.map(p => String(p.status || '')).filter(Boolean);
-      const txt = [o.status, o.status_detail, ...tags, ...pDetails, ...pStatus].join(' ').toLowerCase();
-      const hasReturn = /(return|returned|devol|refund|refunded|chargeback|reimburs|not_delivered)/i.test(txt);
-      return {
-        id: String(o.id),
-        status: o.status,
-        status_detail: o.status_detail || null,
-        tags,
-        payments: payments.map(p => ({ id:p.id, status:p.status, status_detail:p.status_detail, total_paid_amount:p.total_paid_amount, shipping_cost:p.shipping_cost })),
-        shipping_id: o.shipping?.id || null,
-        date_created: o.date_created,
-        total_amount: o.total_amount,
-        has_return_signal: hasReturn
-      };
-    });
-
-    // Também tenta claims do Mercado Pago, mas algumas contas/app não têm permissão.
-    let claims = null;
-    let claims_error = null;
-    try {
-      const { data } = await axios.get('https://api.mercadopago.com/post-purchase/v1/claims/search', {
-        headers,
-        params: {
-          seller_id: acc.platform_shop_id,
-          type: 'return',
-          limit: 50,
-          offset: 0
-        }
-      });
-      claims = data;
-    } catch (e) {
-      claims_error = e.response?.data || e.message;
-    }
-
-    const devolucoes = signals.filter(x => x.has_return_signal);
-    res.json({
-      success: true,
-      periodo: { from: start.toISOString(), to: end.toISOString() },
-      total_pedidos_mes_passado: orders.length,
-      total_devolucoes_detectadas: devolucoes.length,
-      devolucoes,
-      amostra_sinais_pedidos: signals.slice(0, 30),
-      claims,
-      claims_error,
-      observacao: devolucoes.length ? 'Foram encontrados sinais de devolução nos pedidos.' : 'Não encontrei sinal de devolução nos pedidos do mês passado pela orders/search. Veja claims/claims_error para confirmar se a API de claims está autorizada.'
-    });
-  } catch (e) {
-    res.status(500).json({ success:false, error:e.response?.data || e.message });
-  }
-});
-
-
-async function ssDebugReturnsHandler(req, res) {
-  try {
-    const days = Math.min(Math.max(parseInt(req.query.days || '365') || 365, 1), 365);
-    const accs = await ssGetAccounts(req.user.id, 'mercadolivre');
-    const acc = accs[0];
-    if (!acc) return res.status(404).json({ success:false, error:'Mercado Livre não conectado' });
-
-    let token = acc.access_token;
-    if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 5*60*1000)) {
-      const nt = await refreshMLToken(acc);
-      if (nt) token = nt;
-    }
-
-    const headers = { Authorization: `Bearer ${token}` };
-    const since = new Date(Date.now() - days * 86400000).toISOString();
-
-    // Tenta primeiro o endpoint de claims/post-purchase que retorna só pedidos com disputa/devolução real.
-    // Muito mais rápido e preciso que varrer orders/search inteiro.
-    let claimsOk = false;
-    let claimsList = [];
-    try {
-      const claimsRes = await axios.get('https://api.mercadolibre.com/post-purchase/v1/claims/search', {
-        headers,
-        params: { seller_id: acc.platform_shop_id, limit: 50, sort: 'date_created:desc' }
-      });
-      const raw = claimsRes.data?.data || claimsRes.data?.results || [];
-      if (Array.isArray(raw)) {
-        claimsList = raw;
-        claimsOk = true;
-      }
-    } catch(e) {
-      console.log('[debug/returns] claims endpoint status:', e.response?.status, '— fallback para orders/search');
-    }
-
-    let devolucoes_reais = [];
-    let suspeitas = [];
-    let total_pedidos_consultados = 0;
-
-    if (claimsOk && claimsList.length >= 0) {
-      // Mapeia claims do ML para o formato esperado pelo frontend
-      devolucoes_reais = claimsList.map(c => {
-        const payments = Array.isArray(c.resolution?.parties) ? [] : [];
-        return {
-          id: String(c.id || c.claim_id),
-          platform_order_id: String(c.resource_id || c.order_id || ''),
-          status: c.status || 'unknown',
-          status_detail: c.stage || null,
-          tags: [],
-          date_created: c.date_created,
-          date_closed: c.date_last_updated || null,
-          total_amount: Number(c.resolution?.amount || 0),
-          paid_amount: Number(c.resolution?.amount || 0),
-          payments,
-          delivered: false,
-          refunded: true,
-          real_return: true,
-          claim_type: c.type || 'claim',
-          claim_reason: c.reason_id || c.reason || c.stage || '—',
-          item_title: c.item?.title || c.items?.[0]?.title || '—',
-          buyer: { nickname: c.players?.find(p=>p.role==='complainant')?.user_id || '—' },
-          suspect_signal: false
-        };
-      });
-      total_pedidos_consultados = claimsList.length;
-    } else {
-      // Fallback: varre orders/search e filtra localmente (lento mas funcional)
-      const orders = [];
-      const limit = 50;
-      for (let page = 0; page < 20; page++) {
-        const offset = page * limit;
-        const { data } = await axios.get('https://api.mercadolibre.com/orders/search', {
-          headers,
-          params: { seller: acc.platform_shop_id, sort:'date_desc', 'order.date_created.from': since, limit, offset }
-        });
-        const arr = Array.isArray(data.results) ? data.results : [];
-        orders.push(...arr);
-        if (!arr.length || arr.length < limit) break;
-        if (data.paging?.total && offset + limit >= Number(data.paging.total)) break;
-      }
-      const seen = new Set();
-      const unique = orders.filter(o => { const id=String(o.id||''); if(!id || seen.has(id)) return false; seen.add(id); return true; });
-      total_pedidos_consultados = unique.length;
-      const mapOrder = o => {
-        const tags = Array.isArray(o.tags) ? o.tags : [];
-        const payments = Array.isArray(o.payments) ? o.payments : [];
-        const delivered = tags.includes('delivered');
-        const notDelivered = tags.includes('not_delivered');
-        const refunded = payments.some(p => /refunded|charged_back|chargeback|reimbursed|bpp_refunded|bpp_covered/i.test(`${p.status||''} ${p.status_detail||''}`));
-        const real_return = ssMLIsRealReturnFromOrder(o);
-        return {
-          id:String(o.id), platform_order_id:String(o.id), status:o.status, status_detail:o.status_detail || null,
-          tags, shipping_id:o.shipping?.id || null, date_created:o.date_created, date_closed:o.date_closed || null,
-          total_amount:Number(o.total_amount || 0), paid_amount:Number(o.paid_amount || 0),
-          payments:payments.map(p => ({ id:p.id, status:p.status, status_detail:p.status_detail, total_paid_amount:p.total_paid_amount, shipping_cost:p.shipping_cost })),
-          delivered, not_delivered:notDelivered, refunded, real_return,
-          suspect_signal:notDelivered || refunded || String(o.status).toLowerCase()==='cancelled'
-        };
-      };
-      const signals = unique.map(mapOrder);
-      devolucoes_reais = signals.filter(x => x.real_return);
-      suspeitas = signals.filter(x => x.suspect_signal && !x.real_return);
-    }
-
-    res.json({
-      success:true,
-      source: claimsOk ? 'claims_api' : 'orders_search_fallback',
-      account:{ shop_name:acc.shop_name, seller_id:acc.platform_shop_id },
-      periodo:{ days, from:since, to:new Date().toISOString() },
-      total_pedidos_consultados,
-      total_devolucoes_reais:devolucoes_reais.length,
-      total_sinais_suspeitos:suspeitas.length,
-      devolucoes:devolucoes_reais,
-      suspeitos:suspeitas.slice(0,200),
-      observacao:'Devolução real = claims/disputas abertas no ML (via post-purchase API), ou entregue + reembolso/chargeback nos pedidos.'
-    });
-  } catch(e) {
-    res.status(500).json({ success:false, error:e.response?.data || e.message });
-  }
-}
-
-app.get('/debug/returns', auth, ssDebugReturnsHandler);
-app.get('/api/debug/returns', auth, ssDebugReturnsHandler);
-
-app.get('/health', (_, res) => res.json({ status:'ok', app:'SalesSync', version:'5.0' }));
-
+};
+const loadAccountsMoV21=window.loadAccountsMo;
+window.loadAccountsMo=async function(){
+  await loadAccountsMoV21();
+  // Garante que esses botões não apareçam dentro das contas de marketplace.
+  document.querySelectorAll('.mp-body .ss-account-actions').forEach(el=>el.remove());
+};
+setTimeout(()=>{try{window.ssInstallSideButtons()}catch(e){}},700);
+</script>
+
+<script>
 // ── AI ASSISTANT ──
-async function ssGetAiContext(userId) {
-  try {
-    const hoje = new Date();
-    const inicioMes = new Date(hoje.getFullYear(), hoje.getMonth(), 1).toISOString();
-    const inicio30 = new Date(Date.now() - 30 * 86400000).toISOString();
-    const inicio90 = new Date(Date.now() - 90 * 86400000).toISOString();
+let AI_HISTORY=[];
+let AI_OPEN=false;
 
-    const [ordersRes, returnsRes, productsRes, mesPassadoRes, goalRes] = await Promise.all([
-      // Pedidos dos últimos 90 dias com JOIN nos custos de produto
-      db.query(`
-        SELECT
-          o.platform, o.platform_order_id, o.status, o.shop_name,
-          o.total_amount, o.paid_amount, o.platform_fee, o.shipping_fee, o.tax_amount,
-          o.item_title, o.item_sku, o.order_date, o.quantity, o.fulfillment_type,
-          COALESCE(p.cost, 0) AS product_cost,
-          COALESCE(p.cost, 0) * o.quantity AS total_product_cost,
-          ROUND(
-            o.total_amount
-            - o.platform_fee
-            - o.shipping_fee
-            - o.tax_amount
-            - COALESCE(p.cost, 0) * o.quantity
-          , 2) AS lucro_real
-        FROM marketplace_orders o
-        LEFT JOIN products p
-          ON p.user_id = o.user_id
-          AND LOWER(TRIM(p.sku)) = LOWER(TRIM(o.item_sku))
-          AND (LOWER(p.platform) = LOWER(o.platform) OR LOWER(p.platform) = 'geral')
-        WHERE o.user_id = $1
-          AND o.order_date >= $2
-        ORDER BY o.order_date DESC
-        LIMIT 1000`, [userId, inicio90]),
+function ssToggleAI(){AI_OPEN?ssCloseAI():ssOpenAI();}
+function ssOpenAI(){
+  AI_OPEN=true;
+  const panel=document.getElementById('ai-panel');
+  if(panel)panel.style.transform='translateX(0)';
+  const fab=document.getElementById('ai-fab');
+  if(fab)fab.style.transform='scale(0.9)';
+  setTimeout(()=>document.getElementById('ai-input')?.focus(),300);
+}
+function ssCloseAI(){
+  AI_OPEN=false;
+  const panel=document.getElementById('ai-panel');
+  if(panel)panel.style.transform='translateX(100%)';
+  const fab=document.getElementById('ai-fab');
+  if(fab)fab.style.transform='';
+}
+function ssAISendInput(){
+  const inp=document.getElementById('ai-input');
+  const msg=(inp?.value||'').trim();
+  if(!msg)return;
+  inp.value='';inp.style.height='';
+  ssAISend(msg);
+}
+function ssAIMarkdown(text){
+  return text
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g,'<em>$1</em>')
+    .replace(/^#{1,3} (.+)$/gm,'<strong style="color:var(--p3)">$1</strong>')
+    .replace(/^[•\-] (.+)$/gm,'&nbsp;• $1')
+    .replace(/\n/g,'<br>');
+}
+// Detecta se a mensagem pede planilha/CSV e extrai bloco CSV da resposta
+const AI_SHEET_KEYWORDS=/planilha|excel|csv|exportar|exporta|tabela|relatório|listar pedidos|todos os pedidos|gera.*pedidos/i;
 
-      // Devoluções dos últimos 90 dias
-      db.query(`
-        SELECT platform, resolution_type, ml_protected, return_shipping_cost,
-               return_fee, lost_product_cost, return_total_cost, reason, status,
-               platform_order_id, updated_at
-        FROM marketplace_returns
-        WHERE user_id=$1 AND updated_at >= $2`, [userId, inicio90]),
+function ssAIExtractCSV(text){
+  const m=text.match(/```csv\n?([\s\S]+?)```/i)||text.match(/```\n?([\s\S]+?)```/i);
+  return m?m[1].trim():null;
+}
 
-      // Produtos cadastrados
-      db.query(`
-        SELECT sku, platform, cost, fee_pct, tax_pct, shipping_fee, is_active
-        FROM products WHERE user_id=$1`, [userId]),
+function ssAIDownloadCSV(csv,name='salassync-export.csv'){
+  const bom='﻿'; // BOM para Excel reconhecer UTF-8
+  const blob=new Blob([bom+csv],{type:'text/csv;charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;a.download=name;a.click();
+  URL.revokeObjectURL(url);
+}
 
-      // Mês passado para comparação
-      db.query(`
-        SELECT
-          COUNT(*) FILTER (WHERE status != 'cancelled') AS pedidos,
-          COALESCE(SUM(total_amount) FILTER (WHERE status != 'cancelled'), 0) AS faturamento,
-          COALESCE(SUM(platform_fee + shipping_fee + tax_amount) FILTER (WHERE status != 'cancelled'), 0) AS custos_fixos
-        FROM marketplace_orders
-        WHERE user_id=$1
-          AND order_date >= date_trunc('month', NOW() - INTERVAL '1 month')
-          AND order_date < date_trunc('month', NOW())`, [userId]),
+function ssAIRenderResponse(reply){
+  const csv=ssAIExtractCSV(reply);
+  // Remove bloco CSV do texto visível para não poluir o chat
+  const cleanText=reply.replace(/```csv[\s\S]+?```/gi,'').replace(/```[\s\S]+?```/gi,'').trim();
+  let html=ssAIMarkdown(cleanText||'Planilha gerada com sucesso!');
+  if(csv){
+    const lines=csv.split('\n').filter(Boolean);
+    const rows=lines.length-1; // descontando header
+    const ts=new Date().toLocaleDateString('pt-BR').replace(/\//g,'-');
+    html+=`<div style="margin-top:10px;padding:10px;background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.2);border-radius:10px;">
+      <div style="font-size:10px;color:var(--green2);font-weight:700;margin-bottom:6px">✅ Planilha pronta — ${rows} linha${rows!==1?'s':''}</div>
+      <button onclick="ssAIDownloadCSV(${JSON.stringify(csv)},'SalesSync-${ts}.csv')"
+        style="display:inline-flex;align-items:center;gap:6px;padding:7px 14px;background:var(--green);border:none;border-radius:8px;color:#fff;font-size:11px;font-weight:700;cursor:pointer;font-family:Inter,sans-serif;">
+        <i class="ti ti-download"></i> Baixar planilha CSV
+      </button>
+    </div>`;
+  }
+  return html;
+}
 
-      // Meta do mês
-      db.query(`SELECT monthly_revenue_goal, revenue_goal_enabled FROM user_goals WHERE user_id=$1`, [userId])
-    ]);
+/* ── AI: manipulação de rendimentos extras ── */
+// Intenção: ADICIONAR
+const AI_ADD_RE=/\b(?:adicion|coloc|inserir?|criar?|registr|lanc[ae]r?|bota|boto|coloc[ae]i|add)\b.{0,40}\b(?:fat|receitas?|rendimentos?|valor|rend|dinheiro|entrada|venda\s+extra|faturamento)\b|\b(?:adicion|add)\b.{0,20}\b\d|\b(?:fat|receitas?|rendimentos?|faturamento|entrada)\b.{0,20}\b(?:de\s+R?\$?\s*[\d]|para\s+\w|em\s+\w)/i;
+// Intenção: REMOVER
+const AI_DEL_RE=/\b(?:remov|delet|exclu|apage?|tira|cancela|apago|tiro|tira|remove|deleta|exclui)\b.{0,40}\b(?:fat|receita|rendimento|rend|valor|entrada|faturamento)\b|\b(?:fat|receita|rendimento|faturamento)\b.{0,30}\b(?:remov|delet|exclu|apag|tir)\b/i;
+// Intenção: EDITAR
+const AI_EDIT_RE=/\b(?:edit|alter|mud|atualiz|modific|corrig|troc)\b.{0,40}\b(?:fat|receita|rendimento|rend|valor|entrada|faturamento)\b|\b(?:fat|receita|rendimento|faturamento)\b.{0,30}\b(?:edit|alter|mud|atualiz)\b/i;
+// Intenção: LISTAR
+const AI_LIST_RE=/\b(?:lista?r?|mostra?r?|ve[jr]|quais?|quantos?|tem\s+algum|quero\s+ver|me\s+(?:mostr|list|fal))\b.{0,30}\b(?:fat|receitas?|rendimentos?|faturamentos?\s*extra|rend\b)/i;
 
-    const orders = ordersRes.rows;
-    const returns = returnsRes.rows;
-    const products = productsRes.rows;
-    const mesPassado = mesPassadoRes.rows[0] || {};
-    const goal = goalRes.rows[0] || {};
+const brlFmt=v=>Number(v).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
 
-    const n = v => Number(v || 0);
-    const brl = v => `R$ ${n(v).toFixed(2)}`;
-    const pct = (a, b) => b > 0 ? ((a / b) * 100).toFixed(1) + '%' : '0%';
-
-    const paid = orders.filter(o => o.status !== 'cancelled');
-    const cancelled = orders.filter(o => o.status === 'cancelled');
-    const shipped = paid.filter(o => ['shipped','delivered'].includes(o.status));
-
-    // Totais 30 dias
-    const paid30 = paid.filter(o => new Date(o.order_date) >= new Date(inicio30));
-    const fat30 = paid30.reduce((s, o) => s + n(o.total_amount), 0);
-    const lucro30 = paid30.reduce((s, o) => s + n(o.lucro_real), 0);
-    const tarifa30 = paid30.reduce((s, o) => s + n(o.platform_fee), 0);
-    const frete30 = paid30.reduce((s, o) => s + n(o.shipping_fee), 0);
-    const imposto30 = paid30.reduce((s, o) => s + n(o.tax_amount), 0);
-    const custo30 = paid30.reduce((s, o) => s + n(o.total_product_cost), 0);
-
-    // Totais mês atual
-    const paidMes = paid.filter(o => new Date(o.order_date) >= new Date(inicioMes));
-    const fatMes = paidMes.reduce((s, o) => s + n(o.total_amount), 0);
-    const lucroMes = paidMes.reduce((s, o) => s + n(o.lucro_real), 0);
-
-    // Previsão do mês — baseada no ritmo REAL de dias com vendas
-    const diaAtual = hoje.getDate();
-    const diasNoMes = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0).getDate();
-    const diasRestantes = diasNoMes - diaAtual;
-    // Ritmo diário médio (só dias que tiveram venda para ser mais realista)
-    const diasComVenda = new Set(paidMes.map(o => new Date(o.order_date).toDateString())).size || 1;
-    const ritmoDiario = fatMes / Math.max(diaAtual, 1);
-    const previsaoFat = ritmoDiario * diasNoMes;
-    const previsaoLucro = lucroMes / Math.max(diaAtual, 1) * diasNoMes;
-
-    // Por plataforma (30 dias)
-    const byPlat = {};
-    paid30.forEach(o => {
-      if (!byPlat[o.platform]) byPlat[o.platform] = { fat: 0, lucro: 0, qtd: 0 };
-      byPlat[o.platform].fat += n(o.total_amount);
-      byPlat[o.platform].lucro += n(o.lucro_real);
-      byPlat[o.platform].qtd++;
-    });
-
-    // Top produtos (30 dias) com lucro real
-    const prodMap = {};
-    paid30.forEach(o => {
-      const k = o.item_sku || o.item_title || '?';
-      if (!prodMap[k]) prodMap[k] = { title: o.item_title, sku: k, fat: 0, lucro: 0, qtd: 0, custo: n(o.product_cost) };
-      prodMap[k].fat += n(o.total_amount);
-      prodMap[k].lucro += n(o.lucro_real);
-      prodMap[k].qtd += n(o.quantity || 1);
-    });
-    const topProds = Object.values(prodMap).sort((a, b) => b.fat - a.fat).slice(0, 10);
-    const topLucro = Object.values(prodMap).sort((a, b) => b.lucro - a.lucro).slice(0, 5);
-    const piorMargem = Object.values(prodMap)
-      .filter(p => p.fat > 0)
-      .map(p => ({ ...p, margem: p.lucro / p.fat * 100 }))
-      .sort((a, b) => a.margem - b.margem).slice(0, 5);
-
-    // Devoluções (90 dias)
-    const devolReais = returns.filter(r => !r.ml_protected);
-    const devolCobertas = returns.filter(r => r.ml_protected);
-    const prejDevol = devolReais.reduce((s, r) => s + n(r.return_total_cost), 0);
-
-    // Vendas por dia da semana (30 dias)
-    const diaSemana = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
-    const byDia = Array(7).fill(0).map((_, i) => ({ dia: diaSemana[i], fat: 0, qtd: 0 }));
-    paid30.forEach(o => {
-      const d = new Date(o.order_date).getDay();
-      byDia[d].fat += n(o.total_amount);
-      byDia[d].qtd++;
-    });
-    const melhorDia = [...byDia].sort((a, b) => b.fat - a.fat)[0];
-
-    return {
-      data_hoje: hoje.toLocaleDateString('pt-BR'),
-      // === MÊS ATUAL ===
-      mes_atual: {
-        nome: hoje.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' }),
-        dia_atual: diaAtual,
-        dias_no_mes: diasNoMes,
-        dias_restantes: diasRestantes,
-        pedidos: paidMes.length,
-        faturamento: brl(fatMes),
-        lucro_real: brl(lucroMes),
-        margem: pct(lucroMes, fatMes),
-        ritmo_diario: brl(ritmoDiario),
-        previsao_faturamento_mes_completo: brl(previsaoFat),
-        previsao_lucro_mes_completo: brl(previsaoLucro),
-        meta_configurada: goal.revenue_goal_enabled ? brl(goal.monthly_revenue_goal) : 'Não configurada',
-        percentual_meta: goal.revenue_goal_enabled && n(goal.monthly_revenue_goal) > 0
-          ? pct(fatMes, n(goal.monthly_revenue_goal)) : 'N/A',
-      },
-      // === 30 DIAS ===
-      ultimos_30_dias: {
-        pedidos_pagos: paid30.length,
-        pedidos_cancelados: cancelled.filter(o => new Date(o.order_date) >= new Date(inicio30)).length,
-        faturamento: brl(fat30),
-        lucro_real: brl(lucro30),
-        margem_media: pct(lucro30, fat30),
-        tarifas_marketplace: brl(tarifa30),
-        frete_pago: brl(frete30),
-        impostos: brl(imposto30),
-        custo_produtos: brl(custo30),
-        ticket_medio: brl(paid30.length ? fat30 / paid30.length : 0),
-      },
-      // === MÊS PASSADO (comparação) ===
-      mes_passado: {
-        pedidos: n(mesPassado.pedidos),
-        faturamento: brl(mesPassado.faturamento),
-        variacao_faturamento: mesPassado.faturamento > 0
-          ? ((fatMes / n(mesPassado.faturamento) - 1) * 100).toFixed(1) + '%' : 'N/A',
-      },
-      // === POR PLATAFORMA ===
-      por_plataforma: Object.entries(byPlat).map(([plat, v]) => ({
-        plataforma: plat,
-        faturamento: brl(v.fat),
-        lucro: brl(v.lucro),
-        pedidos: v.qtd,
-        margem: pct(v.lucro, v.fat),
-      })),
-      // === PRODUTOS ===
-      top_10_faturamento: topProds.map(p => ({
-        produto: p.title, sku: p.sku,
-        faturamento: brl(p.fat), lucro: brl(p.lucro),
-        margem: pct(p.lucro, p.fat), qtd_vendida: p.qtd,
-        custo_unitario: brl(p.custo),
-      })),
-      top_5_lucro: topLucro.map(p => ({
-        produto: p.title, sku: p.sku,
-        lucro: brl(p.lucro), margem: pct(p.lucro, p.fat),
-      })),
-      produtos_pior_margem: piorMargem.map(p => ({
-        produto: p.title, sku: p.sku,
-        margem: p.margem.toFixed(1) + '%', lucro: brl(p.lucro), faturamento: brl(p.fat),
-      })),
-      produtos_sem_custo_cadastrado: topProds.filter(p => p.custo === 0).map(p => p.sku || p.title),
-      // === DEVOLUÇÕES ===
-      devolucoes_90_dias: {
-        total_com_prejuizo: devolReais.length,
-        prejuizo_total: brl(prejDevol),
-        ml_absorveu: devolCobertas.length,
-        frete_reverso_total: brl(devolReais.reduce((s, r) => s + n(r.return_shipping_cost), 0)),
-        taxas_total: brl(devolReais.reduce((s, r) => s + n(r.return_fee), 0)),
-      },
-      // === PADRÕES ===
-      melhor_dia_semana: melhorDia ? `${melhorDia.dia} (${brl(melhorDia.fat)}, ${melhorDia.qtd} pedidos)` : 'N/A',
-      produtos_cadastrados_total: products.length,
-      produtos_ativos: products.filter(p => p.is_active).length,
-    };
-  } catch(e) {
-    console.error('[AI context]', e.message);
-    return {};
+/* Busca lista de rendimentos do usuário — usa endpoint sem filtro de mês */
+async function ssAIFetchRevenues(onlyCurrentMonth=false){
+  try{
+    const j=await ssFetchJson(`${API}/api/additional-revenues/all`);
+    let items=Array.isArray(j.items)?j.items:Array.isArray(j)?j:[];
+    if(onlyCurrentMonth){
+      const now=new Date();
+      const ym=now.getFullYear()*100+now.getMonth(); // ex: 202506
+      items=items.filter(r=>{
+        if(!r.starts_at)return true;
+        const d=new Date(r.starts_at);
+        return d.getFullYear()*100+d.getMonth()===ym;
+      });
+    }
+    return items;
+  }catch(e){
+    console.warn('ssAIFetchRevenues error:',e.message);
+    return[];
   }
 }
 
-app.post('/api/ai/chat', auth, async (req, res) => {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return res.status(503).json({ error: 'OPENAI_API_KEY não configurada no servidor.' });
+/* Executa ação confirmada */
+async function ssAIExecuteAction(actionJson,confirmId){
+  const action=typeof actionJson==='string'?JSON.parse(actionJson):actionJson;
+  const el=document.getElementById(confirmId);
+  const ok=msg=>{if(el)el.innerHTML=`<div style="padding:10px 12px;background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.2);border-radius:8px;color:var(--green2);font-size:11px;font-weight:600;">${msg}</div>`;loadData();};
+  const err=msg=>{if(el)el.innerHTML=`<div style="padding:8px 12px;background:rgba(220,38,38,.1);border:1px solid rgba(220,38,38,.2);border-radius:8px;color:var(--red2);font-size:11px;">❌ ${msg}</div>`;console.error('ssAIExecuteAction erro:',msg);};
+  try{
+    if(action.type==='add_revenue'){
+      if(!action.name||!action.amount||action.amount<=0){err('Nome ou valor inválido: "'+action.name+'" / '+action.amount);return;}
+      const today=new Date().toLocaleDateString('en-CA'); // yyyy-mm-dd no timezone local
+      const r=await ssFetchJson(`${API}/api/additional-revenues`,{method:'POST',body:JSON.stringify({name:action.name,amount:Number(action.amount),recurring:false,starts_at:today})});
+      console.log('Rendimento criado:',r);
+      ok(`✅ Rendimento <strong>"${action.name}"</strong> de <strong>${brlFmt(action.amount)}</strong> adicionado! Já aparece no seu DRE.`);
+    }else if(action.type==='del_revenue'){
+      await ssFetchJson(`${API}/api/additional-revenues/${action.id}`,{method:'DELETE'});
+      ok(`✅ Rendimento <strong>"${action.name}"</strong> removido com sucesso.`);
+    }else if(action.type==='edit_revenue'){
+      const body={};
+      if(action.name)body.name=action.name;
+      if(action.amount)body.amount=action.amount;
+      await ssFetchJson(`${API}/api/additional-revenues/${action.id}`,{method:'PATCH',body:JSON.stringify(body)});
+      ok(`✅ Rendimento atualizado para <strong>"${action.name||'—'}"</strong> — <strong>${brlFmt(action.amount||0)}</strong>.`);
+    }
+  }catch(e){err(e.message);}
+}
 
-  const { message, history = [] } = req.body;
-  if (!message) return res.status(400).json({ error: 'message obrigatório' });
+/* Card visual de confirmação */
+function ssAIConfirmCard(action,label,details){
+  const id='ai-ac-'+Date.now();
+  const safe=encodeURIComponent(JSON.stringify(action));
+  const colorMap={add_revenue:'109,40,217',del_revenue:'220,38,38',edit_revenue:'14,165,233'};
+  const c=colorMap[action.type]||'109,40,217';
+  return `<div id="${id}" style="margin-top:8px"><div style="background:rgba(${c},.08);border:1px solid rgba(${c},.3);border-radius:10px;padding:12px;">
+    <div style="font-size:10px;color:rgba(${c},1);font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">${label}</div>
+    <div style="font-size:11px;color:var(--txt3);line-height:1.6">${details}</div>
+    <div style="display:flex;gap:6px;margin-top:10px">
+      <button onclick="ssAIExecuteAction(decodeURIComponent('${safe}'),'${id}')" style="flex:1;padding:7px;background:linear-gradient(135deg,var(--p),var(--p2));border:none;border-radius:7px;color:#fff;font-size:11px;font-weight:700;cursor:pointer;">✅ Confirmar</button>
+      <button onclick="document.getElementById('${id}').remove()" style="padding:7px 12px;background:transparent;border:1px solid var(--border2);border-radius:7px;color:var(--txt3);font-size:11px;cursor:pointer;">✖ Cancelar</button>
+    </div>
+  </div></div>`;
+}
 
-  try {
-    const ctx = await ssGetAiContext(req.user.id);
-    const systemPrompt = `Você é o assistente de vendas do SalesSync — uma plataforma de gestão para vendedores de marketplace (Mercado Livre, Magalu, Shopee).
-Você tem acesso COMPLETO e em TEMPO REAL aos dados financeiros e operacionais do vendedor.
-Responda SEMPRE em português, seja direto, use os números reais abaixo, e dê dicas práticas e acionáveis.
-NUNCA invente valores — use apenas os dados fornecidos aqui.
+/* Renderiza lista de rendimentos no chat */
+function ssAIRevenueListCard(items){
+  if(!items.length)return`<div style="padding:10px;color:var(--txt3);font-size:11px">Nenhum rendimento extra cadastrado ainda.</div>`;
+  return`<div style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">${items.map(r=>`
+    <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:8px 12px;display:flex;align-items:center;justify-content:space-between;gap:8px;">
+      <div>
+        <div style="font-size:11px;font-weight:700;color:var(--txt)">${r.name}</div>
+        <div style="font-size:10px;color:var(--green2);font-weight:700">${brlFmt(r.amount)}</div>
+        <div style="font-size:9px;color:var(--txt3)">${r.recurring?'Recorrente':'Único'} · ${r.starts_at?.slice(0,7)||'—'}</div>
+      </div>
+      <div style="display:flex;gap:4px;">
+        <button onclick="ssAIStartEdit(${r.id},'${r.name.replace(/'/g,'&#39;')}',${r.amount})" style="padding:4px 8px;background:rgba(14,165,233,.12);border:1px solid rgba(14,165,233,.2);border-radius:6px;color:#38bdf8;font-size:10px;cursor:pointer;">✏️</button>
+        <button onclick="ssAIStartDelete(${r.id},'${r.name.replace(/'/g,'&#39;')}')" style="padding:4px 8px;background:rgba(220,38,38,.1);border:1px solid rgba(220,38,38,.2);border-radius:6px;color:var(--red2);font-size:10px;cursor:pointer;">🗑️</button>
+      </div>
+    </div>`).join('')}</div>`;
+}
 
-======= DADOS REAIS DO VENDEDOR (hoje: ${ctx.data_hoje}) =======
+/* Botão editar inline */
+/* Despacha ação quando usuário escolhe na lista de candidatos */
+function ssAIHandleWhich(actionJson){
+  const action=JSON.parse(actionJson);
+  const box=document.getElementById('ai-messages');
+  if(action.type==='del_revenue'){
+    box.innerHTML+=`<div class="ai-msg bot"><div class="ai-bubble bot">
+      É esse que você quer remover?
+      ${ssAIConfirmCard(action,'🗑️ Remover rendimento',`Nome: <strong>${action.name}</strong>`)}
+    </div></div>`;
+    box.scrollTop=box.scrollHeight;
+  }else if(action.type==='start_edit'){
+    ssAIStartEdit(action.id,action.name,action.amount);
+  }
+}
 
-📅 MÊS ATUAL (${ctx.mes_atual?.nome}):
-- Dia ${ctx.mes_atual?.dia_atual} de ${ctx.mes_atual?.dias_no_mes} (restam ${ctx.mes_atual?.dias_restantes} dias)
-- Pedidos pagos: ${ctx.mes_atual?.pedidos}
-- Faturamento até agora: ${ctx.mes_atual?.faturamento}
-- Lucro REAL (após custos de produto): ${ctx.mes_atual?.lucro_real}
-- Margem: ${ctx.mes_atual?.margem}
-- Ritmo diário atual: ${ctx.mes_atual?.ritmo_diario}/dia
-- Previsão de faturamento até fim do mês: ${ctx.mes_atual?.previsao_faturamento_mes_completo}
-- Previsão de lucro até fim do mês: ${ctx.mes_atual?.previsao_lucro_mes_completo}
-- Meta do mês: ${ctx.mes_atual?.meta_configurada} | Atingido: ${ctx.mes_atual?.percentual_meta}
+function ssAIStartEdit(id,name,amount){
+  const box=document.getElementById('ai-messages');
+  const editId='aied'+Date.now();
+  const html=`<div class="ai-msg bot"><div class="ai-bubble bot">
+    <div style="font-size:10px;color:var(--p3);font-weight:700;margin-bottom:8px">✏️ Editar rendimento</div>
+    <div style="display:flex;flex-direction:column;gap:6px;">
+      <input id="${editId}-name" value="${name}" style="background:var(--bg4);border:1px solid var(--border2);border-radius:7px;padding:7px 10px;color:var(--txt);font-size:11px;outline:none;" placeholder="Nome"/>
+      <input id="${editId}-amt" value="${amount}" type="number" step="0.01" style="background:var(--bg4);border:1px solid var(--border2);border-radius:7px;padding:7px 10px;color:var(--txt);font-size:11px;outline:none;" placeholder="Valor R$"/>
+      <div style="display:flex;gap:6px;margin-top:4px">
+        <button onclick="ssAIConfirmEdit(${id},'${editId}')" style="flex:1;padding:7px;background:linear-gradient(135deg,var(--p),var(--p2));border:none;border-radius:7px;color:#fff;font-size:11px;font-weight:700;cursor:pointer;">✅ Salvar</button>
+      </div>
+    </div>
+  </div></div>`;
+  box.innerHTML+=html;
+  box.scrollTop=box.scrollHeight;
+}
+async function ssAIConfirmEdit(id,editId){
+  const name=document.getElementById(editId+'-name')?.value?.trim();
+  const amount=parseFloat(document.getElementById(editId+'-amt')?.value||0);
+  if(!name||!amount)return;
+  try{
+    await ssFetchJson(`${API}/api/additional-revenues/${id}`,{method:'PATCH',body:JSON.stringify({name,amount})});
+    const box=document.getElementById('ai-messages');
+    box.innerHTML+=`<div class="ai-msg bot"><div class="ai-bubble bot"><div style="padding:8px 12px;background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.2);border-radius:8px;color:var(--green2);font-size:11px;font-weight:600;">✅ Rendimento atualizado para <strong>"${name}"</strong> — <strong>${brlFmt(amount)}</strong>.</div></div></div>`;
+    box.scrollTop=box.scrollHeight;
+    loadData();
+  }catch(e){toast('Erro: '+e.message);}
+}
+function ssAIStartDelete(id,name){
+  const box=document.getElementById('ai-messages');
+  const action={type:'del_revenue',id,name};
+  box.innerHTML+=`<div class="ai-msg bot"><div class="ai-bubble bot">
+    Confirma a remoção do rendimento <strong>"${name}"</strong>?
+    ${ssAIConfirmCard(action,'🗑️ Remover rendimento',`Nome: <strong>${name}</strong>`)}
+  </div></div>`;
+  box.scrollTop=box.scrollHeight;
+}
 
-📊 ÚLTIMOS 30 DIAS:
-- Pedidos pagos: ${ctx.ultimos_30_dias?.pedidos_pagos} | Cancelados: ${ctx.ultimos_30_dias?.pedidos_cancelados}
-- Faturamento: ${ctx.ultimos_30_dias?.faturamento}
-- Lucro REAL: ${ctx.ultimos_30_dias?.lucro_real} (margem ${ctx.ultimos_30_dias?.margem_media})
-- Ticket médio: ${ctx.ultimos_30_dias?.ticket_medio}
-- Tarifas marketplace: ${ctx.ultimos_30_dias?.tarifas_marketplace}
-- Frete pago: ${ctx.ultimos_30_dias?.frete_pago}
-- Impostos: ${ctx.ultimos_30_dias?.impostos}
-- Custo dos produtos vendidos: ${ctx.ultimos_30_dias?.custo_produtos}
+/* ── Fuzzy match: retorna itens ordenados por similaridade ── */
+function ssAIFuzzyMatch(items, query){
+  if(!query||!query.trim())return[];
+  // Tokeniza a query em palavras significativas (>= 2 chars)
+  const tokens=query.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'')
+    .split(/\s+/).filter(w=>w.length>=2);
+  if(!tokens.length)return[];
+  return items.map(r=>{
+    const name=r.name.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'');
+    // Score: quantos tokens batem no nome
+    const score=tokens.reduce((s,t)=>s+(name.includes(t)?1:0),0);
+    return{...r,score};
+  }).filter(r=>r.score>0).sort((a,b)=>b.score-a.score);
+}
 
-📅 MÊS PASSADO (comparação):
-- Pedidos: ${ctx.mes_passado?.pedidos} | Faturamento: ${ctx.mes_passado?.faturamento}
-- Variação de faturamento vs mês atual: ${ctx.mes_passado?.variacao_faturamento}
+/* Extrai o "nome mencionado" da mensagem removendo palavras-chave comuns */
+function ssAIExtractNameQuery(msg){
+  return msg
+    .replace(AI_ADD_RE,'').replace(AI_DEL_RE,'').replace(AI_EDIT_RE,'').replace(AI_LIST_RE,'')
+    .replace(/\b(?:o|a|os|as|um|uma|esse|essa|aquele|aquela|meu|minha|de|do|da|para|pra|com|em|por|que|qual|no|na)\b/gi,' ')
+    .replace(/R?\$\s*[\d.,]+/g,' ')
+    .replace(/\s{2,}/g,' ').trim();
+}
 
-🏪 POR PLATAFORMA (30 dias):
-${JSON.stringify(ctx.por_plataforma, null, 2)}
+/* Detecta intenção e retorna ação ou null */
+async function ssAIParseAction(message){
+  const isAdd =AI_ADD_RE.test(message);
+  const isDel =AI_DEL_RE.test(message);
+  const isEdit=AI_EDIT_RE.test(message);
+  const isList=AI_LIST_RE.test(message);
 
-🏆 TOP 10 PRODUTOS POR FATURAMENTO (30 dias):
-${ctx.top_10_faturamento?.map((p, i) => `${i+1}. ${p.produto} (SKU: ${p.sku}) — Faturamento: ${p.faturamento} | Lucro: ${p.lucro} | Margem: ${p.margem} | Qtd: ${p.qtd_vendida} | Custo unit.: ${p.custo_unitario}`).join('\n') || 'Sem dados'}
+  if(!isAdd&&!isDel&&!isEdit&&!isList)return null;
 
-⚠️ PRODUTOS COM PIOR MARGEM (foco de atenção):
-${ctx.produtos_pior_margem?.map((p, i) => `${i+1}. ${p.produto} (SKU: ${p.sku}) — Margem: ${p.margem} | Lucro: ${p.lucro} | Fat.: ${p.faturamento}`).join('\n') || 'Nenhum'}
+  // LISTAR — só mês atual
+  if(isList&&!isDel&&!isEdit&&!isAdd){
+    const items=await ssAIFetchRevenues(true); // true = só mês atual
+    return{type:'list_revenue',items};
+  }
 
-⚠️ PRODUTOS SEM CUSTO CADASTRADO (lucro pode estar errado):
-${ctx.produtos_sem_custo_cadastrado?.length ? ctx.produtos_sem_custo_cadastrado.join(', ') : 'Todos os produtos têm custo cadastrado ✓'}
+  // ADICIONAR
+  if(isAdd&&!isDel&&!isEdit){
+    // Extrai valor
+    const amtM=/R?\$?\s*([\d]+(?:[.,][\d]{1,2})?)/i.exec(
+      message.replace(/\b(?:adicion|coloc|inserir?|criar?|registr|lançar?|bota|add)\b/i,''));
+    const rawAmt=amtM?String(amtM[1]).replace(/\./g,'').replace(',','.'):null;
+    const amount=parseFloat(rawAmt||'');
+    // Extrai nome: procura "em/para/pra/chamado" + nome na mensagem original
+    const nameM=/\b(?:em|para|pra|chamad[ao]|chamado)\s+([A-Za-záéíóúâêîôûãõàèìòùçÁÉÍÓÚÂÊÎÔÛÃÕÀÈÌÒÙÇ][^0-9\n,;]{1,60}?)(?:\s+(?:de|R\$|\d|com\s+val)|[,;.]|$)/i
+      .exec(message);
+    // fallback: remove palavras-chave e valor, pega o que sobrou
+    let name='Rendimento extra';
+    if(nameM){
+      name=nameM[1].replace(/\b(?:o|a|os|as|um|uma|meu|minha|esse|essa)\b/gi,' ').replace(/\s{2,}/g,' ').trim();
+    }else{
+      const stripped=message
+        .replace(/\b(?:adicion|adicione|coloca|inserir?|criar?|registr|lançar?|bota|add)\b/gi,' ')
+        .replace(/\b(?:receita|rendimento|rendimentos|faturamento|entrada|valor|rend|fat)\b/gi,' ')
+        .replace(/\b(?:de|do|da|em|no|na|para|pra|com|ao|um|uma|o|a)\b/gi,' ')
+        .replace(/R?\$?\s*[\d.,]+/g,' ')
+        .replace(/\s{2,}/g,' ').trim();
+      if(stripped.length>=2)name=stripped;
+    }
+    name=name.slice(0,80);
+    if(amount>0)return{type:'add_revenue',name,amount};
+    // Valor não encontrado — pede confirmação de qual valor
+    return{type:'add_revenue_ask',name};
+  }
 
-↩️ DEVOLUÇÕES (90 dias):
-- Com prejuízo para o vendedor: ${ctx.devolucoes_90_dias?.total_com_prejuizo} devoluções = ${ctx.devolucoes_90_dias?.prejuizo_total}
-- ML absorveu o custo: ${ctx.devolucoes_90_dias?.ml_absorveu} casos (sem prejuízo)
-- Frete reverso total: ${ctx.devolucoes_90_dias?.frete_reverso_total}
-- Taxas de devolução: ${ctx.devolucoes_90_dias?.taxas_total}
+  // REMOVER ou EDITAR — precisa de busca fuzzy
+  const items=await ssAIFetchRevenues();
+  const label=isDel?'remover':'editar';
+  if(!items.length)return{type:'list_revenue',items,msg:`Você ainda não tem rendimentos cadastrados para ${label}.`};
 
-📆 MELHOR DIA DA SEMANA PARA VENDER: ${ctx.melhor_dia_semana}
+  const query=ssAIExtractNameQuery(message);
+  const matches=ssAIFuzzyMatch(items,query);
 
-📦 PRODUTOS: ${ctx.produtos_ativos} ativos de ${ctx.produtos_cadastrados_total} cadastrados
-=======================================================
+  // Match perfeito (único com score alto)
+  if(matches.length===1||(matches.length>0&&matches[0].score>=2&&(!matches[1]||matches[0].score>matches[1].score))){
+    const r=matches[0];
+    if(isDel)return{type:'del_revenue_confirm',id:r.id,name:r.name};
+    if(isEdit)return{type:'start_edit',id:r.id,name:r.name,amount:r.amount};
+  }
 
-REGRAS IMPORTANTES:
-1. Use SEMPRE os números reais acima — NUNCA invente ou estime valores que não estão aqui.
-2. Se algum produto tem margem negativa ou muito baixa (<10%), mencione proativamente.
-3. Se pedirem planilha, exportação, CSV ou tabela: OBRIGATORIAMENTE gere o CSV completo com os dados reais fornecidos em bloco \`\`\`csv\n...\`\`\`. Não recuse, não dê template — use os dados reais.
-4. Responda sempre em português brasileiro, de forma direta e prática.
-5. Quando falar de lucro, deixe claro que é lucro REAL (após custo do produto). Se produto não tem custo cadastrado, avise que o lucro pode estar incorreto.`;
+  // Vários candidatos — pergunta qual é
+  if(matches.length>0){
+    return{type:'ask_which',action:isDel?'del':'edit',items:matches.slice(0,5),query};
+  }
 
-    // Detecta intenção de planilha/exportação para buscar dados completos do banco
-    const wantsCsv = /planilha|excel|csv|exportar|exporta|listar.*pedidos|todos.*pedidos|gera.*pedidos|tabela.*pedidos/i.test(message);
-    let userContent = message;
+  // Sem match — mostra a lista completa
+  return{type:'list_revenue',items,msg:`Não encontrei nenhum rendimento com esse nome. Qual desses você quer ${label}?`};
+}
 
-    if (wantsCsv) {
-      // Busca pedidos reais do banco com custo e lucro calculados
-      const period = req.body.period_days || 30;
-      const { rows: pedidos } = await db.query(`
-        SELECT
-          o.platform_order_id, o.platform, o.shop_name, o.item_title, o.item_sku,
-          o.order_date, o.status, o.fulfillment_type, o.quantity,
-          o.total_amount, o.platform_fee, o.shipping_fee, o.tax_amount,
-          COALESCE(p.cost, 0) AS custo_unitario,
-          COALESCE(p.cost, 0) * o.quantity AS custo_total,
-          ROUND(o.total_amount - o.platform_fee - o.shipping_fee - o.tax_amount - COALESCE(p.cost,0)*o.quantity, 2) AS lucro_real,
-          CASE WHEN o.total_amount > 0 THEN
-            ROUND((o.total_amount - o.platform_fee - o.shipping_fee - o.tax_amount - COALESCE(p.cost,0)*o.quantity) / o.total_amount * 100, 1)
-          ELSE 0 END AS margem_pct
-        FROM marketplace_orders o
-        LEFT JOIN products p ON p.user_id=o.user_id
-          AND LOWER(TRIM(p.sku))=LOWER(TRIM(o.item_sku))
-          AND (LOWER(p.platform)=LOWER(o.platform) OR LOWER(p.platform)='geral')
-        WHERE o.user_id=$1 AND o.order_date >= NOW() - INTERVAL '${Math.min(period,90)} days'
-        ORDER BY o.order_date DESC
-        LIMIT 500`, [req.user.id]);
+async function ssAISend(message){
+  const box=document.getElementById('ai-messages');
+  if(!box)return;
+  const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;');
+  box.innerHTML+=`<div class="ai-msg user"><div class="ai-bubble user">${esc(message)}</div></div>`;
+  const typingId='ait'+Date.now();
 
-      const csvHeader = 'ID Pedido,Plataforma,Conta,Produto,SKU,Data,Status,Tipo,Qtde,Valor (R$),Tarifa (R$),Frete (R$),Imposto (R$),Custo Unit. (R$),Custo Total (R$),Lucro Real (R$),Margem (%)';
-      const csvRows = pedidos.map(o => [
-        o.platform_order_id,
-        o.platform,
-        o.shop_name||'',
-        `"${(o.item_title||'').replace(/"/g,"'")}"`,
-        o.item_sku||'',
-        o.order_date ? new Date(o.order_date).toLocaleDateString('pt-BR') : '',
-        o.status||'',
-        o.fulfillment_type||'normal',
-        o.quantity||1,
-        Number(o.total_amount||0).toFixed(2),
-        Number(o.platform_fee||0).toFixed(2),
-        Number(o.shipping_fee||0).toFixed(2),
-        Number(o.tax_amount||0).toFixed(2),
-        Number(o.custo_unitario||0).toFixed(2),
-        Number(o.custo_total||0).toFixed(2),
-        Number(o.lucro_real||0).toFixed(2),
-        Number(o.margem_pct||0).toFixed(1)
-      ].join(',')).join('\n');
+  // Detecta se é uma ação de manipular dados ANTES de chamar a IA
+  const directAction=await ssAIParseAction(message);
+  if(directAction){
+    const box2=document.getElementById('ai-messages');
+    const T=directAction.type;
 
-      userContent = `${message}\n\n[PEDIDOS REAIS DO BANCO — últimos ${period} dias — ${pedidos.length} registros]\n\`\`\`csv\n${csvHeader}\n${csvRows}\n\`\`\`\n\nGere o CSV completo acima exatamente como está (ou filtre/reordene conforme o pedido do usuário). Não substitua por template — esses são os dados REAIS.`;
-    } else if (req.body.page_data && Array.isArray(req.body.page_data) && req.body.page_data.length) {
-      // Fallback: frontend mandou dados da tela
-      const rows = req.body.page_data.slice(0, 300);
-      const csvHeader = 'ID,Plataforma,Conta,Produto,SKU,Data,Status,Tipo,Qtde,Valor,Tarifa,Frete,Imposto,Custo,Lucro';
-      const csvRows = rows.map(o => [
-        o.platform_order_id||'', o.platform||'', o.shop_name||'',
-        `"${(o.item_title||'').replace(/"/g,"'")}"`, o.item_sku||'',
-        o.order_date?new Date(o.order_date).toLocaleDateString('pt-BR'):'',
-        o.status||'', o.fulfillment_type||'', o.quantity||1,
-        Number(o.total_amount||0).toFixed(2), Number(o.platform_fee||0).toFixed(2),
-        Number(o.shipping_fee||0).toFixed(2), Number(o.tax_amount||0).toFixed(2),
-        Number(o.total_cost||0).toFixed(2), Number(o.profit||0).toFixed(2)
-      ].join(',')).join('\n');
-      userContent = `${message}\n\n[DADOS DA TELA — ${rows.length} registros]\n\`\`\`csv\n${csvHeader}\n${csvRows}\n\`\`\``;
+    if(T==='list_revenue'){
+      box2.innerHTML+=`<div class="ai-msg bot"><div class="ai-bubble bot">
+        ${directAction.msg||'Seus rendimentos extras cadastrados:'}
+        ${ssAIRevenueListCard(directAction.items)}
+      </div></div>`;
+
+    }else if(T==='add_revenue'){
+      box2.innerHTML+=`<div class="ai-msg bot"><div class="ai-bubble bot">
+        Confirme os dados:
+        ${ssAIConfirmCard(directAction,'💰 Adicionar rendimento',
+          `Nome: <strong>${directAction.name}</strong><br>Valor: <strong style="color:var(--green2)">${brlFmt(directAction.amount)}</strong>`)}
+      </div></div>`;
+
+    }else if(T==='add_revenue_ask'){
+      box2.innerHTML+=`<div class="ai-msg bot"><div class="ai-bubble bot">
+        Qual o valor do rendimento <strong>"${directAction.name}"</strong>? Me diga o valor em reais (ex: R$ 500).
+      </div></div>`;
+
+    }else if(T==='del_revenue_confirm'){
+      box2.innerHTML+=`<div class="ai-msg bot"><div class="ai-bubble bot">
+        É esse que você quer remover?
+        ${ssAIConfirmCard({type:'del_revenue',id:directAction.id,name:directAction.name},'🗑️ Remover rendimento',
+          `Nome: <strong>${directAction.name}</strong>`)}
+      </div></div>`;
+
+    }else if(T==='start_edit'){
+      ssAIStartEdit(directAction.id,directAction.name,directAction.amount);
+
+    }else if(T==='ask_which'){
+      /* Vários candidatos: mostra mini-lista com botão de ação */
+      const actLabel=directAction.action==='del'?'Remover':'Editar';
+      const cards=directAction.items.map(r=>{
+        const actionObj=directAction.action==='del'
+          ?{type:'del_revenue',id:r.id,name:r.name}
+          :{type:'start_edit',id:r.id,name:r.name,amount:r.amount};
+        const safe=encodeURIComponent(JSON.stringify(actionObj));
+        return`<div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:8px 12px;gap:8px;">
+          <div>
+            <div style="font-size:11px;font-weight:700;color:var(--txt)">${r.name}</div>
+            <div style="font-size:10px;color:var(--green2)">${brlFmt(r.amount)}</div>
+          </div>
+          <button onclick="ssAIHandleWhich(decodeURIComponent('${safe}'))" style="padding:4px 10px;background:linear-gradient(135deg,var(--p),var(--p2));border:none;border-radius:6px;color:#fff;font-size:10px;font-weight:700;cursor:pointer;">${actLabel}</button>
+        </div>`;
+      }).join('');
+      box2.innerHTML+=`<div class="ai-msg bot"><div class="ai-bubble bot">
+        Encontrei mais de um. Qual desses você quis dizer?
+        <div style="display:flex;flex-direction:column;gap:5px;margin-top:8px">${cards}</div>
+      </div></div>`;
     }
 
-    const messages = [
-      { role: 'system', content: systemPrompt },
-      ...history.slice(-10).map(h => ({ role: h.role, content: h.content })),
-      { role: 'user', content: userContent }
-    ];
-
-    const { data } = await axios.post('https://api.openai.com/v1/chat/completions', {
-      model: 'gpt-4o-mini',
-      messages,
-      max_tokens: wantsCsv ? 4000 : 700,
-      temperature: 0.7
-    }, {
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }
-    });
-
-    const reply = data.choices?.[0]?.message?.content || 'Sem resposta.';
-    res.json({ reply, tokens_used: data.usage?.total_tokens || 0 });
-  } catch(e) {
-    const msg = e.response?.data?.error?.message || e.message;
-    res.status(500).json({ error: msg });
+    box2.scrollTop=box2.scrollHeight;
+    return;
   }
-});
 
-// ── ADMIN: invalida todos os tokens Shopee (migração sandbox → produção) ──
-// Uso: GET /admin/shopee/invalidate-all-tokens?secret=SEU_ADMIN_SECRET
-// Isso força TODOS os usuários a reconectarem a Shopee.
-app.get('/admin/shopee/invalidate-all-tokens', async (req, res) => {
-  const secret = req.query.secret || '';
-  const adminSecret = process.env.ADMIN_SECRET || '';
-  if (!adminSecret || secret !== adminSecret) {
-    return res.status(403).json({ error: 'Acesso negado. Configure ADMIN_SECRET no Render e passe ?secret=...' });
+  // Verifica se precisa dos dados da página
+  const needsData=AI_SHEET_KEYWORDS.test(message);
+  const pageData=needsData?(typeof FILTERED!=='undefined'?FILTERED:typeof ALL!=='undefined'?ALL:[]):null;
+
+  box.innerHTML+=`<div class="ai-msg bot" id="${typingId}"><div class="ai-bubble bot typing">${needsData?'📊 Lendo os dados da tela...':'⏳ Analisando seus dados...'}</div></div>`;
+  box.scrollTop=box.scrollHeight;
+
+  const btn=document.getElementById('ai-send-btn');
+  const inp=document.getElementById('ai-input');
+  if(btn)btn.disabled=true;
+  if(inp)inp.disabled=true;
+
+  try{
+    const body={message,history:AI_HISTORY,period_days:typeof PERIOD!=='undefined'?PERIOD:30};
+    if(pageData&&pageData.length)body.page_data=pageData;
+
+    const j=await ssFetchJson(`${API}/api/ai/chat`,{method:'POST',body:JSON.stringify(body)});
+    document.getElementById(typingId)?.remove();
+    const reply=j.reply||j.error||'Sem resposta.';
+    AI_HISTORY.push({role:'user',content:message},{role:'assistant',content:reply});
+    if(AI_HISTORY.length>20)AI_HISTORY=AI_HISTORY.slice(-20);
+    box.innerHTML+=`<div class="ai-msg bot"><div class="ai-bubble bot">${ssAIRenderResponse(reply)}</div></div>`;
+  }catch(e){
+    document.getElementById(typingId)?.remove();
+    box.innerHTML+=`<div class="ai-msg bot"><div class="ai-bubble bot" style="color:var(--red2)">Erro: ${e.message}</div></div>`;
+  }finally{
+    if(btn)btn.disabled=false;
+    if(inp){inp.disabled=false;inp.focus();}
+    box.scrollTop=box.scrollHeight;
   }
-  try {
-    const { rowCount } = await db.query(`
-      UPDATE marketplace_accounts
-      SET access_token=NULL, refresh_token=NULL, token_expires_at=NULL,
-          shop_name=CASE WHEN shop_name NOT LIKE '%(reconectar)%' THEN shop_name || ' (reconectar)' ELSE shop_name END,
-          updated_at=NOW()
-      WHERE platform='shopee' AND (access_token IS NOT NULL OR refresh_token IS NOT NULL)
-    `);
-    console.log(`[Admin] ✅ ${rowCount} contas Shopee invalidadas para reconexão.`);
-    res.json({ success: true, accounts_invalidated: rowCount, message: `${rowCount} conta(s) Shopee marcada(s) para reconexão. Cada usuário verá o aviso ao entrar.` });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// ── STATUS DA KEY SHOPEE ──
-app.get('/api/shopee/key-status', auth, (req, res) => {
-  const expiresAt = process.env.SHOPEE_KEY_EXPIRES_AT;
-  const mode = process.env.SHOPEE_ENV === 'test' ? 'test' : 'production';
-  if (!expiresAt) return res.json({ ok: true, mode, warning: false, message: 'SHOPEE_KEY_EXPIRES_AT não configurado.' });
-  const expDate = new Date(expiresAt);
-  const now = new Date();
-  const daysLeft = Math.ceil((expDate - now) / 86400000);
-  let level = 'ok';
-  if (daysLeft <= 0) level = 'expired';
-  else if (daysLeft <= 7) level = 'critical';
-  else if (daysLeft <= 30) level = 'warning';
-  res.json({
-    ok: level === 'ok',
-    mode,
-    level,
-    daysLeft,
-    expiresAt: expDate.toISOString(),
-    expiresFormatted: expDate.toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit', timeZone:'America/Sao_Paulo' }),
-    message: level === 'expired'
-      ? `⛔ Shopee API Key EXPIRADA! Renove no Shopee Partner Center.`
-      : level === 'critical'
-      ? `🚨 Shopee API Key expira em ${daysLeft} dia(s)! Renove URGENTE.`
-      : level === 'warning'
-      ? `⚠️ Shopee API Key expira em ${daysLeft} dia(s). Renove em breve.`
-      : `✅ Shopee API Key OK — ${daysLeft} dias restantes.`
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════
-// ── TIKTOK SHOP INTEGRATION ─────────────────────────────────────
-// ═══════════════════════════════════════════════════════════════
-
-const TIKTOK_BASE    = 'https://open-api.tiktokglobalshop.com';
-const TIKTOK_APP_KEY = () => process.env.TIKTOK_APP_KEY || '';
-const TIKTOK_SECRET  = () => process.env.TIKTOK_APP_SECRET || '';
-
-// Tabela nonce para OAuth TikTok (mesmo padrão Shopee — TikTok não devolve state)
-async function ensureTiktokNonceTable() {
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS tiktok_oauth_nonce (
-      nonce      TEXT PRIMARY KEY,
-      user_id    UUID NOT NULL,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW()
-    )
-  `).catch(() => {});
-  // Garante coluna refresh_token_expires_at na tabela de contas (pode não existir em bases antigas)
-  await db.query(`ALTER TABLE marketplace_accounts ADD COLUMN IF NOT EXISTS refresh_token_expires_at TIMESTAMP`).catch(() => {});
 }
-ensureTiktokNonceTable();
+// FAB aparece ao logar
+const _aiOrigShow=window.showApp;
+window.showApp=function(...a){
+  if(typeof _aiOrigShow==='function')_aiOrigShow(...a);
+  const fab=document.getElementById('ai-fab');
+  if(fab)fab.style.display='flex';
+};
+// Botão na sidebar
+const _aiSideOrig=window.ssInstallSideButtons;
+window.ssInstallSideButtons=function(){
+  if(typeof _aiSideOrig==='function')_aiSideOrig();
+  const sidebar=document.getElementById('sidebar');
+  if(!sidebar||document.getElementById('ss-side-ai'))return;
+  const b=document.createElement('div');
+  b.id='ss-side-ai';b.className='s-btn';
+  b.innerHTML='<span style="font-size:18px">🤖</span><span class="s-tip">Assistente IA</span>';
+  b.onclick=ssToggleAI;
+  sidebar.insertBefore(b,sidebar.querySelector('.s-sp')||null);
+};
+setTimeout(()=>{try{window.ssInstallSideButtons()}catch(e){}},1000);
+/* ══════════════════════════════════════════
+   DAILY BRIEF — popup de resumo diário
+══════════════════════════════════════════ */
+const SS_DAILY_MSGS=[
+  "Consistência bate talento todo dia. Hoje é dia de superar ontem! 🔥",
+  "Cada pedido que entra é um passo mais perto da meta. Vai lá! 💰",
+  "O mercado não para — e você também não! Foco total no faturamento! 🎯",
+  "Quem vende com constância constrói um negócio de verdade. Bora! ✨",
+  "Meta na parede, olho no cliente, mão na massa. Hoje é o dia! 🚀",
+  "Um dia ruim de vendas não define o mês. Hoje você vira o jogo! 💪",
+  "Cada notificação de pedido é dinheiro entrando. Bora bombar! 🛒",
+  "A diferença entre sonho e realidade é a ação. Vai vender! ⚡",
+  "Seu concorrente não descansa — mas você vende melhor! 😎",
+  "Números de ontem são combustível pro hoje. Até onde chegamos? 📈",
+  "Pequenas vendas todos os dias fazem grandes meses. Continua! 🏆",
+  "Cada produto enviado é uma promessa cumprida. Orgulho de faturar! 🎉",
+];
 
-// Gera assinatura HMAC-SHA256 para TikTok Shop API
-function tiktokSign(secret, params, body = '') {
-  // Ordena params excluindo sign e access_token, concatena: secret + key+value... + body + secret
-  const keys = Object.keys(params).filter(k => k !== 'sign' && k !== 'access_token').sort();
-  const str  = secret + keys.map(k => `${k}${params[k]}`).join('') + body + secret;
-  return crypto.createHmac('sha256', secret).update(str).digest('hex');
-}
-
-// Monta params base para chamadas TikTok API v2
-function tiktokParams(path, accessToken, extra = {}) {
-  const ts     = Math.floor(Date.now() / 1000);
-  const appKey = TIKTOK_APP_KEY();
-  const secret = TIKTOK_SECRET();
-  const params = { app_key: appKey, timestamp: ts, ...extra };
-  if (accessToken) params.access_token = accessToken;
-  params.sign = tiktokSign(secret, { ...params, path }, '');
-  return params;
+async function ssDailyBrief(){
+  if(window.innerWidth<768)return; // só desktop
+  const today=localDateStr(new Date());
+  const key='ss_brief_'+(USER?.id||'x');
+  if(localStorage.getItem(key)===today)return;
+  try{
+    const y=new Date();y.setDate(y.getDate()-1);
+    const yd=localDateStr(y);
+    const{data}=await api(`/api/orders?date_from=${yd}&date_to=${yd}`);
+    const brl=v=>Number(v).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
+    const paid=(data||[]).filter(o=>o.status!=='cancelled'&&o.status!=='pending');
+    const can=(data||[]).filter(o=>o.status==='cancelled');
+    const fat=paid.reduce((s,o)=>s+parseFloat(o.total_amount||0),0);
+    const luc=paid.reduce((s,o)=>s+parseFloat(o.profit||0),0);
+    // Saudação
+    const hora=new Date().getHours();
+    const saudacao=hora<12?'Bom dia':hora<18?'Boa tarde':'Boa noite';
+    const emoji=hora<12?'☀️':hora<18?'🌤️':'🌙';
+    const nome=(USER?.name||'').split(' ')[0]||'parceiro';
+    // Data de ontem
+    const dias=['domingo','segunda','terça','quarta','quinta','sexta','sábado'];
+    const meses=['jan','fev','mar','abr','mai','jun','jul','ago','set','out','nov','dez'];
+    const dateLabel=`Resumo de ontem — ${dias[y.getDay()]}, ${String(y.getDate()).padStart(2,'0')} de ${meses[y.getMonth()]}`;
+    // Mensagem aleatória
+    const msg=SS_DAILY_MSGS[Math.floor(Math.random()*SS_DAILY_MSGS.length)];
+    // Preenche
+    const el=id=>document.getElementById(id);
+    el('db-greeting').textContent=`${saudacao}, ${nome}! ${emoji}`;
+    el('db-date-str').textContent=dateLabel;
+    el('db-fat').textContent=brl(fat);
+    el('db-luc').textContent=brl(luc);
+    el('db-luc').style.color=luc>=0?'#34d399':'#f87171';
+    el('db-ped').textContent=paid.length;
+    el('db-can').textContent=can.length>0?`${can.length} cancelado${can.length>1?'s':''} ontem`:'';
+    el('db-quote').textContent=`"${msg}"`;
+    // Exibe overlay
+    el('daily-brief-overlay').style.display='flex';
+  }catch(e){}
 }
 
-// Status TikTok → interno SaleSync
-const TIKTOK_STATUS = {
-  'UNPAID':             'pending',
-  'ON_HOLD':            'pending',
-  'AWAITING_SHIPMENT':  'paid',
-  'AWAITING_COLLECTION':'paid',
-  'IN_TRANSIT':         'shipped',
-  'DELIVERED':          'delivered',
-  'COMPLETED':          'completed',
-  'CANCELLED':          'cancelled',
-  'PARTIALLY_CANCELLED':'cancelled',
+function ssDailyBriefClose(){
+  const key='ss_brief_'+(USER?.id||'x');
+  localStorage.setItem(key,localDateStr(new Date()));
+  const ov=document.getElementById('daily-brief-overlay');
+  ov.style.transition='opacity .35s ease';
+  ov.style.opacity='0';
+  setTimeout(()=>{ov.style.display='none';ov.style.opacity='1';ov.style.transition='';},370);
+}
+
+// Auto-resize textarea
+document.addEventListener('DOMContentLoaded',()=>{
+  const ta=document.getElementById('ai-input');
+  if(ta)ta.addEventListener('input',function(){this.style.height='auto';this.style.height=Math.min(this.scrollHeight,100)+'px';});
+});
+</script>
+
+<!-- ═══ DAILY BRIEF POPUP ═══ -->
+<div id="daily-brief-overlay">
+  <div id="daily-brief-card">
+    <div class="db-greeting" id="db-greeting">Bom dia! ☀️</div>
+    <span class="db-date-str" id="db-date-str">Resumo de ontem</span>
+
+    <div class="db-fat-label">Faturamento de ontem</div>
+    <div class="db-fat-val" id="db-fat">—</div>
+
+    <div class="db-secondary">
+      <div class="db-sec-item">
+        <div class="db-sec-label">Lucro líquido</div>
+        <div class="db-sec-val" id="db-luc" style="color:#34d399">—</div>
+      </div>
+      <div class="db-sec-item">
+        <div class="db-sec-label">Pedidos pagos</div>
+        <div class="db-sec-val" id="db-ped" style="color:#a78bfa">—</div>
+        <div class="db-sec-sub" id="db-can"></div>
+      </div>
+    </div>
+
+    <div class="db-quote-wrap">
+      <div class="db-quote" id="db-quote">"Carregando mensagem..."</div>
+    </div>
+
+    <button class="db-cta-btn" onclick="ssDailyBriefClose()">🚀 Vamos faturar hoje!</button>
+  </div>
+</div>
+
+<!-- ═══ PAINEL ESTOQUE (sobrepõe #content) ═══ -->
+<div id="painel-estoque" style="display:none;position:absolute;top:132px;left:56px;right:0;bottom:0;background:var(--bg);z-index:200;overflow-y:auto;padding:14px 16px;">
+<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+  <div style="width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#059669,#10b981);display:flex;align-items:center;justify-content:center;font-size:18px"><i class="ti ti-package" style="color:#fff"></i></div>
+  <div><div style="font-size:16px;font-weight:800">Estoque</div><div style="font-size:11px;color:var(--txt3)">Controle de quantidade por SKU</div></div>
+  <button onclick="fecharEstoque()" style="margin-left:auto;background:var(--bg3);border:1px solid var(--border2);border-radius:8px;padding:6px 14px;color:var(--txt2);cursor:pointer;font-size:12px;font-weight:600"><i class="ti ti-x"></i> Fechar</button>
+</div>
+
+<!-- Alertas -->
+<div id="estoque-alertas" style="margin-bottom:12px"></div>
+
+<!-- Adicionar SKU -->
+<div style="background:var(--bg3);border:1px solid var(--border2);border-radius:12px;padding:14px;margin-bottom:14px">
+  <div style="font-size:10px;font-weight:800;color:var(--txt3);margin-bottom:10px">ADICIONAR / ATUALIZAR SKU</div>
+  <div style="display:grid;grid-template-columns:120px 1fr 100px 100px 44px;gap:8px;align-items:end">
+    <div><label style="font-size:10px;color:var(--txt3);font-weight:700;display:block;margin-bottom:3px">SKU</label><input id="est-sku" class="lfi" placeholder="paineloff" style="height:34px;font-size:12px"/></div>
+    <div><label style="font-size:10px;color:var(--txt3);font-weight:700;display:block;margin-bottom:3px">Nome do produto</label><input id="est-nome" class="lfi" placeholder="Painel Ripado Off White" style="height:34px;font-size:12px"/></div>
+    <div><label style="font-size:10px;color:var(--txt3);font-weight:700;display:block;margin-bottom:3px">Qtd atual</label><input id="est-qtd" type="number" min="0" class="lfi" placeholder="50" style="height:34px;font-size:12px"/></div>
+    <div><label style="font-size:10px;color:var(--txt3);font-weight:700;display:block;margin-bottom:3px">Alerta quando &lt;</label><input id="est-min" type="number" min="0" class="lfi" placeholder="5" style="height:34px;font-size:12px"/></div>
+    <button onclick="estoqueAdicionar()" class="btn primary" style="height:34px;padding:0 12px;font-size:13px;margin-top:auto"><i class="ti ti-plus"></i></button>
+  </div>
+</div>
+
+<!-- Lista -->
+<div id="estoque-lista"><div class="empty"><div class="spin"></div></div></div>
+</div>
+
+<!-- REMOVIDO: antigo mo-estoque modal substituído por painel acima -->
+<div style="display:none" id="mo-estoque">
+<div class="md wide" style="max-width:900px;"><div class="mh"><div class="mh-left"><div class="mh-ico" style="background:linear-gradient(135deg,#059669,#10b981)"><i class="ti ti-package"></i></div><div><div class="mh-title">Estoque</div><div class="mh-sub">Controle de quantidade por SKU</div></div></div><div class="mh-close" onclick="closeMo('mo-estoque')"><i class="ti ti-x"></i></div></div>
+<div class="mb" style="padding:18px">
+
+  <!-- Alerta de itens críticos -->
+  <div id="estoque-alertas" style="margin-bottom:14px"></div>
+
+  <!-- Adicionar/editar estoque -->
+  <div style="display:grid;grid-template-columns:1fr 1fr 100px 100px 44px;gap:8px;margin-bottom:14px;align-items:end;">
+    <div><label style="font-size:10px;color:var(--txt3);font-weight:700;display:block;margin-bottom:4px">SKU</label><input id="est-sku" class="lfi" placeholder="paineloff" style="height:36px;font-size:12px"/></div>
+    <div><label style="font-size:10px;color:var(--txt3);font-weight:700;display:block;margin-bottom:4px">Nome do produto</label><input id="est-nome" class="lfi" placeholder="Painel Ripado Off White" style="height:36px;font-size:12px"/></div>
+    <div><label style="font-size:10px;color:var(--txt3);font-weight:700;display:block;margin-bottom:4px">Qtd atual</label><input id="est-qtd" type="number" min="0" class="lfi" placeholder="50" style="height:36px;font-size:12px"/></div>
+    <div><label style="font-size:10px;color:var(--txt3);font-weight:700;display:block;margin-bottom:4px">Alerta quando &lt;</label><input id="est-min" type="number" min="0" class="lfi" placeholder="5" style="height:36px;font-size:12px"/></div>
+    <button onclick="estoqueAdicionar()" class="btn primary" style="height:36px;padding:0 12px;font-size:12px;margin-top:auto"><i class="ti ti-plus"></i></button>
+  </div>
+
+  <!-- Lista de SKUs -->
+  <div id="estoque-lista" style="display:flex;flex-direction:column;gap:6px"><div class="empty"><div class="spin"></div></div></div>
+
+</div></div></div>
+
+<!-- ═══ PAINEL NF (sobrepõe #content) ═══ -->
+<div id="painel-nf" style="display:none;position:absolute;top:132px;left:56px;right:0;bottom:0;background:var(--bg);z-index:200;overflow-y:auto;padding:14px 16px;">
+<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+  <div style="width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#0284c7,#38bdf8);display:flex;align-items:center;justify-content:center;font-size:18px"><i class="ti ti-file-invoice" style="color:#fff"></i></div>
+  <div><div style="font-size:16px;font-weight:800">Emissão de Nota Fiscal</div><div style="font-size:11px;color:var(--txt3)">NF-e de saída por pedido</div></div>
+  <button onclick="fecharNF()" style="margin-left:auto;background:var(--bg3);border:1px solid var(--border2);border-radius:8px;padding:6px 14px;color:var(--txt2);cursor:pointer;font-size:12px;font-weight:600"><i class="ti ti-x"></i> Fechar</button>
+</div>
+
+<!-- Lista de pedidos aguardando NF -->
+<div id="nf-lista-panel">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+    <div style="font-size:12px;font-weight:700;color:var(--txt2)">Vendas normais sem NF emitida</div>
+    <button onclick="nfEmitirSelecionados()" class="btn primary" style="font-size:11px;height:32px;padding:0 14px"><i class="ti ti-file-plus"></i> Emitir selecionadas</button>
+  </div>
+  <div id="nf-pedidos-lista"><div class="empty" style="height:80px">Carregando pedidos...</div></div>
+</div>
+
+<!-- Wizard de emissão -->
+<div id="nf-wizard" style="display:none">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+    <button onclick="nfVoltarLista()" style="background:var(--bg3);border:1px solid var(--border2);border-radius:8px;padding:6px 12px;color:var(--txt2);cursor:pointer;font-size:12px"><i class="ti ti-arrow-left"></i> Voltar</button>
+    <div id="nf-wizard-progress" style="font-size:12px;color:var(--txt3)">Pedido 1 de 1</div>
+    <div id="nf-wizard-steps" style="display:flex;gap:4px;margin-left:auto"></div>
+  </div>
+  <div id="nf-wizard-body"></div>
+</div>
+</div>
+
+<!-- Dummy para compatibilidade (sidebar chama openMo('mo-nf')) -->
+<div style="display:none" id="mo-nf"></div>
+
+<style>
+.plat-tk{background:rgba(255,0,80,.1);color:#ff0050;border:1px solid rgba(255,0,80,.25);border-radius:5px;font-size:9px;font-weight:800;padding:2px 5px;}
+.est-row{display:grid;grid-template-columns:110px 1fr 130px 70px 90px 100px 36px;gap:8px;align-items:center;background:var(--bg3);border:1px solid var(--border2);border-radius:10px;padding:10px 14px;font-size:12px;transition:border-color .2s;}
+.est-row.critico{border-color:rgba(239,68,68,.5);background:rgba(239,68,68,.05);}
+.est-row.baixo{border-color:rgba(251,191,36,.4);background:rgba(251,191,36,.04);}
+.est-label{font-size:9px;font-weight:700;color:var(--txt3);margin-bottom:2px;text-transform:uppercase}
+.est-val{font-size:13px;font-weight:700}
+@media(max-width:900px){.est-row{grid-template-columns:1fr 1fr;}}
+/* NF pedido row */
+.nf-row{display:grid;grid-template-columns:20px 60px 1fr 100px 90px 80px 110px;gap:8px;align-items:center;background:var(--bg3);border:1px solid var(--border2);border-radius:10px;padding:10px 14px;font-size:12px;transition:border-color .2s;}
+.nf-row:hover{border-color:var(--p2);}
+.nf-row.emitida{opacity:.5;}
+/* NF wizard */
+.nf-step-dot{width:28px;height:28px;border-radius:50%;border:2px solid var(--border2);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:var(--txt3);cursor:default;}
+.nf-step-dot.ativo{border-color:var(--p2);background:rgba(139,92,246,.15);color:var(--p3);}
+.nf-step-dot.ok{border-color:var(--green2);background:rgba(16,185,129,.12);color:var(--green2);}
+.nf-step-dot.erro{border-color:var(--red2);background:rgba(248,113,113,.1);color:var(--red2);}
+.nf-campo label{font-size:10px;font-weight:700;color:var(--txt3);display:block;margin-bottom:3px;text-transform:uppercase}
+.nf-campo input,.nf-campo select,.nf-campo textarea{width:100%;background:var(--bg4);border:1px solid var(--border2);border-radius:8px;padding:8px 10px;color:var(--txt);font-size:12px;outline:none;font-family:'Inter',sans-serif;}
+.nf-campo input:focus,.nf-campo select:focus{border-color:var(--p2);}
+</style>
+
+<script>
+// ══════════════════════════════════════
+// LIGHT / DARK MODE
+// ══════════════════════════════════════
+function toggleTheme(){
+  const light=document.body.classList.toggle('light-mode');
+  localStorage.setItem('ss_theme',light?'light':'dark');
+  updateThemeUI(light);
+}
+function updateThemeUI(light){
+  const icon=document.getElementById('theme-icon'),label=document.getElementById('theme-label'),knob=document.getElementById('theme-toggle-knob'),btn=document.getElementById('theme-toggle-btn');
+  if(!icon)return;
+  if(light){icon.className='ti ti-moon';icon.style.color='#818cf8';if(label)label.textContent='Modo escuro';if(knob){knob.style.left='20px';knob.style.background='#818cf8';}if(btn)btn.style.background='rgba(109,40,217,.3)';}
+  else{icon.className='ti ti-sun';icon.style.color='#f59e0b';if(label)label.textContent='Modo claro';if(knob){knob.style.left='2px';knob.style.background='var(--txt3)';}if(btn)btn.style.background='var(--bg4)';}
+}
+(function(){const t=localStorage.getItem('ss_theme');if(t==='light')document.body.classList.add('light-mode');document.addEventListener('DOMContentLoaded',()=>updateThemeUI(document.body.classList.contains('light-mode')));})();
+
+// ══════════════════════════════════════
+// PAINEIS (substituem #content)
+// ══════════════════════════════════════
+function abrirPainel(id){
+  // Esconde content principal
+  const c=document.getElementById('content');if(c)c.style.display='none';
+  document.querySelectorAll('[id^="painel-"]').forEach(p=>p.style.display='none');
+  const p=document.getElementById('painel-'+id);if(p)p.style.display='block';
+}
+function fecharEstoque(){
+  document.getElementById('painel-estoque').style.display='none';
+  const c=document.getElementById('content');if(c)c.style.display='';
+}
+function fecharNF(){
+  document.getElementById('painel-nf').style.display='none';
+  const c=document.getElementById('content');if(c)c.style.display='';
+}
+
+// Intercepta openMo para os novos painéis
+const __openMoBase=window.openMo;
+window.openMo=function(id){
+  if(id==='mo-estoque'){abrirPainel('estoque');estoqueRender();return;}
+  if(id==='mo-nf'){abrirPainel('nf');nfCarregarPedidos();return;}
+  if(typeof __openMoBase==='function')__openMoBase(id);
 };
 
-// ── OAuth: inicia autorização TikTok ──────────────────────────────
-app.get('/auth/tiktok', async (req, res) => {
-  const uid = req.query.user_id || '';
-  if (!uid) return res.status(400).send('user_id obrigatório');
-  // Salva nonce → user_id (TikTok retorna state no callback ✅)
-  const nonce = crypto.randomBytes(16).toString('hex');
-  await db.query(
-    `INSERT INTO tiktok_oauth_nonce (nonce, user_id) VALUES ($1,$2)
-     ON CONFLICT (nonce) DO UPDATE SET user_id=$2, created_at=NOW()`,
-    [nonce, uid]
-  );
-  const redirectUri = `${process.env.TIKTOK_REDIRECT_URI || 'https://api2.salesync.shop/callback/tiktok'}`;
-  const authUrl = `https://services.tiktokshop.com/open/authorize?service_id=7651281043454445330&state=${nonce}`;
-  console.log(`[TikTok] OAuth iniciado uid=${uid} nonce=${nonce}`);
-  res.redirect(authUrl);
-});
+// ══════════════════════════════════════
+// ESTOQUE
+// ══════════════════════════════════════
+let ESTOQUE=JSON.parse(localStorage.getItem('ss_estoque')||'{}');
+function estoqueS(){localStorage.setItem('ss_estoque',JSON.stringify(ESTOQUE));}
 
-// ── OAuth: callback TikTok ────────────────────────────────────────
-app.get('/callback/tiktok', async (req, res) => {
-  const { code, state } = req.query;
-  console.log(`[TikTok Callback] code=${code ? 'ok' : 'AUSENTE'} | state=${state}`);
-
-  if (!code) return res.status(400).send('Código de autorização ausente');
-
-  // Recupera user_id pelo state/nonce
-  let userId = null;
-  if (state) {
-    const { rows } = await db.query(
-      `SELECT user_id FROM tiktok_oauth_nonce WHERE nonce=$1`, [state]
-    );
-    if (rows.length) {
-      userId = rows[0].user_id;
-      await db.query(`DELETE FROM tiktok_oauth_nonce WHERE nonce=$1`, [state]);
-    }
-  }
-  if (!userId) {
-    console.error('[TikTok] Nonce não encontrado para state:', state);
-    return res.status(400).send('Sessão OAuth inválida ou expirada. Tente novamente.');
-  }
-
-  try {
-    // Troca code por access_token
-    const appKey = TIKTOK_APP_KEY();
-    const secret = TIKTOK_SECRET();
-    const ts     = Math.floor(Date.now() / 1000);
-    const body   = { app_key: appKey, app_secret: secret, auth_code: code, grant_type: 'authorized_code' };
-    const sign   = tiktokSign(secret, { app_key: appKey, timestamp: ts }, JSON.stringify(body));
-
-    const tkRes = await axios.post(
-      `${TIKTOK_BASE}/api/v2/token/get`,
-      body,
-      { params: { app_key: appKey, timestamp: ts, sign } }
-    );
-    const tk = tkRes.data?.data;
-    if (!tk?.access_token) {
-      console.error('[TikTok] Erro ao obter token:', tkRes.data);
-      return res.status(500).send('Erro ao obter token TikTok: ' + JSON.stringify(tkRes.data));
-    }
-
-    const accessToken  = tk.access_token;
-    const refreshToken = tk.refresh_token;
-    const shopId       = String(tk.open_id || tk.seller_base_region || '');
-    // open_id identifica o seller — usamos como shop_id
-    const openId       = String(tk.open_id || '');
-    const expiresAt    = new Date(Date.now() + (tk.access_token_expire_in || 3600) * 1000);
-    const refreshExp   = new Date(Date.now() + (tk.refresh_token_expire_in || 86400 * 30) * 1000);
-
-    // Busca nome da loja
-    let shopName = 'TikTok Shop';
-    try {
-      const tsNow = Math.floor(Date.now() / 1000);
-      const shopParams = tiktokParams('/api/v2/shop/get_authorized_shop', accessToken, {});
-      const shopRes = await axios.get(`${TIKTOK_BASE}/api/v2/shop/get_authorized_shop`, { params: shopParams });
-      const shops = shopRes.data?.data?.shop_list || shopRes.data?.data?.shops || [];
-      if (shops.length) shopName = shops[0].shop_name || shops[0].name || 'TikTok Shop';
-    } catch(e) {
-      console.warn('[TikTok] Não conseguiu buscar nome da loja:', e.message);
-    }
-
-    // Salva conta no banco
-    await db.query(`
-      INSERT INTO marketplace_accounts (user_id, platform, platform_shop_id, shop_name, access_token, refresh_token, token_expires_at, mode, is_active)
-      VALUES ($1,'tiktok',$2,$3,$4,$5,$6,'production',true)
-      ON CONFLICT (user_id, platform, platform_shop_id) DO UPDATE
-        SET shop_name=$3, access_token=$4, refresh_token=$5,
-            token_expires_at=$6, mode='production', is_active=true, updated_at=NOW()
-    `, [userId, openId, shopName, accessToken, refreshToken, expiresAt]);
-
-    console.log(`[TikTok] ✅ Conectado: ${shopName} (open_id=${openId}) uid=${userId}`);
-    res.redirect(`${process.env.FRONTEND_URL || 'https://salesync.shop'}?connected=tiktok`);
-  } catch(e) {
-    console.error('[TikTok] Erro callback:', e.response?.data || e.message);
-    res.status(500).send('Erro ao conectar TikTok Shop: ' + (e.response?.data?.message || e.message));
-  }
-});
-
-// ── Refresh token TikTok ──────────────────────────────────────────
-async function refreshTiktokToken(acc) {
-  try {
-    const appKey = TIKTOK_APP_KEY();
-    const secret = TIKTOK_SECRET();
-    const ts     = Math.floor(Date.now() / 1000);
-    const body   = { app_key: appKey, app_secret: secret, refresh_token: acc.refresh_token, grant_type: 'refresh_token' };
-    const sign   = tiktokSign(secret, { app_key: appKey, timestamp: ts }, JSON.stringify(body));
-    const res    = await axios.post(`${TIKTOK_BASE}/api/v2/token/refresh`, body, { params: { app_key: appKey, timestamp: ts, sign } });
-    const tk     = res.data?.data;
-    if (!tk?.access_token) return null;
-    const expiresAt = new Date(Date.now() + (tk.access_token_expire_in || 3600) * 1000);
-    const refreshExp = new Date(Date.now() + (tk.refresh_token_expire_in || 86400 * 30) * 1000);
-    await db.query(
-      `UPDATE accounts SET access_token=$1, refresh_token=$2, token_expires_at=$3, refresh_token_expires_at=$4 WHERE id=$5`,
-      [tk.access_token, tk.refresh_token || acc.refresh_token, expiresAt, refreshExp, acc.id]
-    );
-    return tk.access_token;
-  } catch(e) {
-    console.error('[TikTok] Falha ao renovar token:', e.response?.data || e.message);
-    return null;
-  }
+function estoqueAdicionar(){
+  const sku=document.getElementById('est-sku').value.trim();
+  const nome=document.getElementById('est-nome').value.trim();
+  const qtd=parseInt(document.getElementById('est-qtd').value)||0;
+  const min=parseInt(document.getElementById('est-min').value)||5;
+  if(!sku)return alert('Informe o SKU');
+  ESTOQUE[sku]={nome:nome||sku,qtd,minAlert:min,updatedAt:Date.now()};
+  estoqueS();estoqueRender();estoqueCheckAlerts();
+  ['est-sku','est-nome','est-qtd','est-min'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+}
+function estoqueAjuste(sku,delta){
+  if(!ESTOQUE[sku])return;
+  ESTOQUE[sku].qtd=Math.max(0,(ESTOQUE[sku].qtd||0)+delta);
+  ESTOQUE[sku].updatedAt=Date.now();
+  estoqueS();estoqueRender();estoqueCheckAlerts();
+}
+function estoqueSetQtd(sku,val){
+  if(!ESTOQUE[sku])return;
+  ESTOQUE[sku].qtd=Math.max(0,parseInt(val)||0);
+  ESTOQUE[sku].updatedAt=Date.now();
+  estoqueS();estoqueCheckAlerts();
+}
+function estoqueRemove(sku){
+  if(!confirm('Remover '+sku+'?'))return;
+  delete ESTOQUE[sku];estoqueS();estoqueRender();estoqueCheckAlerts();
 }
 
-// ── fetchTiktok: busca pedidos ────────────────────────────────────
-async function fetchTiktok(acc, days) {
-  // Renova token se necessário
-  let token = acc.access_token;
-  if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 300000)) {
-    token = await refreshTiktokToken(acc);
-    if (!token) {
-      await db.query(`UPDATE accounts SET status='token_invalid' WHERE id=$1`, [acc.id]);
-      throw new Error('TOKEN_INVALID:Token TikTok expirado — reconecte a loja');
-    }
-    acc = { ...acc, access_token: token };
+function estoqueRender(){
+  const lista=document.getElementById('estoque-lista');if(!lista)return;
+  const skus=Object.keys(ESTOQUE);
+  // alertas
+  const alertas=document.getElementById('estoque-alertas');
+  if(alertas){
+    const crit=skus.filter(s=>ESTOQUE[s].qtd<=0);
+    const baixos=skus.filter(s=>ESTOQUE[s].qtd>0&&ESTOQUE[s].qtd<=ESTOQUE[s].minAlert);
+    let h='';
+    if(crit.length)h+=`<div style="background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);border-radius:10px;padding:10px 14px;font-size:12px;color:var(--red2);display:flex;align-items:center;gap:8px;margin-bottom:8px"><i class="ti ti-alert-triangle"></i><strong>Estoque zerado:</strong>&nbsp;${crit.join(', ')}</div>`;
+    if(baixos.length)h+=`<div style="background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.2);border-radius:10px;padding:10px 14px;font-size:12px;color:var(--yellow2);display:flex;align-items:center;gap:8px"><i class="ti ti-alert-circle"></i><strong>Estoque baixo:</strong>&nbsp;${baixos.join(', ')}</div>`;
+    alertas.innerHTML=h;
   }
+  if(!skus.length){lista.innerHTML='<div class="empty" style="height:100px;color:var(--txt3)">Nenhum SKU cadastrado. Adicione acima ↑</div>';return;}
+  lista.innerHTML=`
+  <div class="est-row" style="background:transparent;border-color:transparent;padding:4px 14px">
+    <span style="font-size:10px;font-weight:700;color:var(--txt3)">SKU</span>
+    <span style="font-size:10px;font-weight:700;color:var(--txt3)">PRODUTO</span>
+    <span style="font-size:10px;font-weight:700;color:var(--txt3)">QUANTIDADE</span>
+    <span style="font-size:10px;font-weight:700;color:var(--txt3)">MÍNIMO</span>
+    <span style="font-size:10px;font-weight:700;color:var(--txt3)">STATUS</span>
+    <span style="font-size:10px;font-weight:700;color:var(--txt3)">ATUALIZADO</span>
+    <span></span>
+  </div>
+  ${skus.map(sku=>{
+    const e=ESTOQUE[sku];
+    const cls=e.qtd<=0?'critico':e.qtd<=e.minAlert?'baixo':'';
+    const st=e.qtd<=0?'<span style="color:var(--red2);font-weight:700;font-size:11px">🔴 Zerado</span>':e.qtd<=e.minAlert?'<span style="color:var(--yellow2);font-weight:700;font-size:11px">🟡 Baixo</span>':'<span style="color:var(--green2);font-size:11px">🟢 OK</span>';
+    const ua=e.updatedAt?new Date(e.updatedAt).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'—';
+    return `<div class="est-row ${cls}">
+      <div><div class="est-label">SKU</div><div class="est-val" style="font-size:11px;color:var(--p3)">${sku}</div></div>
+      <div><div class="est-label">PRODUTO</div><div class="est-val" style="font-size:12px">${e.nome}</div></div>
+      <div style="display:flex;align-items:center;gap:5px">
+        <button onclick="estoqueAjuste('${sku}',-1)" style="width:26px;height:26px;border:1px solid var(--border2);background:var(--bg4);border-radius:6px;cursor:pointer;color:var(--txt2);font-size:15px;display:flex;align-items:center;justify-content:center;flex-shrink:0">−</button>
+        <input type="number" value="${e.qtd}" min="0" onchange="estoqueSetQtd('${sku}',this.value)" style="width:54px;height:28px;text-align:center;background:var(--bg4);border:1px solid var(--border2);border-radius:6px;color:var(--txt);font-size:13px;font-weight:700"/>
+        <button onclick="estoqueAjuste('${sku}',1)" style="width:26px;height:26px;border:1px solid var(--border2);background:var(--bg4);border-radius:6px;cursor:pointer;color:var(--txt2);font-size:15px;display:flex;align-items:center;justify-content:center;flex-shrink:0">+</button>
+      </div>
+      <div><div class="est-label">MÍNIMO</div><div class="est-val">${e.minAlert}</div></div>
+      <div>${st}</div>
+      <div style="font-size:10px;color:var(--txt3)">${ua}</div>
+      <button onclick="estoqueRemove('${sku}')" style="width:30px;height:30px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.18);border-radius:8px;color:var(--red2);cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center"><i class="ti ti-trash"></i></button>
+    </div>`;
+  }).join('')}`;
+}
 
-  const nowTs   = Math.floor(Date.now() / 1000);
-  const sinceTs = Math.floor((Date.now() - days * 86400000) / 1000);
+function estoqueAbaterPedidos(orders){
+  const jaAbatidos=JSON.parse(sessionStorage.getItem('ss_abatidos')||'[]');
+  let mudou=false;
+  for(const o of orders){
+    if(jaAbatidos.includes(o.id)||o.status==='cancelled')continue;
+    const sku=o.item_sku||'';
+    if(sku&&ESTOQUE[sku]){
+      ESTOQUE[sku].qtd=Math.max(0,(ESTOQUE[sku].qtd||0)-(parseInt(o.quantity)||1));
+      ESTOQUE[sku].updatedAt=Date.now();
+      jaAbatidos.push(o.id);mudou=true;
+    }
+  }
+  if(mudou){estoqueS();sessionStorage.setItem('ss_abatidos',JSON.stringify(jaAbatidos));estoqueCheckAlerts();}
+}
 
-  // Helper GET TikTok
-  async function tiktokGet(path, extra = {}) {
-    const params = tiktokParams(path, token, extra);
-    const { data } = await axios.get(`${TIKTOK_BASE}${path}`, { params });
-    if (data?.code && data.code !== 0) {
-      const msg = data.message || data.msg || JSON.stringify(data);
-      if (String(data.code) === '105001' || msg.toLowerCase().includes('token')) {
-        await db.query(`UPDATE accounts SET status='token_invalid' WHERE id=$1`, [acc.id]);
-        throw new Error(`TOKEN_INVALID:${msg}`);
+function estoqueCheckAlerts(){
+  const old=document.getElementById('stock-alert-global');if(old)old.remove();
+  const crit=Object.entries(ESTOQUE).filter(([s,e])=>e.qtd<=e.minAlert);
+  if(!crit.length)return;
+  const badge=document.createElement('div');
+  badge.id='stock-alert-global';badge.className='stock-alert-badge';
+  badge.onclick=()=>openMo('mo-estoque');
+  const nomes=crit.slice(0,3).map(([s,e])=>`${e.nome} (${e.qtd})`).join(', ');
+  const extra=crit.length>3?` +${crit.length-3} mais`:'';
+  badge.innerHTML=`<i class="ti ti-alert-triangle"></i> Estoque baixo: ${nomes}${extra} <i class="ti ti-x" onclick="event.stopPropagation();this.parentElement.remove()" style="margin-left:8px;opacity:.7;font-size:16px"></i>`;
+  document.body.appendChild(badge);
+  setTimeout(()=>{if(badge.parentElement){badge.style.transition='opacity .4s';badge.style.opacity='0';setTimeout(()=>badge.remove(),400);}},8000);
+}
+document.addEventListener('DOMContentLoaded',()=>setTimeout(estoqueCheckAlerts,3000));
+
+// ══════════════════════════════════════
+// NOTA FISCAL — lista + wizard
+// ══════════════════════════════════════
+let NF_EMITIDAS=JSON.parse(localStorage.getItem('ss_nf_emitidas')||'{}'); // {order_id: true}
+let NF_FILA=[];     // pedidos selecionados para emitir
+let NF_FILA_IDX=0;  // índice atual no wizard
+
+function nfCarregarPedidos(){
+  const lista=document.getElementById('nf-pedidos-lista');if(!lista)return;
+  // Filtra ALL: só vendas normais (não Full) e não canceladas
+  const pedidos=(typeof ALL!=='undefined'?ALL:[])
+    .filter(o=>o.status!=='cancelled' && o.fulfillment_type!=='full' && !NF_EMITIDAS[o.id])
+    .sort((a,b)=>new Date(b.order_date)-new Date(a.order_date));
+
+  if(!pedidos.length){
+    lista.innerHTML='<div class="empty" style="height:80px;color:var(--txt3)">Nenhuma venda normal pendente de NF. ✅</div>';return;
+  }
+  const f=v=>v!=null?'R$ '+Number(v).toLocaleString('pt-BR',{minimumFractionDigits:2}):'—';
+  lista.innerHTML=`
+  <div class="nf-row" style="background:transparent;border-color:transparent;padding:4px 14px">
+    <input type="checkbox" id="nf-sel-all" onchange="nfSelecionarTodos(this.checked)" title="Selecionar todos"/>
+    <span style="font-size:10px;font-weight:700;color:var(--txt3)">DATA</span>
+    <span style="font-size:10px;font-weight:700;color:var(--txt3)">PRODUTO</span>
+    <span style="font-size:10px;font-weight:700;color:var(--txt3)">COMPRADOR</span>
+    <span style="font-size:10px;font-weight:700;color:var(--txt3)">VALOR</span>
+    <span style="font-size:10px;font-weight:700;color:var(--txt3)">PLATAFORMA</span>
+    <span style="font-size:10px;font-weight:700;color:var(--txt3)">STATUS NF</span>
+  </div>
+  ${pedidos.map(o=>`
+  <div class="nf-row ${NF_EMITIDAS[o.id]?'emitida':''}">
+    <input type="checkbox" class="nf-sel" value="${o.id}" ${NF_EMITIDAS[o.id]?'disabled checked':''}/>
+    <div style="font-size:10px;color:var(--txt3)">${new Date(o.order_date).toLocaleDateString('pt-BR')}</div>
+    <div>
+      <div style="font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px">${o.item_title||'—'}</div>
+      <div style="font-size:10px;color:var(--txt3)">${o.platform_order_id}</div>
+    </div>
+    <div style="font-size:11px;color:var(--txt2)">${o.buyer_name||'—'}</div>
+    <div style="font-size:12px;font-weight:700">${f(o.total_amount)}</div>
+    <div><span class="plat-chip ${o.platform}">${o.platform?.toUpperCase()}</span></div>
+    <div>${NF_EMITIDAS[o.id]?'<span style="color:var(--green2);font-size:11px">✅ Emitida</span>':'<span style="color:var(--txt3);font-size:11px">⏳ Pendente</span>'}</div>
+  </div>`).join('')}`;
+}
+
+function nfSelecionarTodos(v){
+  document.querySelectorAll('.nf-sel:not(:disabled)').forEach(cb=>cb.checked=v);
+}
+
+function nfEmitirSelecionados(){
+  const selecionados=[...document.querySelectorAll('.nf-sel:checked:not(:disabled)')].map(cb=>cb.value);
+  if(!selecionados.length)return alert('Selecione pelo menos uma venda.');
+  NF_FILA=(typeof ALL!=='undefined'?ALL:[]).filter(o=>selecionados.includes(o.id));
+  NF_FILA_IDX=0;
+  document.getElementById('nf-lista-panel').style.display='none';
+  document.getElementById('nf-wizard').style.display='block';
+  nfWizardRender();
+}
+
+function nfVoltarLista(){
+  document.getElementById('nf-wizard').style.display='none';
+  document.getElementById('nf-lista-panel').style.display='block';
+  nfCarregarPedidos();
+}
+
+function nfWizardRender(){
+  const total=NF_FILA.length,idx=NF_FILA_IDX,o=NF_FILA[idx];
+  if(!o){nfVoltarLista();return;}
+
+  // Steps
+  const prog=document.getElementById('nf-wizard-progress');
+  if(prog)prog.textContent=`Pedido ${idx+1} de ${total}`;
+  const steps=document.getElementById('nf-wizard-steps');
+  if(steps)steps.innerHTML=NF_FILA.map((_,i)=>`<div class="nf-step-dot ${i<idx?'ok':i===idx?'ativo':''}">${i<idx?'✓':i+1}</div>`).join('');
+
+  const f=v=>v!=null?'R$ '+Number(v).toLocaleString('pt-BR',{minimumFractionDigits:2}):'—';
+  document.getElementById('nf-wizard-body').innerHTML=`
+  <!-- Info do pedido -->
+  <div style="background:var(--bg3);border:1px solid var(--border2);border-radius:12px;padding:14px 16px;margin-bottom:14px;display:flex;gap:14px;align-items:flex-start">
+    <div style="flex:1">
+      <div style="font-size:13px;font-weight:700;margin-bottom:4px">${o.item_title||'Produto'}</div>
+      <div style="font-size:11px;color:var(--txt3)">Pedido: <strong style="color:var(--txt2)">${o.platform_order_id}</strong> · ${o.platform?.toUpperCase()} · ${new Date(o.order_date).toLocaleDateString('pt-BR')}</div>
+      <div style="font-size:11px;color:var(--txt3);margin-top:3px">Comprador: <strong style="color:var(--txt2)">${o.buyer_name||'—'}</strong></div>
+    </div>
+    <div style="text-align:right;flex-shrink:0">
+      <div style="font-size:18px;font-weight:800;color:var(--green2)">${f(o.total_amount)}</div>
+      <div style="font-size:10px;color:var(--txt3)">valor de venda</div>
+    </div>
+  </div>
+
+  <!-- Status busca CPF (só ML) -->
+  ${o.platform==='mercadolivre'?`<div id="nfw-cpf-status" style="background:rgba(2,132,199,.07);border:1px solid rgba(2,132,199,.18);border-radius:10px;padding:10px 14px;font-size:11px;color:var(--blue2);display:flex;align-items:center;gap:8px;margin-bottom:12px"><div class="spin" style="width:14px;height:14px;border-width:2px;flex-shrink:0"></div> Buscando CPF do comprador no Mercado Livre...</div>`:''}
+
+  <!-- Campos NF -->
+  <div style="background:var(--bg3);border:1px solid var(--border2);border-radius:12px;padding:16px;margin-bottom:14px">
+    <div style="font-size:10px;font-weight:800;color:var(--txt3);margin-bottom:12px">DADOS PARA A NOTA FISCAL DE SAÍDA</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div class="nf-campo"><label>CPF / CNPJ do destinatário</label><input id="nfw-dest-doc" placeholder="000.000.000-00" value="${o.buyer_cpf||''}"/></div>
+      <div class="nf-campo"><label>Nome / Razão social</label><input id="nfw-dest-nome" placeholder="Nome do comprador" value="${o.buyer_name||''}"/></div>
+      <div class="nf-campo"><label>CFOP</label>
+        <select id="nfw-cfop">
+          <option value="6102">6102 — Venda fora do estado</option>
+          <option value="5102">5102 — Venda dentro do estado</option>
+          <option value="6108">6108 — Venda prod. adquirido</option>
+        </select>
+      </div>
+      <div class="nf-campo"><label>Natureza da operação</label><input id="nfw-natureza" value="Venda de mercadoria"/></div>
+      <div class="nf-campo"><label>Valor do produto (R$)</label><input id="nfw-valor" type="number" step="0.01" value="${o.total_amount||''}"/></div>
+      <div class="nf-campo"><label>Qtd</label><input id="nfw-qtd" type="number" value="${o.quantity||1}"/></div>
+      <div class="nf-campo" style="grid-column:1/-1"><label>Descrição do produto</label><input id="nfw-desc" value="${o.item_title||''}"/></div>
+      <div class="nf-campo"><label>NCM</label><input id="nfw-ncm" placeholder="00000000"/></div>
+      <div class="nf-campo"><label>Unidade</label><input id="nfw-un" value="UN"/></div>
+    </div>
+  </div>
+
+  <!-- Ações -->
+  <div style="display:flex;gap:10px;align-items:center">
+    ${idx>0?`<button onclick="NF_FILA_IDX--;nfWizardRender()" style="background:var(--bg3);border:1px solid var(--border2);border-radius:8px;padding:10px 18px;color:var(--txt2);cursor:pointer;font-size:12px;font-weight:600"><i class="ti ti-arrow-left"></i> Anterior</button>`:''}
+    <button onclick="nfWizardEmitir(${idx})" class="btn primary" style="flex:1;height:42px;font-size:13px;font-weight:700"><i class="ti ti-file-check"></i> Emitir NF e ${idx<total-1?'avançar':'finalizar'}</button>
+    <button onclick="nfWizardPular(${idx})" style="background:var(--bg3);border:1px solid var(--border2);border-radius:8px;padding:10px 18px;color:var(--txt3);cursor:pointer;font-size:12px">Pular <i class="ti ti-arrow-right"></i></button>
+  </div>
+  <div id="nfw-result" style="margin-top:10px;font-size:12px"></div>`;
+
+  // Busca CPF automaticamente para pedidos do ML
+  if(o.platform==='mercadolivre') nfBuscarCpfML(o.platform_order_id||o.id);
+}
+
+// Busca CPF do comprador via backend (ML billing_info)
+async function nfBuscarCpfML(orderId){
+  const statusEl=document.getElementById('nfw-cpf-status');
+  try {
+    const d=await api(`/api/ml/billing/${orderId}`);
+    if(d.ok && d.doc){
+      const docInput=document.getElementById('nfw-dest-doc');
+      const nomeInput=document.getElementById('nfw-dest-nome');
+      if(docInput&&!docInput.value) docInput.value=d.doc;
+      if(nomeInput&&!nomeInput.value&&d.buyer_name) nomeInput.value=d.buyer_name;
+      // Preenche endereço se tiver campos
+      if(d.address){
+        const fields={
+          'nfw-end-rua':d.address.street+' '+d.address.number,
+          'nfw-end-bairro':d.address.neighborhood,
+          'nfw-end-cidade':d.address.city,
+          'nfw-end-uf':d.address.state,
+          'nfw-end-cep':d.address.zip,
+        };
+        Object.entries(fields).forEach(([id,val])=>{const el=document.getElementById(id);if(el&&val?.trim())el.value=val.trim();});
       }
-      throw new Error(`[TikTok API] code=${data.code} msg=${msg}`);
+      if(statusEl)statusEl.innerHTML=`<i class="ti ti-circle-check" style="color:var(--green2)"></i> <span style="color:var(--green2)">CPF/CNPJ obtido do ML: <strong>${d.doc}</strong></span>`;
+    } else {
+      if(statusEl)statusEl.innerHTML=`<i class="ti ti-alert-circle" style="color:var(--yellow2)"></i> <span style="color:var(--yellow2)">CPF não disponível automaticamente. Preencha manualmente.</span>`;
     }
-    return data;
-  }
-
-  // 1. Lista pedidos paginando
-  const allOrderIds = [];
-  const seenIds     = new Set();
-  let cursor        = null;
-  let hasMore       = true;
-
-  while (hasMore) {
-    const extra = {
-      create_time_from: sinceTs,
-      create_time_to:   nowTs,
-      page_size:        50,
-    };
-    if (cursor) extra.cursor = cursor;
-
-    const data = await tiktokGet('/api/v2/order/search', extra);
-    const list = data?.data?.order_list || data?.data?.orders || [];
-    for (const o of list) {
-      const id = o.order_id || o.id;
-      if (id && !seenIds.has(id)) { seenIds.add(id); allOrderIds.push(id); }
-    }
-    hasMore = data?.data?.more || data?.data?.has_more || false;
-    cursor  = data?.data?.next_cursor || data?.data?.cursor || null;
-    if (!list.length || !hasMore) break;
-  }
-  console.log(`[TikTok] ${allOrderIds.length} pedidos encontrados`);
-  if (!allOrderIds.length) return [];
-
-  // 2. Busca detalhes em lotes de 50
-  const allOrders = [];
-  for (let i = 0; i < allOrderIds.length; i += 50) {
-    const batch = allOrderIds.slice(i, i + 50);
-    const data  = await tiktokGet('/api/v2/order/get_order_detail', { order_id_list: batch.join(',') });
-    const list  = data?.data?.order_list || data?.data?.orders || [];
-    allOrders.push(...list);
-  }
-
-  return allOrders.map(o => {
-    const item    = o.item_list?.[0] || o.line_items?.[0] || {};
-    const status  = TIKTOK_STATUS[o.order_status] || 'paid';
-    const orderTs = o.paid_time || o.create_time || 0;
-
-    // Valores
-    const totalAmount  = parseFloat(o.payment?.total_amount ?? o.subtotal ?? item.sku_sale_price ?? 0);
-    const buyerPaid    = parseFloat(o.payment?.buyer_total_amount ?? o.payment?.total_amount ?? totalAmount);
-    const platformFee  = parseFloat(o.payment?.platform_fee ?? o.platform_fee ?? 0);
-    const shippingFee  = parseFloat(o.payment?.shipping_fee ?? o.shipping_fee ?? 0);
-    const commission   = parseFloat(o.payment?.commission_fee ?? o.commission_fee ?? 0);
-    const sellerIncome = parseFloat(o.payment?.seller_income ?? o.seller_income ?? 0);
-
-    // Produto
-    const itemImage = item.sku_image ?? item.product_image ?? item.image_url ?? null;
-    const qty       = parseInt(item.quantity ?? 1, 10);
-    const skuPrice  = parseFloat(item.sku_sale_price ?? item.sale_price ?? 0);
-
-    return {
-      id:                o.order_id || o.id,
-      platform:          'tiktok',
-      platform_order_id: o.order_id || o.id,
-      shop_name:         acc.shop_name,
-      fulfillment_type:  'normal',
-      status,
-      buyer_name:        o.buyer_email?.split('@')[0] || o.recipient_address?.name || '',
-      total_amount:      skuPrice * qty || totalAmount,
-      paid_amount:       buyerPaid,
-      platform_fee:      platformFee || commission,
-      shipping_fee:      shippingFee,
-      reverse_shipping_fee: 0,
-      tax_amount:        0,
-      discount_amount:   parseFloat(o.payment?.discount_total ?? 0),
-      shopee_discount:   0,
-      shopee_escrow:     sellerIncome,
-      shopee_commission: commission,
-      shopee_service_fee:0,
-      quantity:          qty,
-      order_date:        new Date(orderTs * 1000).toISOString(),
-      item_title:        item.product_name ?? item.title ?? 'Produto TikTok',
-      item_image:        itemImage,
-      item_sku:          item.seller_sku ?? item.sku_id ?? '',
-      item_id:           String(item.product_id ?? ''),
-      model_id:          String(item.sku_id ?? ''),
-      model_name:        item.sku_name ?? '',
-      payment_method:    o.payment?.payment_method ?? '',
-      shipping_type:     o.shipping_type ?? '',
-      tracking_url:      '',
-      weight_kg:         0,
-    };
-  });
-}
-
-// ═══════════════════════════════════════════════════════════════
-// FIM TIKTOK SHOP
-// ═══════════════════════════════════════════════════════════════
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v5.2 rodando na porta ${PORT}`));
+  } catch(e){
+    const msg=e.message||'Erro';
+    con
