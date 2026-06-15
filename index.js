@@ -576,6 +576,151 @@ ${events.length ? `<div class="card"><h2>Events (${events.length} entradas)</h2>
 });
 
 
+// ── DEBUG SHOPEE ──
+app.get('/debug/shopee', auth, async (req, res) => {
+  const days = parseInt(req.query.days || '30');
+  const css = `*{box-sizing:border-box;margin:0;padding:0;}body{font-family:'Segoe UI',sans-serif;background:#0D1117;color:#e6edf3;padding:20px;}
+h1{color:#EE4D2D;margin-bottom:4px;}.sub{color:#64748B;font-size:13px;margin-bottom:20px;}
+.section{background:#161B26;border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:16px;margin-bottom:16px;}
+.section h2{font-size:13px;color:#94A3B8;text-transform:uppercase;letter-spacing:.6px;margin-bottom:12px;}
+pre{background:#0D1117;border-radius:8px;padding:12px;overflow-x:auto;font-size:11px;color:#38BDF8;border:1px solid rgba(255,255,255,.06);}
+.row{display:flex;justify-content:space-between;font-size:12px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.04);}
+.l{color:#64748B;}.v{color:#F8FAFC;font-weight:600;}
+.ok{color:#10B981;}.err{color:#F43F5E;}.warn{color:#FBBF24;}
+.step{background:#1E2535;border-radius:8px;padding:12px;margin-bottom:10px;}
+.step h3{font-size:12px;color:#A855F7;margin-bottom:8px;}`;
+
+  const html = (body) => `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"/><title>Debug Shopee</title><style>${css}</style></head><body>${body}</body></html>`;
+
+  try {
+    // 1. Busca conta no banco
+    const { rows } = await db.query(
+      `SELECT * FROM marketplace_accounts WHERE user_id=$1 AND platform='shopee' AND is_active=true LIMIT 1`,
+      [req.user.id]
+    );
+    if (!rows.length) return res.send(html(`<h1>🛑 Shopee não conectada</h1><p style="color:#F43F5E;padding:20px">Nenhuma conta Shopee ativa encontrada no banco para este usuário.</p>`));
+
+    const acc = rows[0];
+    const pid  = SHOPEE_PID();
+    const key  = SHOPEE_KEY();
+    const mode = process.env.SHOPEE_ENV === 'test' ? 'SANDBOX' : 'PRODUÇÃO';
+
+    let steps = `<h1>🛒 Debug Shopee</h1>
+<div class="sub">Modo: <strong style="color:${mode==='PRODUÇÃO'?'#10B981':'#FBBF24'}">${mode}</strong> · Base: ${SHOPEE_BASE} · ${new Date().toLocaleString('pt-BR')}</div>
+
+<div class="section"><h2>1. Conta no banco</h2>
+<div class="row"><span class="l">DB ID</span><span class="v">${acc.id}</span></div>
+<div class="row"><span class="l">platform_shop_id</span><span class="v">${acc.platform_shop_id}</span></div>
+<div class="row"><span class="l">shop_name (no banco)</span><span class="v">${acc.shop_name || '<span class="warn">vazio</span>'}</span></div>
+<div class="row"><span class="l">access_token</span><span class="v">${acc.access_token ? '✅ presente ('+acc.access_token.slice(0,12)+'...)' : '<span class="err">❌ AUSENTE</span>'}</span></div>
+<div class="row"><span class="l">refresh_token</span><span class="v">${acc.refresh_token ? '✅ presente' : '<span class="warn">⚠ ausente</span>'}</span></div>
+<div class="row"><span class="l">token_expires_at</span><span class="v">${acc.token_expires_at ? new Date(acc.token_expires_at).toLocaleString('pt-BR') : '—'}</span></div>
+<div class="row"><span class="l">Partner ID (env)</span><span class="v">${pid || '<span class="err">❌ SHOPEE_PARTNER_ID não definido</span>'}</span></div>
+</div>`;
+
+    // 2. Testa GET /api/v2/shop/get_shop_info
+    let token = acc.access_token;
+    const shopId = String(acc.platform_shop_id);
+
+    const testEndpoint = async (label, path, extraParams = {}) => {
+      const ts   = Math.floor(Date.now() / 1000);
+      const sign = shopeeSign(pid, path, ts, key, token, shopId);
+      const params = { partner_id: pid, shop_id: shopId, access_token: token, timestamp: ts, sign, ...extraParams };
+      try {
+        const { data } = await axios.get(`${SHOPEE_BASE}${path}`, { params });
+        return { ok: true, label, path, data, params: { ...params, access_token: '***', sign: sign.slice(0,8)+'...' } };
+      } catch(e) {
+        return { ok: false, label, path, error: e.response?.data || e.message, status: e.response?.status, params: { ...params, access_token: '***', sign: sign.slice(0,8)+'...' } };
+      }
+    };
+
+    // 2a. Shop info
+    const shopInfo = await testEndpoint('GET /api/v2/shop/get_shop_info', '/api/v2/shop/get_shop_info');
+    steps += `<div class="section"><h2>2. Shop Info (nome da loja)</h2>
+<div class="row"><span class="l">Status</span><span class="v ${shopInfo.ok?'ok':'err'}">${shopInfo.ok ? '✅ OK' : '❌ ERRO '+shopInfo.status}</span></div>`;
+    if (shopInfo.ok) {
+      const si = shopInfo.data?.response || shopInfo.data || {};
+      steps += `<div class="row"><span class="l">shop_name</span><span class="v ok">${si.shop_name || si.name || '—'}</span></div>
+<div class="row"><span class="l">shop_id</span><span class="v">${si.shop_id || shopId}</span></div>
+<div class="row"><span class="l">status</span><span class="v">${si.status || '—'}</span></div>
+<div class="row"><span class="l">region</span><span class="v">${si.region || '—'}</span></div>`;
+
+      // Atualiza nome no banco automaticamente se estiver vazio
+      const name = si.shop_name || si.name;
+      if (name && (!acc.shop_name || acc.shop_name.startsWith('Shopee Loja'))) {
+        await db.query(`UPDATE marketplace_accounts SET shop_name=$1, updated_at=NOW() WHERE id=$2`, [name, acc.id]);
+        steps += `<div class="row"><span class="l">✅ Nome atualizado no banco</span><span class="v ok">${name}</span></div>`;
+      }
+    } else {
+      steps += `<pre>${JSON.stringify(shopInfo.error, null, 2)}</pre>`;
+    }
+    steps += `<details style="margin-top:8px"><summary style="cursor:pointer;color:#64748B;font-size:11px">JSON completo</summary><pre>${JSON.stringify(shopInfo.data||shopInfo.error, null, 2)}</pre></details></div>`;
+
+    // 2b. Order list
+    const since = Math.floor((Date.now() - days * 86400000) / 1000);
+    const timeTo = Math.floor(Date.now() / 1000);
+    const orderList = await testEndpoint('GET /api/v2/order/get_order_list', '/api/v2/order/get_order_list', {
+      time_range_field: 'create_time', time_from: since, time_to: timeTo, page_size: 5, order_status: 'ALL'
+    });
+    steps += `<div class="section"><h2>3. Order List (últimos ${days} dias)</h2>
+<div class="row"><span class="l">Status</span><span class="v ${orderList.ok?'ok':'err'}">${orderList.ok ? '✅ OK' : '❌ ERRO '+orderList.status}</span></div>`;
+    if (orderList.ok) {
+      const orders = orderList.data?.response?.order_list || [];
+      const more   = orderList.data?.response?.more;
+      steps += `<div class="row"><span class="l">Pedidos retornados</span><span class="v">${orders.length}</span></div>
+<div class="row"><span class="l">Tem mais páginas?</span><span class="v">${more ? 'Sim' : 'Não'}</span></div>`;
+      if (orders.length) {
+        steps += `<div class="row"><span class="l">Primeiro order_sn</span><span class="v">${orders[0].order_sn}</span></div>
+<div class="row"><span class="l">Último order_sn</span><span class="v">${orders[orders.length-1].order_sn}</span></div>`;
+
+        // 2c. Detail do primeiro pedido
+        const firstSn = orders[0].order_sn;
+        const orderDetail = await testEndpoint('GET /api/v2/order/get_order_detail', '/api/v2/order/get_order_detail', {
+          order_sn_list: firstSn,
+          response_optional_fields: 'buyer_username,pay_time,item_list,actual_shipping_fee,commission_fee,service_fee,escrow_amount,buyer_total_amount,payment_method'
+        });
+        steps += `</div><div class="section"><h2>4. Order Detail (1º pedido: ${firstSn})</h2>
+<div class="row"><span class="l">Status</span><span class="v ${orderDetail.ok?'ok':'err'}">${orderDetail.ok ? '✅ OK' : '❌ ERRO '+orderDetail.status}</span></div>`;
+        if (orderDetail.ok) {
+          const o = orderDetail.data?.response?.order_list?.[0] || {};
+          steps += `<div class="row"><span class="l">order_status</span><span class="v">${o.order_status||'—'}</span></div>
+<div class="row"><span class="l">buyer_username</span><span class="v">${o.buyer_username||'—'}</span></div>
+<div class="row"><span class="l">buyer_total_amount</span><span class="v">${o.buyer_total_amount||'—'}</span></div>
+<div class="row"><span class="l">commission_fee</span><span class="v">${o.commission_fee||'—'}</span></div>
+<div class="row"><span class="l">service_fee</span><span class="v">${o.service_fee||'—'}</span></div>
+<div class="row"><span class="l">actual_shipping_fee</span><span class="v">${o.actual_shipping_fee||'—'}</span></div>
+<div class="row"><span class="l">escrow_amount</span><span class="v">${o.escrow_amount||'—'}</span></div>
+<div class="row"><span class="l">item_list[0].item_name</span><span class="v">${o.item_list?.[0]?.item_name||'—'}</span></div>
+<div class="row"><span class="l">item_list[0].model_sku</span><span class="v">${o.item_list?.[0]?.model_sku||'—'}</span></div>
+<details style="margin-top:8px"><summary style="cursor:pointer;color:#64748B;font-size:11px">JSON completo do pedido</summary><pre>${JSON.stringify(o, null, 2)}</pre></details>`;
+        } else {
+          steps += `<pre>${JSON.stringify(orderDetail.error, null, 2)}</pre>`;
+        }
+        steps += `</div>`;
+      } else {
+        steps += `<div style="color:#FBBF24;padding:8px">⚠ Nenhum pedido nos últimos ${days} dias. Tente ?days=90 ou ?days=180</div>`;
+      }
+    } else {
+      steps += `<pre>${JSON.stringify(orderList.error, null, 2)}</pre>`;
+    }
+    steps += `</div>`;
+
+    // 3. Parâmetros usados
+    steps += `<div class="section"><h2>5. Configuração</h2>
+<div class="row"><span class="l">SHOPEE_BASE</span><span class="v">${SHOPEE_BASE}</span></div>
+<div class="row"><span class="l">SHOPEE_ENV</span><span class="v">${process.env.SHOPEE_ENV || '(não definido = produção)'}</span></div>
+<div class="row"><span class="l">SHOPEE_PARTNER_ID</span><span class="v">${pid}</span></div>
+<div class="row"><span class="l">SHOPEE_REDIRECT_URI</span><span class="v">${process.env.SHOPEE_REDIRECT_URI||'—'}</span></div>
+<div class="row"><span class="l">shop_id no banco</span><span class="v">${shopId}</span></div>
+<div class="row"><span class="l">Token expira</span><span class="v">${acc.token_expires_at ? new Date(acc.token_expires_at).toLocaleString('pt-BR') : '—'}</span></div>
+</div>`;
+
+    res.send(html(steps));
+  } catch(e) {
+    res.send(`<pre style="padding:20px;color:red">${e.message}\n${e.stack}</pre>`);
+  }
+});
+
 // ── REFRESH TOKEN ML ──
 async function refreshMLToken(account) {
   try {
@@ -970,9 +1115,12 @@ async function fetchML(acc, days) {
 }
 
 // ── SHOPEE ──
+// Render está nos EUA → usar endpoint US (.com.br) em produção.
+// Sandbox: sempre .shopee.sg (único domínio sandbox disponível para todos).
+// Referência: https://open.shopee.com/documents/v2/v2.getting_started?module=87&type=2
 const SHOPEE_BASE = process.env.SHOPEE_ENV === 'test'
   ? 'https://openplatform.sandbox.test-stable.shopee.sg'
-  : 'https://partner.shopeemobile.com';
+  : (process.env.SHOPEE_API_BASE || 'https://openplatform.shopee.com.br');
 const SHOPEE_PID  = () => String(process.env.SHOPEE_PARTNER_ID || '');
 const SHOPEE_KEY  = () => String(process.env.SHOPEE_PARTNER_KEY || '');
 
@@ -2302,14 +2450,27 @@ app.get('/callback/mercadolivre', async (req, res) => {
 
 // ── OAUTH SHOPEE ──
 app.get('/auth/shopee', (req, res) => {
-  const ts=Math.floor(Date.now()/1000), path='/api/v2/shop/auth_partner';
-  const sign=shopeeSign(SHOPEE_PID(), path, ts, SHOPEE_KEY());
-  const cb=encodeURIComponent(`${process.env.SHOPEE_REDIRECT_URI}?uid=${req.query.user_id||''}`);
-  res.redirect(`${SHOPEE_BASE}${path}?partner_id=${SHOPEE_PID()}&timestamp=${ts}&sign=${sign}&redirect=${cb}`);
+  const ts   = Math.floor(Date.now() / 1000);
+  const path = '/api/v2/shop/auth_partner';
+  const sign = shopeeSign(SHOPEE_PID(), path, ts, SHOPEE_KEY());
+
+  // SHOPEE_REDIRECT_URI deve ser EXATAMENTE o domínio cadastrado no Shopee Partner Console.
+  // Exemplo: https://api2.salesync.shop/callback/shopee
+  // O uid vai no state (não no redirect) pois a Shopee não aceita query params extras no redirect.
+  const redirectUri = process.env.SHOPEE_REDIRECT_URI || '';
+  const uid = req.query.user_id || '';
+
+  // Shopee v2: state é passado via parâmetro separado (retornado como-está no callback)
+  const authUrl = `${SHOPEE_BASE}${path}?partner_id=${SHOPEE_PID()}&timestamp=${ts}&sign=${sign}&redirect=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(uid)}`;
+  console.log('[Shopee Auth] redirect to:', authUrl);
+  res.redirect(authUrl);
 });
 
 app.get('/callback/shopee', async (req, res) => {
-  const { code, shop_id, uid } = req.query;
+  // uid pode vir via state (novo) ou via query param ?uid= (legado)
+  const { code, shop_id, state } = req.query;
+  const uid = req.query.uid || state || '';
+  console.log('[Shopee Callback] code:', code ? 'ok' : 'MISSING', '| shop_id:', shop_id, '| uid:', uid);
   if (!code) return res.redirect('https://salesync.shop?error=shopee_no_code');
   try {
     const ts=Math.floor(Date.now()/1000), path='/api/v2/auth/token/get';
