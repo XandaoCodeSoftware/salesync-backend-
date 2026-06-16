@@ -6229,9 +6229,9 @@ app.get('/api/ml/search', auth, async (req, res) => {
   if (!q) return res.status(400).json({ error: 'q obrigatorio' });
 
   try {
-    // _NoIndex_True força resultados de busca normais (evita redirecionar pra micro-landing de categoria)
+    // _Desde_1_NoIndex_True força resultados de busca normais (evita micro-landing de categoria)
     const qSlug = String(q).trim().replace(/\s+/g, '-');
-    const mlUrl = `https://lista.mercadolivre.com.br/${encodeURIComponent(qSlug)}_NoIndex_True`;
+    const mlUrl = `https://lista.mercadolivre.com.br/${encodeURIComponent(qSlug)}_Desde_1_NoIndex_True`;
 
     const resp = await axios.get(mlUrl, {
       headers: {
@@ -6255,10 +6255,16 @@ app.get('/api/ml/search', auth, async (req, res) => {
     const html = resp.data;
     const maxLimit = Math.min(parseInt(limit || 50), 100);
 
-    // Modo debug: mostra trecho do HTML para diagnosticar estrutura
+    // Modo debug: mostra estrutura real da página
     if (req.query.debug === '1') {
-      const snippet = html.substring(0, 4000);
-      return res.json({ ok: true, debug: true, htmlLength: html.length, snippet });
+      const hasNextData = html.includes('__NEXT_DATA__');
+      const hasMicroLanding = html.includes('micro-landing');
+      const hasSearchLayout = html.includes('ui-search-layout');
+      const hasResults = html.includes('ui-search-result');
+      // Extrai trecho do __NEXT_DATA__ se existir
+      const ndIdx = html.indexOf('"__NEXT_DATA__"');
+      const ndSnippet = ndIdx >= 0 ? html.substring(ndIdx, ndIdx + 500) : null;
+      return res.json({ ok: true, debug: true, htmlLength: html.length, finalUrl: resp.request?.res?.responseUrl || mlUrl, hasNextData, hasMicroLanding, hasSearchLayout, hasResults, ndSnippet });
     }
 
     // ── Tentativa 1: __NEXT_DATA__ (Next.js embute tudo em JSON)
