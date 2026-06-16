@@ -6221,6 +6221,101 @@ app.get('/api/ml/token', auth, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+// v2.0 | 2026-06-16 | Busca no ML via scraping (contorna bloqueio de IP Cloudflare)
+// ═══════════════════════════════════════════════════════════════
+app.get('/api/ml/search', auth, async (req, res) => {
+  const { q, sort, limit } = req.query;
+
+  if (!q) return res.status(400).json({ error: 'q obrigatorio' });
+
+  try {
+    const qSlug = String(q).trim().replace(/\s+/g, '-');
+    const mlUrl = `https://lista.mercadolivre.com.br/${encodeURIComponent(qSlug)}`;
+
+    const resp = await axios.get(mlUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Cache-Control': 'max-age=0',
+        'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'sec-fetch-dest': 'document',
+        'sec-fetch-mode': 'navigate',
+        'sec-fetch-site': 'none',
+        'sec-fetch-user': '?1',
+        'upgrade-insecure-requests': '1',
+      },
+      timeout: 10000,
+    });
+
+    const html = resp.data;
+
+    // Tenta extrair resultados via regex
+    let results = [];
+
+    // Busca blocos de produto no HTML
+    const cardRegex = /<li[^>]*class="[^"]*ui-search-layout__item[^"]*"[^>]*data-item-id="([^"]*)"[^>]*>([\s\S]*?)<\/li>/g;
+    let match;
+    let count = 0;
+    const maxLimit = Math.min(parseInt(limit || 50), 100);
+
+    while ((match = cardRegex.exec(html)) !== null && count < maxLimit) {
+      const itemId = match[1];
+      const card = match[2];
+
+      // Extrai dados do card
+      const titleMatch = card.match(/<span[^>]*class="[^"]*ui-search-item__title[^"]*"[^>]*>([\s\S]*?)<\/span>/);
+      const title = titleMatch ? titleMatch[1].replace(/<[^>]+>/g, '').trim() : '';
+
+      const priceMatch = card.match(/class="[^"]*price-tag-fraction[^"]*"[^>]*>([\d,.]+)<\/span>/);
+      const priceCents = card.match(/class="[^"]*price-tag-cents[^"]*"[^>]*>([\d]+)<\/span>/);
+      let price = 0;
+      if (priceMatch) {
+        const intPart = priceMatch[1].replace(/\./g, '').replace(',', '');
+        const decPart = priceCents ? priceCents[1] : '00';
+        price = parseFloat(`${intPart}.${decPart}`);
+      }
+
+      const imgMatch = card.match(/<img[^>]*(?:src|data-src)="(https:\/\/[^"]*\.(?:jpg|png|webp)[^"]*)"/i);
+      const thumbnail = imgMatch ? imgMatch[1] : '';
+
+      const freeShipping = /frete.*gr[aá]tis|shipping.*free|frete-gratis/i.test(card);
+      const sold = (card.match(/(\d+)\s+vend/) || [0, 0])[1];
+
+      if (title && itemId) {
+        results.push({
+          id: itemId,
+          title,
+          price,
+          sold_quantity: parseInt(sold) || 0,
+          thumbnail,
+          permalink: `https://www.mercadolivre.com.br/${itemId}`,
+          condition: /usado|Usado/i.test(card) ? 'used' : 'new',
+          free_shipping: freeShipping,
+          catalog_listing: false,
+        });
+        count++;
+      }
+    }
+
+    res.json({
+      ok: true,
+      source: 'backend-scrape',
+      query: q,
+      results,
+      paging: { total: results.length },
+    });
+
+  } catch (e) {
+    console.error('[ML Search]', e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
 // SKUs do banco para o picker de kits
 // ═══════════════════════════════════════════════════════════════
 app.get('/api/skus', auth, async (req, res) => {
