@@ -1,5 +1,5 @@
-// SalesSync v5.11 — Backend Node.js
-// Magalu corrigido com estrutura real da API
+// SalesSync v5.12 — Backend Node.js
+// v5.12 | 2026-06-16 | Adicionado GET /api/ml/token para browser chamar ML direto
 const express = require('express');
 const { Pool } = require('pg');
 const axios   = require('axios');
@@ -6167,6 +6167,24 @@ app.get('/api/ml/pesquisa', auth, async (req, res) => {
   } catch (e) {
     const status = e.response?.status || 500;
     res.status(status).json({ ok: false, error: e.response?.data?.message || e.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// v1.4 | 2026-06-16 | Retorna token ML para o browser usar direto
+// (evita 403 do Render — browser chama ML com o token do usuário)
+// ═══════════════════════════════════════════════════════════════
+app.get('/api/ml/token', auth, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT access_token FROM marketplace_accounts
+       WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND access_token IS NOT NULL
+       LIMIT 1`,
+      [req.user.id]
+    );
+    res.json({ token: rows[0]?.access_token || null });
+  } catch (e) {
+    res.status(500).json({ token: null });
   }
 });
 
