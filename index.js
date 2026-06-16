@@ -6229,8 +6229,9 @@ app.get('/api/ml/search', auth, async (req, res) => {
   if (!q) return res.status(400).json({ error: 'q obrigatorio' });
 
   try {
+    // _NoIndex_True força resultados de busca normais (evita redirecionar pra micro-landing de categoria)
     const qSlug = String(q).trim().replace(/\s+/g, '-');
-    const mlUrl = `https://lista.mercadolivre.com.br/${encodeURIComponent(qSlug)}`;
+    const mlUrl = `https://lista.mercadolivre.com.br/${encodeURIComponent(qSlug)}_NoIndex_True`;
 
     const resp = await axios.get(mlUrl, {
       headers: {
