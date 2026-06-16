@@ -1,5 +1,5 @@
-// SalesSync v5.12 — Backend Node.js
-// v5.12 | 2026-06-16 | Adicionado GET /api/ml/token para browser chamar ML direto
+// SalesSync v5.13 — Backend Node.js
+// v5.13 | 2026-06-16 | /api/ml/token gera app token (client_credentials) para busca de concorrentes
 const express = require('express');
 const { Pool } = require('pg');
 const axios   = require('axios');
@@ -6171,18 +6171,50 @@ app.get('/api/ml/pesquisa', auth, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// v1.4 | 2026-06-16 | Retorna token ML para o browser usar direto
-// (evita 403 do Render — browser chama ML com o token do usuário)
+// v1.8 | 2026-06-16 | Token ML para busca via Cloudflare Worker
+// Prioridade: 1) app token (client_credentials, read_catalog scope)
+//             2) user token (fallback)
+// App token tem read_catalog scope e funciona para buscar concorrentes
 // ═══════════════════════════════════════════════════════════════
+let _mlAppTokenCache = null; // { token, expiresAt }
+
+async function getMlAppToken() {
+  const now = Date.now();
+  if (_mlAppTokenCache && _mlAppTokenCache.expiresAt > now + 60000) {
+    return _mlAppTokenCache.token;
+  }
+  try {
+    const { data } = await axios.post(
+      'https://api.mercadolibre.com/oauth/token',
+      new URLSearchParams({
+        grant_type:    'client_credentials',
+        client_id:     process.env.ML_CLIENT_ID || process.env.ML_APP_ID,
+        client_secret: process.env.ML_CLIENT_SECRET || process.env.ML_SECRET,
+      }),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 8000 }
+    );
+    _mlAppTokenCache = { token: data.access_token, expiresAt: now + (data.expires_in || 21600) * 1000 };
+    return _mlAppTokenCache.token;
+  } catch (e) {
+    console.error('ML app token error:', e.response?.data || e.message);
+    return null;
+  }
+}
+
 app.get('/api/ml/token', auth, async (req, res) => {
   try {
+    // Tenta gerar app token (client_credentials) — tem read_catalog scope para busca de concorrentes
+    const appToken = await getMlAppToken();
+    if (appToken) return res.json({ token: appToken, type: 'app' });
+
+    // Fallback: token pessoal do usuário
     const { rows } = await db.query(
       `SELECT access_token FROM marketplace_accounts
        WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND access_token IS NOT NULL
        LIMIT 1`,
       [req.user.id]
     );
-    res.json({ token: rows[0]?.access_token || null });
+    res.json({ token: rows[0]?.access_token || null, type: 'user' });
   } catch (e) {
     res.status(500).json({ token: null });
   }
