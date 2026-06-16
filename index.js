@@ -6120,5 +6120,82 @@ async function fetchTiktok(acc, days) {
 // FIM TIKTOK SHOP
 // ═══════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════
+// PESQUISA DE MERCADO (estilo NubMetrics)
+// ═══════════════════════════════════════════════════════════════
+app.get('/api/ml/pesquisa', auth, async (req, res) => {
+  const q     = (req.query.q || '').trim();
+  const limit = Math.min(parseInt(req.query.limit || '50'), 100);
+  const sort  = req.query.sort || 'sold_quantity';
+  if (!q) return res.status(400).json({ ok: false, error: 'q obrigatório' });
+
+  try {
+    // Tenta pegar token ML do usuário (para requests autenticados)
+    const { rows } = await db.query(
+      `SELECT access_token FROM marketplace_accounts
+       WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND access_token IS NOT NULL
+       LIMIT 1`,
+      [req.user.id]
+    );
+    const token   = rows[0]?.access_token || null;
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+
+    const url = `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(q)}&limit=${limit}&sort=${sort}`;
+    const r   = await axios.get(url, { headers, timeout: 15000 });
+    const items = (r.data.results || []).map(item => ({
+      id:                item.id,
+      title:             item.title,
+      price:             item.price,
+      original_price:    item.original_price || null,
+      sold_quantity:     item.sold_quantity || 0,
+      available_quantity:item.available_quantity || 0,
+      listing_type_id:   item.listing_type_id,
+      catalog_product_id:item.catalog_product_id || null,
+      catalog_listing:   item.catalog_listing || false,
+      condition:         item.condition,
+      thumbnail:         item.thumbnail,
+      permalink:         item.permalink,
+      free_shipping:     item.shipping?.free_shipping || false,
+      logistic_type:     item.shipping?.logistic_type || null,
+      seller_id:         item.seller?.id,
+      seller_nickname:   item.seller?.nickname,
+      seller_power:      item.seller?.seller_reputation?.power_seller_status || null,
+      seller_level:      item.seller?.seller_reputation?.level_id || null,
+    }));
+
+    res.json({ ok: true, total: r.data.paging?.total || 0, items });
+  } catch (e) {
+    const status = e.response?.status || 500;
+    res.status(status).json({ ok: false, error: e.response?.data?.message || e.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// SKUs do banco para o picker de kits
+// ═══════════════════════════════════════════════════════════════
+app.get('/api/skus', auth, async (req, res) => {
+  try {
+    const uid = req.user.id;
+    const result = await db.query(
+      `SELECT DISTINCT item_sku, platform, title
+       FROM orders
+       WHERE user_id = $1
+         AND item_sku IS NOT NULL
+         AND item_sku <> ''
+       ORDER BY platform, item_sku`,
+      [uid]
+    );
+    const byPlat = {};
+    for (const row of result.rows) {
+      const p = row.platform || 'outro';
+      if (!byPlat[p]) byPlat[p] = [];
+      byPlat[p].push({ sku: row.item_sku, title: row.title || row.item_sku });
+    }
+    res.json({ ok: true, data: byPlat });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v5.2 rodando na porta ${PORT}`));
