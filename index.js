@@ -6252,61 +6252,28 @@ app.get('/api/ml/search', auth, async (req, res) => {
     });
 
     const html = resp.data;
-
-    // Tenta extrair resultados via regex
-    let results = [];
-
-    // Busca blocos de produto no HTML
-    const cardRegex = /<li[^>]*class="[^"]*ui-search-layout__item[^"]*"[^>]*data-item-id="([^"]*)"[^>]*>([\s\S]*?)<\/li>/g;
-    let match;
-    let count = 0;
     const maxLimit = Math.min(parseInt(limit || 50), 100);
 
-    while ((match = cardRegex.exec(html)) !== null && count < maxLimit) {
-      const itemId = match[1];
-      const card = match[2];
+    // Modo debug: mostra trecho do HTML para diagnosticar estrutura
+    if (req.query.debug === '1') {
+      const snippet = html.substring(0, 4000);
+      return res.json({ ok: true, debug: true, htmlLength: html.length, snippet });
+    }
 
-      // Extrai dados do card
-      const titleMatch = card.match(/<span[^>]*class="[^"]*ui-search-item__title[^"]*"[^>]*>([\s\S]*?)<\/span>/);
-      const title = titleMatch ? titleMatch[1].replace(/<[^>]+>/g, '').trim() : '';
+    // ── Tentativa 1: __NEXT_DATA__ (Next.js embute tudo em JSON)
+    let results = tryExtractNextData(html, maxLimit);
 
-      const priceMatch = card.match(/class="[^"]*price-tag-fraction[^"]*"[^>]*>([\d,.]+)<\/span>/);
-      const priceCents = card.match(/class="[^"]*price-tag-cents[^"]*"[^>]*>([\d]+)<\/span>/);
-      let price = 0;
-      if (priceMatch) {
-        const intPart = priceMatch[1].replace(/\./g, '').replace(',', '');
-        const decPart = priceCents ? priceCents[1] : '00';
-        price = parseFloat(`${intPart}.${decPart}`);
-      }
-
-      const imgMatch = card.match(/<img[^>]*(?:src|data-src)="(https:\/\/[^"]*\.(?:jpg|png|webp)[^"]*)"/i);
-      const thumbnail = imgMatch ? imgMatch[1] : '';
-
-      const freeShipping = /frete.*gr[aá]tis|shipping.*free|frete-gratis/i.test(card);
-      const sold = (card.match(/(\d+)\s+vend/) || [0, 0])[1];
-
-      if (title && itemId) {
-        results.push({
-          id: itemId,
-          title,
-          price,
-          sold_quantity: parseInt(sold) || 0,
-          thumbnail,
-          permalink: `https://www.mercadolivre.com.br/${itemId}`,
-          condition: /usado|Usado/i.test(card) ? 'used' : 'new',
-          free_shipping: freeShipping,
-          catalog_listing: false,
-        });
-        count++;
-      }
+    // ── Tentativa 2: regex nos cards HTML
+    if (!results || results.length === 0) {
+      results = tryExtractHtmlCards(html, maxLimit);
     }
 
     res.json({
       ok: true,
       source: 'backend-scrape',
       query: q,
-      results,
-      paging: { total: results.length },
+      results: results || [],
+      paging: { total: (results || []).length },
     });
 
   } catch (e) {
@@ -6341,6 +6308,97 @@ app.get('/api/skus', auth, async (req, res) => {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
+
+// ── Extrai do JSON __NEXT_DATA__ embutido pelo Next.js
+function tryExtractNextData(html, maxLimit) {
+  try {
+    const m = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
+    if (!m) return null;
+    const data = JSON.parse(m[1]);
+    // Tenta vários caminhos onde o ML pode colocar os resultados
+    const pageProps = data?.props?.pageProps;
+    const items =
+      pageProps?.results ||
+      pageProps?.initialState?.results ||
+      pageProps?.initialState?.listingState?.results ||
+      pageProps?.dehydratedState?.queries?.[0]?.state?.data?.results ||
+      null;
+    if (!Array.isArray(items) || items.length === 0) return null;
+    return items.slice(0, maxLimit).map(i => ({
+      id:              i.id || '',
+      title:           i.title || '',
+      price:           i.price || i.prices?.price?.amount || 0,
+      original_price:  i.original_price || null,
+      sold_quantity:   i.sold_quantity || 0,
+      thumbnail:       i.thumbnail || '',
+      permalink:       i.permalink || '',
+      listing_type_id: i.listing_type_id || '',
+      condition:       i.condition || 'new',
+      free_shipping:   i.shipping?.free_shipping || false,
+      seller_nickname: i.seller?.nickname || '',
+      catalog_listing: !!i.catalog_listing,
+    }));
+  } catch (e) {
+    return null;
+  }
+}
+
+// ── Extrai via regex dos cards HTML (fallback)
+function tryExtractHtmlCards(html, maxLimit) {
+  const results = [];
+  // ML pode usar data-item-id no li ou no article dentro
+  const patterns = [
+    // Padrão novo: article com data-item-id
+    /<article[^>]*data-item-id="(MLB\d+)"[^>]*>([\s\S]*?)<\/article>/g,
+    // Padrão antigo: li com data-item-id
+    /<li[^>]*data-item-id="(MLB\d+)"[^>]*>([\s\S]*?)<\/li>/g,
+    // Qualquer elemento com data-item-id MLB
+    /<(?:li|article|div)[^>]*data-item-id="(MLB\d+)"[^>]*>([\s\S]*?)<\/(?:li|article|div)>/g,
+  ];
+
+  for (const regex of patterns) {
+    let match;
+    while ((match = regex.exec(html)) !== null && results.length < maxLimit) {
+      const itemId = match[1];
+      const card   = match[2];
+
+      const titleM = card.match(/class="[^"]*(?:ui-search-item__title|item-title)[^"]*"[^>]*>([\s\S]*?)<\/(?:h2|h3|span|a)>/);
+      const title  = titleM ? titleM[1].replace(/<[^>]+>/g, '').trim() : '';
+
+      const fracM  = card.match(/class="[^"]*price-tag-fraction[^"]*"[^>]*>([\d.,]+)<\/span>/);
+      const centsM = card.match(/class="[^"]*price-tag-cents[^"]*"[^>]*>(\d+)<\/span>/);
+      let price = 0;
+      if (fracM) {
+        price = parseFloat(fracM[1].replace(/\./g, '').replace(',', '.'));
+        if (centsM) price += parseInt(centsM[1]) / 100;
+      }
+
+      const imgM = card.match(/(?:src|data-src)="(https:\/\/http2\.mlstatic\.com[^"]+)"/i);
+      const thumbnail = imgM ? imgM[1] : '';
+      const freeShipping = /Frete gr[aá]tis/i.test(card);
+      const soldM = card.match(/(\d[\d.]*)\s*(?:vend|vendidos)/i);
+      const sold  = soldM ? parseInt(soldM[1].replace(/\./g, '')) : 0;
+
+      if (itemId) {
+        results.push({
+          id:              itemId,
+          title:           title || itemId,
+          price,
+          sold_quantity:   sold,
+          thumbnail,
+          permalink:       `https://www.mercadolivre.com.br/p/${itemId}`,
+          condition:       /usado/i.test(card) ? 'used' : 'new',
+          free_shipping:   freeShipping,
+          catalog_listing: false,
+          listing_type_id: '',
+          seller_nickname: '',
+        });
+      }
+    }
+    if (results.length > 0) break;
+  }
+  return results;
+}
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v5.2 rodando na porta ${PORT}`));
