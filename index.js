@@ -1507,7 +1507,7 @@ async function fetchMagalu(acc, days) {
   let offset = 0;
   const limit = 50;
 
-  // Pagina todos os resultados
+  // Pagina todos os resultados com delay para evitar rate limit
   while (true) {
     const { data } = await axios.get('https://api.magalu.com/seller/v1/orders', {
       params: { created_at__gte: since, _limit: limit, _offset: offset, _sort: "created_at:desc" },
@@ -1519,10 +1519,10 @@ async function fetchMagalu(acc, days) {
 
     console.log(`[Magalu] página offset=${offset}: ${page.length} pedidos`);
 
-    // Para se não tem próxima página
     if (!data.meta?.links?.next || page.length < limit) break;
     offset += limit;
-    if (offset > 500) break; // segurança
+    if (offset > 500) break;
+    await new Promise(r => setTimeout(r, 1500)); // evita TOO_MANY_REQUESTS
   }
 
   console.log(`[Magalu] Total: ${allOrders.length} pedidos`);
@@ -6221,51 +6221,44 @@ app.get('/api/ml/token', auth, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// v2.0 | 2026-06-16 | Busca no ML via scraping (contorna bloqueio de IP Cloudflare)
+// ═══════════════════════════════════════════════════════════════
+// v3.0 | 2026-06-17 | Busca ML via Google CSE → ML /products/{id}/items
+// Env vars necessárias: GOOGLE_CSE_KEY, GOOGLE_CSE_ID
 // ═══════════════════════════════════════════════════════════════
 app.get('/api/ml/search', auth, async (req, res) => {
   const { q, sort, limit } = req.query;
-
   if (!q) return res.status(400).json({ error: 'q obrigatorio' });
 
+  const GOOGLE_KEY = process.env.GOOGLE_CSE_KEY;
+  const GOOGLE_CX  = process.env.GOOGLE_CSE_ID;
+
+  if (!GOOGLE_KEY || !GOOGLE_CX) {
+    return res.status(503).json({ ok: false, error: 'GOOGLE_CSE_KEY e GOOGLE_CSE_ID não configurados no Render' });
+  }
+
   try {
-    const qStr = String(q).trim();
-    // Tenta API pública do ML sem token (busca pública não deveria precisar de auth)
-    let mlUrl = `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(qStr)}&limit=${Math.min(parseInt(limit||50),100)}`;
-    if (sort === 'price_asc')  mlUrl += '&sort=price_asc';
-    else if (sort === 'price_desc') mlUrl += '&sort=price_desc';
+    const qStr    = String(q).trim();
+    const maxNum  = Math.min(parseInt(limit || 20), 20); // Google CSE max 10/chamada, 20 = 2 chamadas
 
-    const resp = await axios.get(mlUrl, {
-      headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'SaleSync/1.0',
-      },
-      timeout: 10000,
-    });
+    // ── 1. Busca no Google: site:mercadolivre.com.br/p/ para preferir páginas de produto
+    const googleResults = await fetchGoogleCSE(GOOGLE_KEY, GOOGLE_CX, qStr, Math.min(maxNum, 10));
 
-    const html = resp.data;
-    const maxLimit = Math.min(parseInt(limit || 50), 100);
+    // ── 2. Extrai IDs MLB das URLs retornadas pelo Google
+    const productIds = extractMLBIds(googleResults);
 
-    // Modo debug
-    if (req.query.debug === '1') {
-      const body = typeof html === 'string' ? html : JSON.stringify(html);
-      return res.json({ ok: true, debug: true, status: resp.status, bodyLength: body.length, snippet: body.substring(0, 800) });
+    if (productIds.length === 0) {
+      return res.json({ ok: true, source: 'google-cse', query: q, results: [], paging: { total: 0 } });
     }
 
-    // ── Tentativa 1: __NEXT_DATA__ (Next.js embute tudo em JSON)
-    let results = tryExtractNextData(html, maxLimit);
-
-    // ── Tentativa 2: regex nos cards HTML
-    if (!results || results.length === 0) {
-      results = tryExtractHtmlCards(html, maxLimit);
-    }
+    // ── 3. Busca dados de cada produto no ML via /products/{id}/items
+    const results = await fetchMLProducts(productIds, sort);
 
     res.json({
       ok: true,
-      source: 'backend-scrape',
+      source: 'google-cse',
       query: q,
-      results: results || [],
-      paging: { total: (results || []).length },
+      results,
+      paging: { total: results.length },
     });
 
   } catch (e) {
@@ -6273,6 +6266,107 @@ app.get('/api/ml/search', auth, async (req, res) => {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
+
+async function fetchGoogleCSE(key, cx, q, num = 10) {
+  // Busca preferindo páginas de produto ML (/p/) para ter IDs de catálogo
+  const queries = [
+    `site:mercadolivre.com.br/p/ ${q}`,
+    `site:mercadolivre.com.br ${q}`,
+  ];
+
+  for (const query of queries) {
+    try {
+      const url = `https://www.googleapis.com/customsearch/v1?key=${key}&cx=${cx}&q=${encodeURIComponent(query)}&num=${num}&lr=lang_pt`;
+      const { data } = await axios.get(url, { timeout: 8000 });
+      const items = data.items || [];
+      if (items.length > 0) return items;
+    } catch (e) {
+      console.error('[Google CSE]', e.response?.data?.error?.message || e.message);
+    }
+  }
+  return [];
+}
+
+function extractMLBIds(googleItems) {
+  const ids = [];
+  const seen = new Set();
+
+  for (const item of googleItems) {
+    const url = item.link || '';
+    // Tenta extrair ID de produto de catálogo (/p/MLB...)
+    let m = url.match(/\/p\/(MLB\d+)/i);
+    if (!m) {
+      // Fallback: item listing (MLB-123...)
+      m = url.match(/(MLB[-]?\d+)/i);
+    }
+    if (m) {
+      const id = m[1].replace('-', '');
+      if (!seen.has(id)) { seen.add(id); ids.push({ id, isProduct: url.includes('/p/'), url }); }
+    }
+  }
+  return ids;
+}
+
+async function fetchMLProducts(idObjs, sort) {
+  const results = [];
+
+  await Promise.all(idObjs.map(async ({ id, isProduct, url }) => {
+    try {
+      let item = null;
+
+      if (isProduct) {
+        // Produto de catálogo: /products/{id}/items retorna lista de anúncios
+        const { data } = await axios.get(`https://api.mercadolibre.com/products/${id}/items`, {
+          params: { limit: 1 },
+          headers: { 'Accept': 'application/json' },
+          timeout: 5000,
+          validateStatus: s => s < 500,
+        });
+        const first = (data.results || [])[0];
+        if (first) item = normalizeMLItem(first, url);
+      }
+
+      if (!item) {
+        // Fallback: tenta /items/{id} direto
+        const { data } = await axios.get(`https://api.mercadolibre.com/items/${id}`, {
+          headers: { 'Accept': 'application/json' },
+          timeout: 5000,
+          validateStatus: s => s < 500,
+        });
+        if (data && data.id) item = normalizeMLItem(data, url);
+      }
+
+      if (item) results.push(item);
+    } catch (e) {
+      // ignora falha individual
+    }
+  }));
+
+  // Ordena conforme sort
+  if (sort === 'price_asc')  results.sort((a, b) => a.price - b.price);
+  if (sort === 'price_desc') results.sort((a, b) => b.price - a.price);
+  if (sort === 'sold_quantity') results.sort((a, b) => b.sold_quantity - a.sold_quantity);
+
+  return results;
+}
+
+function normalizeMLItem(i, fallbackUrl) {
+  return {
+    id:              i.id || '',
+    title:           i.title || '',
+    price:           i.price || 0,
+    original_price:  i.original_price || null,
+    sold_quantity:   i.sold_quantity || 0,
+    thumbnail:       i.thumbnail || '',
+    permalink:       i.permalink || fallbackUrl || '',
+    listing_type_id: i.listing_type_id || '',
+    condition:       i.condition || 'new',
+    free_shipping:   i.shipping?.free_shipping || false,
+    seller_nickname: i.seller?.nickname || '',
+    logistic_type:   i.shipping?.logistic_type || '',
+    catalog_listing: !!i.catalog_listing,
+  };
+}
 
 // ═══════════════════════════════════════════════════════════════
 // SKUs do banco para o picker de kits
