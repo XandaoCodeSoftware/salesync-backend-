@@ -2459,6 +2459,21 @@ async function ssFetchMagaluReturns(acc) {
   } catch(e) { console.error('[Magalu returns]', e.response?.status, e.response?.data || e.message); return []; }
 }
 
+// v5.14 — deriva categoria da devolução a partir dos dados já armazenados
+function ssDeriveCategoryFromStored(r) {
+  const reason = String(r.reason || '').toUpperCase();
+  const raw = r.raw_json || {};
+  const tags = Array.isArray(raw.tags) ? raw.tags.map(String) : [];
+  // Extraindo tags de dentro do claim se vier aninhado
+  const orderTags = Array.isArray(raw.raw_json?.tags) ? raw.raw_json.tags.map(String) : tags;
+
+  if (orderTags.includes('not_delivered') || reason.includes('NR') || reason.includes('NOT_RECEIVED'))
+    return 'nao_entregue';
+  if (['PDD','DFT','DEFECT','DAMAGED','IT','ITEM_NOT_AS_DESCRIBED'].some(k => reason.includes(k)))
+    return 'defeito';
+  return 'arrependimento';
+}
+
 async function ssLoadReturns(userId, platform=null) {
   const params=[userId];
   let sql=`SELECT r.*, o.item_title, o.item_sku, o.total_amount, o.order_date
@@ -2468,7 +2483,17 @@ async function ssLoadReturns(userId, platform=null) {
   if(platform){params.push(platform); sql += ` AND r.platform=$${params.length}`;}
   sql += ` ORDER BY r.updated_at DESC LIMIT 500`;
   const { rows } = await db.query(sql, params);
-  return rows.map(x=>({ ...x, return_shipping_cost:Number(x.return_shipping_cost||0), return_fee:Number(x.return_fee||0), refund_adjustment:Number(x.refund_adjustment||0), lost_product_cost:Number(x.lost_product_cost||0), return_total_cost:Number(x.return_total_cost||0), total_amount:Number(x.total_amount||0) }));
+  return rows.map(x=>({
+    ...x,
+    return_shipping_cost: Number(x.return_shipping_cost||0),
+    return_fee:           Number(x.return_fee||0),
+    refund_adjustment:    Number(x.refund_adjustment||0),
+    lost_product_cost:    Number(x.lost_product_cost||0),
+    return_total_cost:    Number(x.return_total_cost||0),
+    total_amount:         Number(x.total_amount||0),
+    // v5.14 — categoria derivada em tempo real dos dados armazenados
+    return_category:      ssDeriveCategoryFromStored(x),
+  }));
 }
 
 app.get('/api/returns', auth, async (req, res) => {
@@ -2500,6 +2525,28 @@ app.post('/api/returns/sync/:platform', auth, async (req, res) => {
       for (const r of list) { await ssUpsertReturn(req.user.id, acc, r); count++; }
     }
     res.json({ success:true, synced:count, data: await ssLoadReturns(req.user.id, platform) });
+  } catch(e){ res.status(500).json({ error:e.message }); }
+});
+
+// v5.14 — limpa devoluções antigas e faz re-sync limpo
+app.post('/api/returns/reset/:platform', auth, async (req, res) => {
+  try {
+    const uid = req.user.id;
+    const platform = String(req.params.platform || '').toLowerCase();
+    // Apaga devoluções antigas desta plataforma para este usuário
+    const { rowCount } = await db.query(
+      `DELETE FROM marketplace_returns WHERE user_id=$1 AND platform=$2`,
+      [uid, platform]
+    );
+    console.log(`[Returns] 🗑️ Limpou ${rowCount} registros antigos de ${platform} para user ${uid}`);
+    // Re-sincroniza com lógica corrigida
+    const accounts = await ssGetAccounts(uid, platform);
+    let count = 0;
+    for (const acc of accounts) {
+      const list = platform === 'mercadolivre' ? await ssFetchMLReturns(acc) : platform === 'magalu' ? await ssFetchMagaluReturns(acc) : [];
+      for (const r of list) { await ssUpsertReturn(uid, acc, r); count++; }
+    }
+    res.json({ success:true, deleted: rowCount, synced: count, data: await ssLoadReturns(uid, platform) });
   } catch(e){ res.status(500).json({ error:e.message }); }
 });
 
