@@ -194,6 +194,15 @@ app.post('/api/auth/login', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── PERFIL ATUAL (atualiza plan sem precisar relogar)
+app.get('/api/me', auth, async (req, res) => {
+  try {
+    const { rows } = await db.query(`SELECT id,name,email,plan FROM users WHERE id=$1`, [req.user.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Usuário não encontrado' });
+    res.json({ user: rows[0] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── CONTAS ──
 app.get('/api/accounts', auth, async (req, res) => {
   try {
