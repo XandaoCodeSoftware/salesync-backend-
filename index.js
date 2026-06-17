@@ -6264,5 +6264,138 @@ app.get('/api/skus', auth, async (req, res) => {
 });
 
 
+// ═══════════════════════════════════════════════════════════════
+// v5.14 | 2026-06-17 | Perguntas & Respostas — Mercado Livre
+// GET  /api/questions        → busca perguntas não respondidas de todas as contas ML
+// POST /api/questions/:id/answer → envia resposta a uma pergunta
+// ═══════════════════════════════════════════════════════════════
+
+app.get('/api/questions', auth, async (req, res) => {
+  try {
+    const uid = req.user.id;
+    // Busca todas as contas ML ativas do usuário
+    const { rows: accounts } = await db.query(
+      `SELECT * FROM marketplace_accounts
+       WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND access_token IS NOT NULL`,
+      [uid]
+    );
+    if (!accounts.length) return res.json({ ok: true, questions: [] });
+
+    const allQuestions = [];
+
+    for (const acc of accounts) {
+      // Renova token se próximo de expirar
+      let token = acc.access_token;
+      if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 5*60*1000)) {
+        const newToken = await refreshMLToken(acc);
+        if (newToken) token = newToken;
+      }
+
+      // Busca seller_id
+      let sellerId = acc.seller_id;
+      if (!sellerId) {
+        try {
+          const { data: me } = await axios.get('https://api.mercadolibre.com/users/me', {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+          sellerId = me.id;
+          await db.query(`UPDATE marketplace_accounts SET seller_id=$1 WHERE id=$2`, [String(sellerId), acc.id]);
+        } catch(e) { continue; }
+      }
+
+      try {
+        const { data } = await axios.get('https://api.mercadolibre.com/my/received_questions/search', {
+          headers: { Authorization: `Bearer ${token}` },
+          params: { seller_id: sellerId, status: 'UNANSWERED', limit: 50 }
+        });
+
+        const questions = (data.questions || []).map(q => ({
+          id:           q.id,
+          text:         q.text,
+          date_created: q.date_created,
+          item_id:      q.item_id,
+          item_title:   q.item?.title || null,
+          item_image:   q.item?.thumbnail || null,
+          buyer_id:     q.from?.id || null,
+          buyer_name:   q.from?.nickname || null,
+          shop_name:    acc.shop_name,
+          account_id:   acc.id,
+          token,        // necessário para enviar resposta
+        }));
+
+        // Busca título/imagem dos itens que vieram sem dados
+        const missingItems = questions.filter(q => !q.item_title).map(q => q.item_id).filter(Boolean);
+        if (missingItems.length) {
+          try {
+            const ids = [...new Set(missingItems)].slice(0, 20).join(',');
+            const { data: itemsData } = await axios.get(`https://api.mercadolibre.com/items?ids=${ids}`, {
+              headers: { Authorization: `Bearer ${token}` }
+            });
+            const itemMap = {};
+            (itemsData || []).forEach(i => { if(i.body) itemMap[i.body.id] = i.body; });
+            questions.forEach(q => {
+              if (!q.item_title && itemMap[q.item_id]) {
+                q.item_title = itemMap[q.item_id].title;
+                q.item_image = itemMap[q.item_id].thumbnail;
+              }
+            });
+          } catch(e) { /* ignora erro de item */ }
+        }
+
+        allQuestions.push(...questions);
+      } catch(e) {
+        console.error('[Questions] Erro conta', acc.shop_name, e.response?.data || e.message);
+      }
+    }
+
+    // Ordena mais recentes primeiro
+    allQuestions.sort((a,b) => new Date(b.date_created) - new Date(a.date_created));
+
+    // Remove token do retorno (segurança)
+    const safe = allQuestions.map(({ token: _t, ...q }) => q);
+    res.json({ ok: true, questions: safe, total: safe.length });
+  } catch(e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/questions/:questionId/answer', auth, async (req, res) => {
+  try {
+    const uid = req.user.id;
+    const { questionId } = req.params;
+    const { text, account_id } = req.body;
+
+    if (!text?.trim()) return res.status(400).json({ ok: false, error: 'Resposta não pode ser vazia' });
+
+    // Busca conta correta
+    const { rows } = await db.query(
+      `SELECT * FROM marketplace_accounts
+       WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND access_token IS NOT NULL
+       ${account_id ? 'AND id=$2' : ''} LIMIT 1`,
+      account_id ? [uid, account_id] : [uid]
+    );
+    if (!rows.length) return res.status(404).json({ ok: false, error: 'Conta ML não encontrada' });
+
+    const acc = rows[0];
+    let token = acc.access_token;
+    if (acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 5*60*1000)) {
+      const newToken = await refreshMLToken(acc);
+      if (newToken) token = newToken;
+    }
+
+    const { data } = await axios.post('https://api.mercadolibre.com/answers', {
+      question_id: Number(questionId),
+      text: text.trim()
+    }, { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } });
+
+    console.log('[Questions] ✅ Resposta enviada para pergunta', questionId, 'conta', acc.shop_name);
+    res.json({ ok: true, answer: data });
+  } catch(e) {
+    const mlErr = e.response?.data;
+    console.error('[Questions] Erro ao responder', e.response?.status, mlErr || e.message);
+    res.status(e.response?.status || 500).json({ ok: false, error: mlErr?.message || e.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => console.log(`⚡ SalesSync v5.2 rodando na porta ${PORT}`));
