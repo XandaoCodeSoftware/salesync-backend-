@@ -2255,14 +2255,37 @@ async function ssUpsertReturn(userId, acc, r) {
 }
 
 function ssMLIsRealReturnFromOrder(o) {
+  // v5.14 — só considera devolução REAL se o item foi entregue primeiro.
+  // Cancellations sem 'delivered' tag são apenas cancelamentos normais, não devoluções.
   const tags = Array.isArray(o?.tags) ? o.tags.map(String) : [];
   const payments = Array.isArray(o?.payments) ? o.payments : [];
   const payText = payments.map(p => `${p.status || ''} ${p.status_detail || ''}`).join(' ').toLowerCase();
   const delivered = tags.includes('delivered');
-  const refunded = /(refunded|charged_back|chargeback|reimbursed|bpp_refunded|bpp_covered)/i.test(payText);
+  // 'not_delivered' + retorno = entregador não achou, produto voltou ao vendedor
+  const notDeliveredReturn = tags.includes('not_delivered') && tags.includes('returned');
+  const refunded = /(refunded|bpp_refunded|bpp_covered)/i.test(payText);
   const cancelledAfterDelivery = String(o?.status || '').toLowerCase() === 'cancelled' && delivered;
-  // "not_delivered" sozinho NÃO é devolução real; aparece em pedido pago ainda não entregue.
-  return (delivered && refunded) || cancelledAfterDelivery || payments.some(p => String(p.status || '').toLowerCase() === 'charged_back');
+  // NUNCA usar charged_back isolado — chargeback acontece em pedidos não entregues também
+  return notDeliveredReturn || (delivered && refunded) || cancelledAfterDelivery;
+}
+
+// v5.14 — classifica o motivo da devolução nos 3 tipos principais
+function ssMLReturnCategory(claim) {
+  const reason = String(claim?.reason_id || claim?.reason || '').toUpperCase();
+  const tags = Array.isArray(claim?.raw_json?.tags) ? claim.raw_json.tags.map(String) : [];
+  const shippingStatus = String(claim?.raw_json?.shipping?.status || '').toLowerCase();
+
+  // Entregador não encontrou o endereço / ninguém em casa
+  if (tags.includes('not_delivered') || shippingStatus === 'not_delivered' ||
+      reason.includes('NR') || reason.includes('NOT_RECEIVED') || reason.includes('NÃO_ENTREGUE')) {
+    return 'nao_entregue';
+  }
+  // Produto com defeito ou problema após uso
+  if (['PDD','DFT','DEFECT','DAMAGED','IT','ITEM_NOT_AS_DESCRIBED'].some(r => reason.includes(r))) {
+    return 'defeito';
+  }
+  // Arrependimento / cliente não quis mais após receber
+  return 'arrependimento';
 }
 
 // Resolve os custos reais de um claim ML a partir da resolução.
@@ -2347,6 +2370,7 @@ async function ssFetchMLReturns(acc, days = 365) {
 
       return detailed.map(c => {
         const costs = ssResolveMLClaimCosts(c);
+        const category = ssMLReturnCategory({ reason_id: c.reason_id, reason: c.reason, raw_json: c });
         return {
           platform: 'mercadolivre',
           external_return_id: `ml-claim-${c.id}`,
@@ -2354,6 +2378,7 @@ async function ssFetchMLReturns(acc, days = 365) {
           status: c.status || 'open',
           reason: c.reason_id || c.reason || c.stage || '—',
           type: c.type || 'claim',
+          return_category: category,          // v5.14: nao_entregue | arrependimento | defeito
           buyer_message: c.players?.find(p => p.role === 'complainant')?.user?.nickname || null,
           return_tracking_code: c.resolution?.return?.tracking_id || null,
           resolution_type: costs.resolution_type,
@@ -2387,13 +2412,16 @@ async function ssFetchMLReturns(acc, days = 365) {
         const reason = payments.map(p => p.status_detail || p.status).filter(Boolean).join(', ');
         // bpp_covered = ML absorveu, vendedor não perde. bpp_refunded = ML reembolsou comprador, vendedor pode perder.
         const bppCovered = payments.some(p => /bpp_covered/i.test(`${p.status||''} ${p.status_detail||''}`));
+        const tags = Array.isArray(o.tags) ? o.tags.map(String) : [];
+        const category = tags.includes('not_delivered') ? 'nao_entregue' : 'arrependimento';
         out.push({
           platform: 'mercadolivre',
           external_return_id: `ml-order-${o.id}`,
           platform_order_id: String(o.id || ''),
           status: o.status || 'returned',
-          reason: reason || 'Pedido entregue com reembolso/chargeback',
+          reason: reason || 'Pedido entregue com reembolso',
           type: 'return',
+          return_category: category,          // v5.14
           resolution_type: bppCovered ? 'seller_protection' : 'refund',
           ml_protected: bppCovered,
           return_shipping_cost: bppCovered ? 0 : payments.reduce((s, p) => s + Number(p.shipping_cost || 0), 0),
