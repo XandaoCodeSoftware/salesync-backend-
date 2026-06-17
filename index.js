@@ -6229,19 +6229,12 @@ app.get('/api/ml/search', auth, async (req, res) => {
   const { q, sort, limit } = req.query;
   if (!q) return res.status(400).json({ error: 'q obrigatorio' });
 
-  const GOOGLE_KEY = process.env.GOOGLE_CSE_KEY;
-  const GOOGLE_CX  = process.env.GOOGLE_CSE_ID;
-
-  if (!GOOGLE_KEY || !GOOGLE_CX) {
-    return res.status(503).json({ ok: false, error: 'GOOGLE_CSE_KEY e GOOGLE_CSE_ID não configurados no Render' });
-  }
-
   try {
     const qStr    = String(q).trim();
-    const maxNum  = Math.min(parseInt(limit || 20), 20); // Google CSE max 10/chamada, 20 = 2 chamadas
+    const maxNum  = Math.min(parseInt(limit || 20), 20);
 
-    // ── 1. Busca no Google: site:mercadolivre.com.br/p/ para preferir páginas de produto
-    const googleResults = await fetchGoogleCSE(GOOGLE_KEY, GOOGLE_CX, qStr, Math.min(maxNum, 10));
+    // ── 1. Busca no DuckDuckGo: site:mercadolivre.com.br
+    const googleResults = await fetchGoogleCSE(null, null, qStr, maxNum);
 
     // ── 2. Extrai IDs MLB das URLs retornadas pelo Google
     const productIds = extractMLBIds(googleResults);
@@ -6271,24 +6264,47 @@ app.get('/api/ml/search', auth, async (req, res) => {
   }
 });
 
+// DuckDuckGo HTML scraper — sem API key, sem quota, funciona para pegar links do ML
 async function fetchGoogleCSE(key, cx, q, num = 10) {
-  const queries = [
-    `site:mercadolivre.com.br/p/ ${q}`,
-    `site:mercadolivre.com.br ${q}`,
-  ];
+  try {
+    const query = `site:mercadolivre.com.br ${q}`;
+    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}&kl=br-pt`;
+    const { data: html } = await axios.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'pt-BR,pt;q=0.9',
+      },
+      timeout: 10000,
+    });
 
-  for (const query of queries) {
-    try {
-      const url = `https://www.googleapis.com/customsearch/v1?key=${key}&cx=${cx}&q=${encodeURIComponent(query)}&num=${num}&lr=lang_pt`;
-      const { data } = await axios.get(url, { timeout: 8000, validateStatus: () => true });
-      console.log('[Google CSE] status query:', query, '| items:', data.items?.length || 0, '| error:', data.error?.message || 'none');
-      const items = data.items || [];
-      if (items.length > 0) return items;
-    } catch (e) {
-      console.error('[Google CSE]', e.message);
+    // Extrai links do HTML do DDG
+    const items = [];
+    const linkRegex = /class="result__url"[^>]*>([^<]+)</g;
+    const titleRegex = /class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]+)</g;
+
+    // Usa o href dos resultados
+    const hrefRegex = /result__a[^>]*href="\/\/duckduckgo\.com\/l\/\?uddg=([^"&]+)/g;
+    let m;
+    while ((m = hrefRegex.exec(html)) !== null && items.length < num) {
+      try {
+        const decodedUrl = decodeURIComponent(m[1]);
+        if (decodedUrl.includes('mercadolivre.com.br')) {
+          // Extrai título do contexto próximo
+          const idx = m.index;
+          const ctx = html.substring(idx, idx + 500);
+          const titleM = ctx.match(/>([^<]{10,100})</);
+          items.push({ link: decodedUrl, title: titleM ? titleM[1].trim() : '', snippet: '' });
+        }
+      } catch (e) {}
     }
+
+    console.log('[DDG Search] query:', query, '| items:', items.length);
+    return items;
+  } catch (e) {
+    console.error('[DDG Search]', e.message);
+    return [];
   }
-  return [];
 }
 
 function extractMLBIds(googleItems) {
