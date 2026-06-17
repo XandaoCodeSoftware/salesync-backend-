@@ -1521,7 +1521,7 @@ async function fetchMagalu(acc, days) {
 
     if (!data.meta?.links?.next || page.length < limit) break;
     offset += limit;
-    if (offset > 500) break;
+    if (offset >= 300) break; // máx 300 pedidos por sync para evitar rate limit
     await new Promise(r => setTimeout(r, 1500)); // evita TOO_MANY_REQUESTS
   }
 
