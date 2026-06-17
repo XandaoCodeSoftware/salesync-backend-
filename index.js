@@ -6229,9 +6229,11 @@ app.get('/api/ml/search', auth, async (req, res) => {
   if (!q) return res.status(400).json({ error: 'q obrigatorio' });
 
   try {
-    // _Desde_1_NoIndex_True força resultados de busca normais (evita micro-landing de categoria)
-    const qSlug = String(q).trim().replace(/\s+/g, '-');
-    const mlUrl = `https://lista.mercadolivre.com.br/${encodeURIComponent(qSlug)}_Desde_1_NoIndex_True`;
+    // URL com /MLB/ + ?q= sempre retorna busca genérica sem micro-landing
+    const qStr = String(q).trim();
+    let mlUrl = `https://lista.mercadolivre.com.br/MLB/_Desde_1_NoIndex_True?q=${encodeURIComponent(qStr)}`;
+    if (sort === 'price_asc')  mlUrl += '&sort=price_asc';
+    else if (sort === 'price_desc') mlUrl += '&sort=price_desc';
 
     const resp = await axios.get(mlUrl, {
       headers: {
