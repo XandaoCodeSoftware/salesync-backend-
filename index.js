@@ -6272,7 +6272,6 @@ app.get('/api/ml/search', auth, async (req, res) => {
 });
 
 async function fetchGoogleCSE(key, cx, q, num = 10) {
-  // Busca preferindo páginas de produto ML (/p/) para ter IDs de catálogo
   const queries = [
     `site:mercadolivre.com.br/p/ ${q}`,
     `site:mercadolivre.com.br ${q}`,
@@ -6281,11 +6280,12 @@ async function fetchGoogleCSE(key, cx, q, num = 10) {
   for (const query of queries) {
     try {
       const url = `https://www.googleapis.com/customsearch/v1?key=${key}&cx=${cx}&q=${encodeURIComponent(query)}&num=${num}&lr=lang_pt`;
-      const { data } = await axios.get(url, { timeout: 8000 });
+      const { data } = await axios.get(url, { timeout: 8000, validateStatus: () => true });
+      console.log('[Google CSE] status query:', query, '| items:', data.items?.length || 0, '| error:', data.error?.message || 'none');
       const items = data.items || [];
       if (items.length > 0) return items;
     } catch (e) {
-      console.error('[Google CSE]', e.response?.data?.error?.message || e.message);
+      console.error('[Google CSE]', e.message);
     }
   }
   return [];
