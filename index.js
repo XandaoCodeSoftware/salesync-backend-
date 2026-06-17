@@ -6246,8 +6246,12 @@ app.get('/api/ml/search', auth, async (req, res) => {
     // ── 2. Extrai IDs MLB das URLs retornadas pelo Google
     const productIds = extractMLBIds(googleResults);
 
+    if (req.query.debug === '1') {
+      return res.json({ ok: true, debug: true, googleResults: googleResults.map(i => ({ title: i.title, link: i.link, snippet: i.snippet })), productIds });
+    }
+
     if (productIds.length === 0) {
-      return res.json({ ok: true, source: 'google-cse', query: q, results: [], paging: { total: 0 } });
+      return res.json({ ok: true, source: 'google-cse', query: q, results: [], paging: { total: 0 }, googleCount: googleResults.length });
     }
 
     // ── 3. Busca dados de cada produto no ML via /products/{id}/items
