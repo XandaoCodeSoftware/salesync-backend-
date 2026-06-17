@@ -6229,27 +6229,16 @@ app.get('/api/ml/search', auth, async (req, res) => {
   if (!q) return res.status(400).json({ error: 'q obrigatorio' });
 
   try {
-    // URL com /MLB/ + ?q= sempre retorna busca genérica sem micro-landing
     const qStr = String(q).trim();
-    let mlUrl = `https://lista.mercadolivre.com.br/MLB/_Desde_1_NoIndex_True?q=${encodeURIComponent(qStr)}`;
+    // Tenta API pública do ML sem token (busca pública não deveria precisar de auth)
+    let mlUrl = `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(qStr)}&limit=${Math.min(parseInt(limit||50),100)}`;
     if (sort === 'price_asc')  mlUrl += '&sort=price_asc';
     else if (sort === 'price_desc') mlUrl += '&sort=price_desc';
 
     const resp = await axios.get(mlUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Cache-Control': 'max-age=0',
-        'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"',
-        'sec-fetch-dest': 'document',
-        'sec-fetch-mode': 'navigate',
-        'sec-fetch-site': 'none',
-        'sec-fetch-user': '?1',
-        'upgrade-insecure-requests': '1',
+        'Accept': 'application/json',
+        'User-Agent': 'SaleSync/1.0',
       },
       timeout: 10000,
     });
@@ -6257,16 +6246,10 @@ app.get('/api/ml/search', auth, async (req, res) => {
     const html = resp.data;
     const maxLimit = Math.min(parseInt(limit || 50), 100);
 
-    // Modo debug: mostra estrutura real da página
+    // Modo debug
     if (req.query.debug === '1') {
-      const hasNextData = html.includes('__NEXT_DATA__');
-      const hasMicroLanding = html.includes('micro-landing');
-      const hasSearchLayout = html.includes('ui-search-layout');
-      const hasResults = html.includes('ui-search-result');
-      // Extrai trecho do __NEXT_DATA__ se existir
-      const ndIdx = html.indexOf('"__NEXT_DATA__"');
-      const ndSnippet = ndIdx >= 0 ? html.substring(ndIdx, ndIdx + 500) : null;
-      return res.json({ ok: true, debug: true, htmlLength: html.length, finalUrl: resp.request?.res?.responseUrl || mlUrl, hasNextData, hasMicroLanding, hasSearchLayout, hasResults, ndSnippet });
+      const body = typeof html === 'string' ? html : JSON.stringify(html);
+      return res.json({ ok: true, debug: true, status: resp.status, bodyLength: body.length, snippet: body.substring(0, 800) });
     }
 
     // ── Tentativa 1: __NEXT_DATA__ (Next.js embute tudo em JSON)
