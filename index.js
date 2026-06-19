@@ -6697,10 +6697,11 @@ app.post('/api/codesoftware/sync', auth, async (req, res) => {
            status, fulfillment_type, order_date, buyer_name, raw_json, updated_at)
         VALUES ($1,'codesoftware',NULL,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW())
         ON CONFLICT (user_id, platform, platform_order_id) DO UPDATE SET
-          item_title=EXCLUDED.item_title, total_amount=EXCLUDED.total_amount,
-          paid_amount=EXCLUDED.paid_amount, platform_fee=EXCLUDED.platform_fee,
-          shipping_fee=EXCLUDED.shipping_fee, status=EXCLUDED.status,
-          buyer_name=EXCLUDED.buyer_name, raw_json=EXCLUDED.raw_json, updated_at=NOW()`,
+          item_title=EXCLUDED.item_title, item_sku=EXCLUDED.item_sku,
+          total_amount=EXCLUDED.total_amount, paid_amount=EXCLUDED.paid_amount,
+          platform_fee=EXCLUDED.platform_fee, shipping_fee=EXCLUDED.shipping_fee,
+          status=EXCLUDED.status, buyer_name=EXCLUDED.buyer_name,
+          raw_json=EXCLUDED.raw_json, updated_at=NOW()`,
         [uid, o.platform_order_id, o.shop_name, o.item_title, o.item_sku,
          o.quantity, o.total_amount, o.total_amount, o.platform_fee, o.shipping_fee, o.tax_amount,
          o.status, o.fulfillment_type, o.order_date, o.buyer_name, JSON.stringify(sale)]);
