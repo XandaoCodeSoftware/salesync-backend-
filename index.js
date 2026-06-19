@@ -1752,16 +1752,14 @@ async function enrichWithCosts(orders, userId) {
   for (const r of returnRows.rows) returnMap[`${normPlatform(r.platform)}:${String(r.platform_order_id||'')}`] = parseFloat(r.return_total_cost || 0);
 
   return orders.map(o => {
-    // v5.15 — Code Software: custo vem direto do raw_json da Karaka, não do cadastro de produtos
+    // v5.15 — Code Software: custo vem direto dos campos Karaka (espalhados via raw_json spread)
     if (o.platform === 'codesoftware') {
-      let raw = {};
-      try { raw = typeof o.raw_json === 'string' ? JSON.parse(o.raw_json) : (o.raw_json || {}); } catch {}
-      const total_amount  = parseFloat(o.total_amount || 0);
-      const total_cost    = parseFloat(raw.custo_total_venda || 0);
-      const platform_fee  = parseFloat(raw.vr_desconto || 0);
-      const shipping_fee  = parseFloat(raw.vr_frete || 0);
-      const profit        = o.status === 'cancelled' ? 0 : total_amount - total_cost - platform_fee - shipping_fee;
-      const margin        = total_amount > 0 ? (profit / total_amount * 100) : 0;
+      const total_amount = parseFloat(o.total_amount || 0);
+      const total_cost   = parseFloat(o.custo_total_venda || 0);
+      const platform_fee = parseFloat(o.vr_desconto || 0);
+      const shipping_fee = parseFloat(o.vr_frete || 0);
+      const profit       = o.status === 'cancelled' ? 0 : total_amount - total_cost - platform_fee - shipping_fee;
+      const margin       = total_amount > 0 ? (profit / total_amount * 100) : 0;
       return { ...o, unit_cost: total_cost, total_cost, platform_fee, shipping_fee, tax_amount: 0, profit, margin, tax_pct: 0, fee_pct: null };
     }
 
