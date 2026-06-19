@@ -6604,6 +6604,16 @@ app.post('/api/debug/fake-sale', auth, async (req, res) => {
   res.json({ ok: true, order_id: fakeId, platform: plat, valor, titulo });
 });
 
+// Debug — apaga vendas fake
+app.delete('/api/debug/fake-sale', auth, async (req, res) => {
+  if (req.user.email !== (process.env.INTERNAL_EMAIL || 'holdinglevelup@gmail.com'))
+    return res.status(403).json({ error: 'Acesso restrito' });
+  const { rowCount } = await db.query(
+    `DELETE FROM marketplace_orders WHERE user_id=$1 AND platform_order_id LIKE 'FAKE_%'`,
+    [req.user.id]);
+  res.json({ ok: true, deleted: rowCount });
+});
+
 // Debug — retorna raw JSON da Karaka sem salvar
 app.get('/api/codesoftware/raw', auth, async (req, res) => {
   if (req.user.email !== KARAKA_INTERNAL_EMAIL)
