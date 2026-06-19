@@ -1752,6 +1752,19 @@ async function enrichWithCosts(orders, userId) {
   for (const r of returnRows.rows) returnMap[`${normPlatform(r.platform)}:${String(r.platform_order_id||'')}`] = parseFloat(r.return_total_cost || 0);
 
   return orders.map(o => {
+    // v5.15 — Code Software: custo vem direto do raw_json da Karaka, não do cadastro de produtos
+    if (o.platform === 'codesoftware') {
+      let raw = {};
+      try { raw = typeof o.raw_json === 'string' ? JSON.parse(o.raw_json) : (o.raw_json || {}); } catch {}
+      const total_amount  = parseFloat(o.total_amount || 0);
+      const total_cost    = parseFloat(raw.custo_total_venda || 0);
+      const platform_fee  = parseFloat(raw.vr_desconto || 0);
+      const shipping_fee  = parseFloat(raw.vr_frete || 0);
+      const profit        = o.status === 'cancelled' ? 0 : total_amount - total_cost - platform_fee - shipping_fee;
+      const margin        = total_amount > 0 ? (profit / total_amount * 100) : 0;
+      return { ...o, unit_cost: total_cost, total_cost, platform_fee, shipping_fee, tax_amount: 0, profit, margin, tax_pct: 0, fee_pct: null };
+    }
+
     const sku = normSku(o.item_sku);
     const platform = normPlatform(o.platform);
     const product = productMap[`${platform}:${sku}`] || productMap[`geral:${sku}`] || { cost: 0, tax_pct: null, fee_pct: null, shipping_fee: null };
@@ -6546,22 +6559,28 @@ function karakaMapOrder(sale) {
   const [d, m, y] = (sale.data_emissao || '').split('/');
   const orderDate = d && m && y ? new Date(`${y}-${m}-${d}T12:00:00Z`).toISOString() : new Date().toISOString();
 
-  const cancelled = !!sale.cancelado;
+  const cancelled = !!sale.cancelado && sale.cancelado !== '';
   const itens = Array.isArray(sale.itens) ? sale.itens : [];
   const comissaoTotal = itens.reduce((s, i) => s + Number(i.vr_comissao || 0), 0);
-
-  // Produto principal (primeiro item)
-  const mainItem = itens[0] || {};
-  const itemTitle = itens.length === 1
-    ? (mainItem.produto?.nome_produto || 'Produto')
-    : itens.map(i => i.produto?.nome_produto || '').filter(Boolean).join(' + ');
-  const itemSku = mainItem.produto?.codigo_ref || String(mainItem.produto?.id || '');
   const qty = itens.reduce((s, i) => s + Number(i.quantidade || 1), 0);
 
-  const totalAmount = Number(sale.vr_nota_fiscal || 0);
-  const totalCost   = Number(sale.custo_total_venda || 0);
+  // Título: NOME_FANTASIA (ou razao_social) - VENDEDOR NOME
+  const clienteNome = sale.cliente?.nome_fantasia || sale.cliente?.razao_social || 'Cliente';
+  const vendedorNome = sale.vendedor?.nome || '';
+  const itemTitle = vendedorNome
+    ? `${clienteNome} - VENDEDOR ${vendedorNome}`
+    : clienteNome;
+
+  // SKU = código do cliente (CLI-{id}) — custo vem da API, não do cadastro de produtos
+  const itemSku = sale.cliente?.id ? `CLI-${sale.cliente.id}` : 'CLI-0';
+
+  // Valores conforme mapeamento:
+  // vr_produto = valor do produto, vr_desconto = tarifa, vr_frete = frete, custo_total_venda = custo
+  const totalAmount = Number(sale.vr_produto || sale.vr_nota_fiscal || 0);
+  const platformFee = Number(sale.vr_desconto || 0) + comissaoTotal;
   const freight     = Number(sale.vr_frete || 0);
-  const profit      = totalAmount - totalCost - comissaoTotal - freight;
+  const totalCost   = Number(sale.custo_total_venda || 0);
+  const profit      = cancelled ? 0 : totalAmount - platformFee - freight - totalCost;
 
   return {
     platform:           'codesoftware',
@@ -6569,10 +6588,10 @@ function karakaMapOrder(sale) {
     platform_order_id:  String(sale.id),
     item_title:         itemTitle,
     item_sku:           itemSku,
-    item_image:         null, // frontend usa logo K
+    item_image:         null,
     quantity:           qty,
     total_amount:       totalAmount,
-    platform_fee:       comissaoTotal,
+    platform_fee:       platformFee,
     shipping_fee:       freight,
     tax_amount:         0,
     total_cost:         totalCost,
