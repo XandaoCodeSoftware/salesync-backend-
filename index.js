@@ -6585,6 +6585,27 @@ function karakaMapOrder(sale) {
   };
 }
 
+// Debug — retorna raw JSON da Karaka sem salvar
+app.get('/api/codesoftware/raw', auth, async (req, res) => {
+  if (req.user.email !== KARAKA_INTERNAL_EMAIL)
+    return res.status(403).json({ error: 'Acesso restrito' });
+  try {
+    const days = Number(req.query.days || 30);
+    const toDate   = new Date();
+    const fromDate = new Date(Date.now() - days * 86400000);
+    const fmt = d => d.toISOString().split('T')[0];
+    const token = await karakaGetToken();
+    const { data } = await axios.get(`${KARAKA_API_URL}/karaka/vendas`, {
+      headers: { Authorization: `Bearer ${token}` },
+      params: { inicio: fmt(fromDate), fim: fmt(toDate) },
+      timeout: 15000
+    });
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Status da API Karaka
 app.get('/api/codesoftware/status', auth, async (req, res) => {
   if (req.user.email !== KARAKA_INTERNAL_EMAIL)
