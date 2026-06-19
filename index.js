@@ -6585,6 +6585,25 @@ function karakaMapOrder(sale) {
   };
 }
 
+// Debug — insere venda falsa para testar notificações
+app.post('/api/debug/fake-sale', auth, async (req, res) => {
+  if (req.user.email !== (process.env.INTERNAL_EMAIL || 'holdinglevelup@gmail.com'))
+    return res.status(403).json({ error: 'Acesso restrito' });
+  const fakeId = 'FAKE_' + Date.now();
+  const plat = req.body.platform || 'mercadolivre';
+  const valor = req.body.valor || 299.90;
+  const titulo = req.body.titulo || '🧪 Venda de Teste — SaleSync Debug';
+  await db.query(`
+    INSERT INTO marketplace_orders
+      (user_id, platform, account_id, platform_order_id, shop_name, item_title, item_sku,
+       quantity, total_amount, paid_amount, platform_fee, shipping_fee, tax_amount,
+       status, fulfillment_type, order_date, updated_at)
+    VALUES ($1,$2,NULL,$3,$4,$5,$6,1,$7,$7,0,0,0,'paid','normal',NOW(),NOW())
+    ON CONFLICT (user_id, platform, platform_order_id) DO NOTHING`,
+    [req.user.id, plat, fakeId, 'DEBUG', titulo, 'SKU-TEST', valor]);
+  res.json({ ok: true, order_id: fakeId, platform: plat, valor, titulo });
+});
+
 // Debug — retorna raw JSON da Karaka sem salvar
 app.get('/api/codesoftware/raw', auth, async (req, res) => {
   if (req.user.email !== KARAKA_INTERNAL_EMAIL)
