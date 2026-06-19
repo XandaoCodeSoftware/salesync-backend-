@@ -6624,18 +6624,17 @@ app.post('/api/codesoftware/sync', auth, async (req, res) => {
       await db.query(`
         INSERT INTO marketplace_orders
           (user_id, platform, account_id, platform_order_id, shop_name, item_title, item_sku,
-           quantity, total_amount, platform_fee, shipping_fee, tax_amount, total_cost, profit,
-           status, fulfillment_type, order_date, buyer_name, payment_method, updated_at)
-        VALUES ($1,'codesoftware',NULL,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW())
+           quantity, total_amount, paid_amount, platform_fee, shipping_fee, tax_amount,
+           status, fulfillment_type, order_date, buyer_name, raw_json, updated_at)
+        VALUES ($1,'codesoftware',NULL,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW())
         ON CONFLICT (user_id, platform, platform_order_id) DO UPDATE SET
           item_title=EXCLUDED.item_title, total_amount=EXCLUDED.total_amount,
-          platform_fee=EXCLUDED.platform_fee, shipping_fee=EXCLUDED.shipping_fee,
-          total_cost=EXCLUDED.total_cost, profit=EXCLUDED.profit,
-          status=EXCLUDED.status, buyer_name=EXCLUDED.buyer_name, updated_at=NOW()`,
+          paid_amount=EXCLUDED.paid_amount, platform_fee=EXCLUDED.platform_fee,
+          shipping_fee=EXCLUDED.shipping_fee, status=EXCLUDED.status,
+          buyer_name=EXCLUDED.buyer_name, raw_json=EXCLUDED.raw_json, updated_at=NOW()`,
         [uid, o.platform_order_id, o.shop_name, o.item_title, o.item_sku,
-         o.quantity, o.total_amount, o.platform_fee, o.shipping_fee, o.tax_amount,
-         o.total_cost, o.profit, o.status, o.fulfillment_type,
-         o.order_date, o.buyer_name, o.payment_method]);
+         o.quantity, o.total_amount, o.total_amount, o.platform_fee, o.shipping_fee, o.tax_amount,
+         o.status, o.fulfillment_type, o.order_date, o.buyer_name, JSON.stringify(sale)]);
       count++;
     }
 
