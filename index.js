@@ -194,6 +194,36 @@ app.post('/api/auth/login', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ═══════════════════════════════════════════════════════════════
+// v5.14 | 2026-06-19 | Login interno — acesso direto por chave secreta
+// Uso: POST /api/internal/login  { "key": "SUA_INTERNAL_KEY" }
+// Retorna JWT igual ao login normal. Protegido por INTERNAL_KEY no env.
+// ═══════════════════════════════════════════════════════════════
+app.post('/api/internal/login', async (req, res) => {
+  try {
+    const { key } = req.body;
+    const INTERNAL_KEY = process.env.INTERNAL_KEY;
+    if (!INTERNAL_KEY) return res.status(503).json({ error: 'Login interno não configurado' });
+    if (!key || key !== INTERNAL_KEY) {
+      console.warn('[Internal Login] Tentativa com chave inválida — IP:', req.ip);
+      return res.status(401).json({ error: 'Chave inválida' });
+    }
+    // Busca o usuário interno pelo email fixo
+    const INTERNAL_EMAIL = process.env.INTERNAL_EMAIL || 'holdinglevelup@gmail.com';
+    const { rows } = await db.query(
+      `SELECT id, name, email, plan FROM users WHERE email=$1 AND is_active=true LIMIT 1`,
+      [INTERNAL_EMAIL]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Usuário interno não encontrado' });
+    const user = rows[0];
+    const token = jwt.sign({ id: user.id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '90d' });
+    console.log('[Internal Login] ✅ Acesso interno autenticado para', user.name);
+    res.json({ success: true, token, user });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── PERFIL ATUAL (atualiza plan sem precisar relogar)
 app.get('/api/me', auth, async (req, res) => {
   try {
@@ -789,7 +819,19 @@ pre{background:#0D1117;border-radius:8px;padding:12px;overflow-x:auto;font-size:
 });
 
 // ── REFRESH TOKEN ML ──
+// v5.14 — mutex por account.id evita renovações simultâneas (race condition)
+const _mlRefreshLocks = new Map();
 async function refreshMLToken(account) {
+  const lockKey = String(account.id);
+  if (_mlRefreshLocks.has(lockKey)) {
+    // Já está renovando — aguarda a renovação em curso e retorna o token atualizado
+    await _mlRefreshLocks.get(lockKey);
+    const { rows } = await db.query(`SELECT access_token FROM marketplace_accounts WHERE id=$1`, [account.id]);
+    return rows[0]?.access_token || null;
+  }
+  let resolve;
+  const lock = new Promise(r => { resolve = r; });
+  _mlRefreshLocks.set(lockKey, lock);
   try {
     const { data } = await axios.post('https://api.mercadolibre.com/oauth/token',
       new URLSearchParams({
@@ -809,6 +851,9 @@ async function refreshMLToken(account) {
   } catch(e) {
     console.error('[ML Refresh]', e.response?.data || e.message);
     return null;
+  } finally {
+    resolve();
+    _mlRefreshLocks.delete(lockKey);
   }
 }
 
@@ -6469,6 +6514,135 @@ app.post('/api/questions/:questionId/answer', auth, async (req, res) => {
     const mlErr = e.response?.data;
     console.error('[Questions] Erro ao responder', e.response?.status, mlErr || e.message);
     res.status(e.response?.status || 500).json({ ok: false, error: mlErr?.message || e.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// v5.14 | 2026-06-19 | CODE SOFTWARE — Integração API Karaka
+// Só disponível para a conta interna (INTERNAL_EMAIL)
+// Env: KARAKA_API_URL, KARAKA_API_KEY
+// ═══════════════════════════════════════════════════════════════
+const KARAKA_API_URL = process.env.KARAKA_API_URL || 'http://177.67.241.33:8085';
+const KARAKA_API_KEY = process.env.KARAKA_API_KEY || 'JO3P87QO4B1DmlhAN3Dt';
+const KARAKA_INTERNAL_EMAIL = process.env.INTERNAL_EMAIL || 'holdinglevelup@gmail.com';
+let _karakaTokenCache = null; // { token, expiresAt }
+
+async function karakaGetToken() {
+  if (_karakaTokenCache && _karakaTokenCache.expiresAt > Date.now() + 60000)
+    return _karakaTokenCache.token;
+  const { data } = await axios.post(`${KARAKA_API_URL}/login`, null, {
+    headers: { 'x-api-key': KARAKA_API_KEY },
+    timeout: 8000
+  });
+  if (!data.token) throw new Error('Karaka API: token não retornado');
+  // JWT expira em ~24h, cacheia por 23h
+  _karakaTokenCache = { token: data.token, expiresAt: Date.now() + 23 * 3600 * 1000 };
+  console.log('[CodeSoftware] ✅ Token obtido');
+  return data.token;
+}
+
+function karakaMapOrder(sale) {
+  // Monta order_date a partir de DD/MM/YYYY
+  const [d, m, y] = (sale.data_emissao || '').split('/');
+  const orderDate = d && m && y ? new Date(`${y}-${m}-${d}T12:00:00Z`).toISOString() : new Date().toISOString();
+
+  const cancelled = !!sale.cancelado;
+  const itens = Array.isArray(sale.itens) ? sale.itens : [];
+  const comissaoTotal = itens.reduce((s, i) => s + Number(i.vr_comissao || 0), 0);
+
+  // Produto principal (primeiro item)
+  const mainItem = itens[0] || {};
+  const itemTitle = itens.length === 1
+    ? (mainItem.produto?.nome_produto || 'Produto')
+    : itens.map(i => i.produto?.nome_produto || '').filter(Boolean).join(' + ');
+  const itemSku = mainItem.produto?.codigo_ref || String(mainItem.produto?.id || '');
+  const qty = itens.reduce((s, i) => s + Number(i.quantidade || 1), 0);
+
+  const totalAmount = Number(sale.vr_nota_fiscal || 0);
+  const totalCost   = Number(sale.custo_total_venda || 0);
+  const freight     = Number(sale.vr_frete || 0);
+  const profit      = totalAmount - totalCost - comissaoTotal - freight;
+
+  return {
+    platform:           'codesoftware',
+    shop_name:          'CODE SOFTWARE',
+    platform_order_id:  String(sale.id),
+    item_title:         itemTitle,
+    item_sku:           itemSku,
+    item_image:         null, // frontend usa logo K
+    quantity:           qty,
+    total_amount:       totalAmount,
+    platform_fee:       comissaoTotal,
+    shipping_fee:       freight,
+    tax_amount:         0,
+    total_cost:         totalCost,
+    profit:             cancelled ? 0 : profit,
+    status:             cancelled ? 'cancelled' : 'paid',
+    fulfillment_type:   'normal',
+    order_date:         orderDate,
+    buyer_name:         sale.cliente?.razao_social || sale.cliente?.nome_fantasia || null,
+    payment_method:     sale.modelo_nota || null,
+  };
+}
+
+// Status da API Karaka
+app.get('/api/codesoftware/status', auth, async (req, res) => {
+  if (req.user.email !== KARAKA_INTERNAL_EMAIL)
+    return res.status(403).json({ ok: false, error: 'Acesso restrito' });
+  try {
+    await karakaGetToken();
+    res.json({ ok: true, online: true });
+  } catch (e) {
+    res.json({ ok: false, online: false, error: e.message });
+  }
+});
+
+// Sync de vendas Code Software
+app.post('/api/codesoftware/sync', auth, async (req, res) => {
+  if (req.user.email !== KARAKA_INTERNAL_EMAIL)
+    return res.status(403).json({ ok: false, error: 'Acesso restrito' });
+  try {
+    const uid = req.user.id;
+    const days = Number(req.query.days || 30);
+    const toDate   = new Date();
+    const fromDate = new Date(Date.now() - days * 86400000);
+    const fmt = d => d.toISOString().split('T')[0]; // YYYY-MM-DD
+
+    const token = await karakaGetToken();
+    const { data: sales } = await axios.get(`${KARAKA_API_URL}/karaka/vendas`, {
+      headers: { Authorization: `Bearer ${token}` },
+      params: { inicio: fmt(fromDate), fim: fmt(toDate) },
+      timeout: 15000
+    });
+
+    const orders = Array.isArray(sales) ? sales : [];
+    console.log(`[CodeSoftware] ${orders.length} vendas recebidas (${fmt(fromDate)} → ${fmt(toDate)})`);
+
+    let count = 0;
+    for (const sale of orders) {
+      const o = karakaMapOrder(sale);
+      await db.query(`
+        INSERT INTO marketplace_orders
+          (user_id, platform, account_id, platform_order_id, shop_name, item_title, item_sku,
+           quantity, total_amount, platform_fee, shipping_fee, tax_amount, total_cost, profit,
+           status, fulfillment_type, order_date, buyer_name, payment_method, updated_at)
+        VALUES ($1,'codesoftware',NULL,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW())
+        ON CONFLICT (user_id, platform, platform_order_id) DO UPDATE SET
+          item_title=EXCLUDED.item_title, total_amount=EXCLUDED.total_amount,
+          platform_fee=EXCLUDED.platform_fee, shipping_fee=EXCLUDED.shipping_fee,
+          total_cost=EXCLUDED.total_cost, profit=EXCLUDED.profit,
+          status=EXCLUDED.status, buyer_name=EXCLUDED.buyer_name, updated_at=NOW()`,
+        [uid, o.platform_order_id, o.shop_name, o.item_title, o.item_sku,
+         o.quantity, o.total_amount, o.platform_fee, o.shipping_fee, o.tax_amount,
+         o.total_cost, o.profit, o.status, o.fulfillment_type,
+         o.order_date, o.buyer_name, o.payment_method]);
+      count++;
+    }
+
+    res.json({ ok: true, synced: count, from: fmt(fromDate), to: fmt(toDate) });
+  } catch (e) {
+    console.error('[CodeSoftware sync]', e.response?.data || e.message);
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
