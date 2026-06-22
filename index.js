@@ -429,6 +429,64 @@ app.put('/api/products/:sku/cost', auth, async (req, res) => {
 
 
 // Apaga um SKU específico da aba de custos
+// v5.16 — Histórico de custo por SKU: leitura
+app.get('/api/products/:sku/cost-history', auth, async (req, res) => {
+  const sku = normSku(req.params.sku);
+  const platform = normPlatform(req.query.platform || 'geral');
+  try {
+    const { rows } = await db.query(
+      `SELECT id, cost, effective_from, effective_to
+       FROM product_cost_history
+       WHERE user_id=$1 AND sku=$2 AND platform=$3
+       ORDER BY effective_from ASC`,
+      [req.user.id, sku, platform]
+    );
+    res.json({ success: true, history: rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// v5.16 — Define custo a partir de uma data específica
+app.post('/api/products/:sku/cost-history', auth, async (req, res) => {
+  const sku = normSku(req.params.sku);
+  const platform = normPlatform(req.body.platform || req.query.platform || 'geral');
+  const cost = Number(req.body.cost || 0);
+  const from = req.body.effective_from; // YYYY-MM-DD
+  if (!from) return res.status(400).json({ error: 'effective_from obrigatório' });
+  try {
+    const fromTs = new Date(from + 'T00:00:00Z');
+    // Fecha entradas que sobrepõem esse período
+    await db.query(
+      `UPDATE product_cost_history SET effective_to=$1
+       WHERE user_id=$2 AND sku=$3 AND platform=$4
+         AND effective_from <= $1 AND (effective_to IS NULL OR effective_to > $1)`,
+      [fromTs.toISOString(), req.user.id, sku, platform]
+    );
+    // Deleta entradas que começam depois (serão substuídas se necessário)
+    await db.query(
+      `DELETE FROM product_cost_history
+       WHERE user_id=$1 AND sku=$2 AND platform=$3 AND effective_from >= $4`,
+      [req.user.id, sku, platform, fromTs.toISOString()]
+    );
+    // Insere novo registro
+    await db.query(
+      `INSERT INTO product_cost_history (user_id, platform, sku, cost, effective_from)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [req.user.id, platform, sku, cost, fromTs.toISOString()]
+    );
+    // Atualiza custo atual no cadastro se for hoje ou futuro
+    if (fromTs <= new Date()) {
+      await db.query(
+        `INSERT INTO products (user_id, platform, sku, name, cost, is_active)
+         VALUES ($1,$2,$3,$3,$4,true)
+         ON CONFLICT (user_id, platform, sku) DO UPDATE SET cost=$4, updated_at=NOW()`,
+        [req.user.id, platform, sku, cost]
+      );
+    }
+    Object.keys(CACHE).forEach(k => { if (k.startsWith(req.user.id)) delete CACHE[k]; });
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.delete('/api/products/:id', auth, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'ID inválido' });
