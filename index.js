@@ -23,6 +23,7 @@ db.connect()
   .then(async () => {
     console.log('✅ Supabase conectado!');
     await ensureProductSchema();
+    await ensureProductCostHistorySchema();
     await ensureSalesSyncSchema();
     await ensureOrdersReturnsSchema();
   })
@@ -34,6 +35,26 @@ const CACHE_TTL = 15 * 60 * 1000;
 // CPFs de teste do ambiente Magalu — filtrar fora
 const MAGALU_TEST_DOCUMENTS = ['39743407006', '00000000000', '12345678909'];
 
+
+// v5.16 — Histórico de custos por data
+async function ensureProductCostHistorySchema() {
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS product_cost_history (
+        id          SERIAL PRIMARY KEY,
+        user_id     INTEGER NOT NULL,
+        platform    TEXT NOT NULL DEFAULT 'geral',
+        sku         TEXT NOT NULL,
+        cost        NUMERIC(12,4) NOT NULL,
+        effective_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        effective_to   TIMESTAMPTZ,
+        created_at  TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS pch_user_plat_sku ON product_cost_history(user_id, platform, sku)`);
+    console.log('✅ product_cost_history schema OK');
+  } catch(e) { console.error('[CostHistory schema]', e.message); }
+}
 
 async function ensureProductSchema() {
   try {
@@ -325,6 +346,47 @@ app.put('/api/products/:sku/cost', auth, async (req, res) => {
   const feePct = req.body.fee_pct === '' || req.body.fee_pct === undefined || req.body.fee_pct === null ? null : Number(req.body.fee_pct || 0);
   const shippingFee = req.body.shipping_fee === '' || req.body.shipping_fee === undefined || req.body.shipping_fee === null ? null : Number(req.body.shipping_fee || 0);
   try {
+    // v5.16 — salva custo anterior no histórico antes de atualizar
+    const prev = await db.query(
+      `SELECT cost, updated_at FROM products WHERE user_id=$1 AND platform=$2 AND sku=$3`,
+      [req.user.id, platform, sku]
+    );
+    if (prev.rows.length && Number(prev.rows[0].cost) !== cost) {
+      const prevCost = Number(prev.rows[0].cost);
+      const prevFrom = prev.rows[0].updated_at || new Date();
+      // Fecha o período do custo anterior
+      await db.query(
+        `UPDATE product_cost_history SET effective_to=NOW()
+         WHERE user_id=$1 AND platform=$2 AND sku=$3 AND effective_to IS NULL`,
+        [req.user.id, platform, sku]
+      );
+      // Registra custo anterior caso não tenha histórico ainda
+      const histCount = await db.query(
+        `SELECT COUNT(*) FROM product_cost_history WHERE user_id=$1 AND platform=$2 AND sku=$3`,
+        [req.user.id, platform, sku]
+      );
+      if (Number(histCount.rows[0].count) === 0 && prevCost > 0) {
+        await db.query(
+          `INSERT INTO product_cost_history (user_id, platform, sku, cost, effective_from, effective_to)
+           VALUES ($1,$2,$3,$4,$5,NOW())`,
+          [req.user.id, platform, sku, prevCost, prevFrom]
+        );
+      }
+      // Novo custo entra em vigor agora
+      await db.query(
+        `INSERT INTO product_cost_history (user_id, platform, sku, cost, effective_from)
+         VALUES ($1,$2,$3,$4,NOW())`,
+        [req.user.id, platform, sku, cost]
+      );
+    } else if (!prev.rows.length && cost > 0) {
+      // Primeiro cadastro
+      await db.query(
+        `INSERT INTO product_cost_history (user_id, platform, sku, cost, effective_from)
+         VALUES ($1,$2,$3,$4,NOW())`,
+        [req.user.id, platform, sku, cost]
+      );
+    }
+
     const { rows } = await db.query(
       `INSERT INTO products (user_id, platform, sku, name, cost, tax_pct, fee_pct, shipping_fee)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
@@ -1747,6 +1809,29 @@ async function enrichWithCosts(orders, userId) {
     };
   });
 
+  // v5.16 — histórico de custos: busca todos os registros do usuário
+  const { rows: histRows } = await db.query(
+    `SELECT sku, COALESCE(platform,'geral') AS platform, cost, effective_from, effective_to
+     FROM product_cost_history WHERE user_id=$1 ORDER BY effective_from ASC`,
+    [userId]
+  );
+  // Agrupa por platform:sku
+  const costHistory = {};
+  histRows.forEach(h => {
+    const key = `${normPlatform(h.platform)}:${normSku(h.sku)}`;
+    if (!costHistory[key]) costHistory[key] = [];
+    costHistory[key].push({ cost: parseFloat(h.cost), from: new Date(h.effective_from), to: h.effective_to ? new Date(h.effective_to) : null });
+  });
+  function getHistoricalCost(platform, sku, orderDate) {
+    const key = `${platform}:${sku}`;
+    const hist = costHistory[key] || costHistory[`geral:${sku}`];
+    if (!hist || !hist.length) return null;
+    const d = new Date(orderDate);
+    // Encontra o registro vigente na data do pedido
+    const match = hist.find(h => d >= h.from && (h.to === null || d < h.to));
+    return match ? match.cost : null;
+  }
+
   const returnRows = await db.query(`SELECT platform, platform_order_id, SUM(return_total_cost) AS return_total_cost FROM marketplace_returns WHERE user_id=$1 GROUP BY platform, platform_order_id`, [userId]);
   const returnMap = {};
   for (const r of returnRows.rows) returnMap[`${normPlatform(r.platform)}:${String(r.platform_order_id||'')}`] = parseFloat(r.return_total_cost || 0);
@@ -1768,7 +1853,9 @@ async function enrichWithCosts(orders, userId) {
     const product = productMap[`${platform}:${sku}`] || productMap[`geral:${sku}`] || { cost: 0, tax_pct: null, fee_pct: null, shipping_fee: null };
     const defaults = productMap[`${platform}:__DEFAULT__`] || productMap[`geral:__DEFAULT__`] || { tax_pct: null, fee_pct: null, shipping_fee: null };
 
-    const unit_cost  = parseFloat(product.cost || 0);
+    // v5.16 — usa custo histórico se disponível para a data do pedido
+    const historicalCost = getHistoricalCost(platform, sku, o.order_date);
+    const unit_cost = historicalCost !== null ? historicalCost : parseFloat(product.cost || 0);
     // Primeiro tenta o SKU. Se estiver vazio, usa o padrão da plataforma.
     const tax_pct    = product.tax_pct === null || product.tax_pct === undefined ? defaults.tax_pct : product.tax_pct;
     const fee_pct    = product.fee_pct === null || product.fee_pct === undefined ? defaults.fee_pct : product.fee_pct;
@@ -6537,6 +6624,18 @@ const KARAKA_API_URL = process.env.KARAKA_API_URL || 'http://177.67.241.33:8085'
 const KARAKA_API_KEY = process.env.KARAKA_API_KEY || 'JO3P87QO4B1DmlhAN3Dt';
 const KARAKA_INTERNAL_EMAIL = process.env.INTERNAL_EMAIL || 'holdinglevelup@gmail.com';
 let _karakaTokenCache = null; // { token, expiresAt }
+
+// v5.15 — Telegram: envia notificação de venda
+async function ssTelegramNotify(msg) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) return;
+  try {
+    await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
+      chat_id: chatId, text: msg, parse_mode: 'HTML'
+    }, { timeout: 5000 });
+  } catch(e) { console.log('[Telegram]', e.message); }
+}
 
 async function karakaGetToken() {
   if (_karakaTokenCache && _karakaTokenCache.expiresAt > Date.now() + 60000)
