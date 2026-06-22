@@ -39,10 +39,18 @@ const MAGALU_TEST_DOCUMENTS = ['39743407006', '00000000000', '12345678909'];
 // v5.16 — Histórico de custos por data
 async function ensureProductCostHistorySchema() {
   try {
+    // Dropa se user_id for integer (tipo errado)
+    await db.query(`
+      DO $$ BEGIN
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name='product_cost_history' AND column_name='user_id' AND data_type='integer'
+        ) THEN DROP TABLE product_cost_history; END IF;
+      END $$`);
     await db.query(`
       CREATE TABLE IF NOT EXISTS product_cost_history (
         id          SERIAL PRIMARY KEY,
-        user_id     INTEGER NOT NULL,
+        user_id     TEXT NOT NULL,
         platform    TEXT NOT NULL DEFAULT 'geral',
         sku         TEXT NOT NULL,
         cost        NUMERIC(12,4) NOT NULL,
@@ -267,6 +275,19 @@ app.get('/api/accounts', auth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Desconecta conta específica por ID (evita deslogar todas as contas da plataforma)
+app.post('/api/accounts/by-id/:id/disconnect', auth, async (req, res) => {
+  try {
+    await db.query(
+      `UPDATE marketplace_accounts SET access_token=NULL,refresh_token=NULL,token_expires_at=NULL,is_active=false,updated_at=NOW() WHERE id=$1 AND user_id=$2`,
+      [req.params.id, req.user.id]
+    );
+    Object.keys(CACHE).forEach(k => { if (k.startsWith(req.user.id)) delete CACHE[k]; });
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Mantém compatibilidade — desconecta todas da plataforma (usado só quando não há ID)
 app.post('/api/accounts/:platform/disconnect', auth, async (req, res) => {
   try {
     await db.query(
