@@ -4746,7 +4746,8 @@ function ssMoneyNum(v) { return Math.round(ssNum(v) * 100) / 100; }
 function ssFirstMonth(d = new Date()) { return new Date(d.getFullYear(), d.getMonth(), 1); }
 function ssDaysInMonth(d = new Date()) { return new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate(); }
 function ssElapsedDays(d = new Date()) { return Math.max(1, d.getDate()); }
-function ssOrderAmount(o) { return ssNum(o.total_amount ?? o.paid_amount ?? o.amount ?? o.total ?? 0); }
+// v5.16 — usa paid_amount (valor real pago pelo cliente) como faturamento
+function ssOrderAmount(o) { return ssNum(o.paid_amount ?? o.total_amount ?? o.amount ?? o.total ?? 0); }
 function ssOrderProfit(o) { return ssNum(o.profit ?? o.net_profit ?? o.lucro ?? 0); }
 function ssOrderProduct(o) { return String(o.item_title || o.product_name || o.name || o.item_sku || 'Produto sem nome'); }
 function ssDateOnlyBR(v) { try { return new Date(v).toLocaleDateString('pt-BR'); } catch { return ''; } }
