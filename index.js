@@ -2888,7 +2888,7 @@ app.post('/api/returns/sync/:platform', auth, async (req, res) => {
       const list = platform === 'mercadolivre' ? await ssFetchMLReturns(acc) : platform === 'magalu' ? await ssFetchMagaluReturns(acc) : [];
       for (const r of list) { await ssUpsertReturn(req.user.id, acc, r); count++; }
     }
-    await ssBackfillReturns(req.user.id);
+    try { await ssBackfillReturns(req.user.id); } catch(be){ console.error('[backfill returns]', be.message); }
     res.json({ success:true, synced:count, data: await ssLoadReturns(req.user.id, platform) });
   } catch(e){ res.status(500).json({ error:e.message }); }
 });
@@ -2911,7 +2911,7 @@ app.post('/api/returns/reset/:platform', auth, async (req, res) => {
       const list = platform === 'mercadolivre' ? await ssFetchMLReturns(acc) : platform === 'magalu' ? await ssFetchMagaluReturns(acc) : [];
       for (const r of list) { await ssUpsertReturn(uid, acc, r); count++; }
     }
-    await ssBackfillReturns(uid);
+    try { await ssBackfillReturns(uid); } catch(be){ console.error('[backfill returns reset]', be.message); }
     res.json({ success:true, deleted: rowCount, synced: count, data: await ssLoadReturns(uid, platform) });
   } catch(e){ res.status(500).json({ error:e.message }); }
 });
