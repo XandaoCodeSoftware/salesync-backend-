@@ -2737,6 +2737,36 @@ app.post('/api/returns/:id/cost', auth, async (req, res) => {
   } catch(e){ res.status(500).json({ error:e.message }); }
 });
 
+app.put('/api/returns/:id', auth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const b = req.body;
+    const shipping = b.return_shipping_cost != null ? ssNum2(b.return_shipping_cost) : null;
+    const fee      = b.return_fee         != null ? ssNum2(b.return_fee)         : null;
+    const refund   = b.refund_adjustment  != null ? ssNum2(b.refund_adjustment)  : null;
+    const lost     = b.lost_product_cost  != null ? ssNum2(b.lost_product_cost)  : null;
+    const total    = b.return_total_cost  != null ? ssNum2(b.return_total_cost)  : null;
+    const { rows } = await db.query(
+      `UPDATE marketplace_returns SET
+        item_sku             = COALESCE($1, item_sku),
+        item_title           = COALESCE($2, item_title),
+        order_date           = COALESCE($3::timestamptz, order_date),
+        total_amount         = COALESCE($4, total_amount),
+        return_shipping_cost = COALESCE($5, return_shipping_cost),
+        return_fee           = COALESCE($6, return_fee),
+        refund_adjustment    = COALESCE($7, refund_adjustment),
+        lost_product_cost    = COALESCE($8, lost_product_cost),
+        return_total_cost    = COALESCE($9, return_total_cost),
+        updated_at           = NOW()
+       WHERE id=$10 AND user_id=$11 RETURNING *`,
+      [b.item_sku||null, b.item_title||null, b.order_date||null, b.total_amount!=null?ssNum2(b.total_amount):null,
+       shipping, fee, refund, lost, total, id, req.user.id]
+    );
+    if(!rows.length) return res.status(404).json({ error:'Devolução não encontrada' });
+    res.json({ success:true, data:rows[0] });
+  } catch(e){ res.status(500).json({ error:e.message }); }
+});
+
 app.post('/api/returns/sync/:platform', auth, async (req, res) => {
   try {
     const platform = String(req.params.platform || '').toLowerCase();
