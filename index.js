@@ -3832,6 +3832,41 @@ app.get('/api/magalu/delivery/:id/debug', auth, async (req, res) => {
 });
 
 // ── Busca dados fiscais do comprador no ML (CPF/CNPJ para emissão de NF) ──
+// Debug: testa vários endpoints ML para achar custos de devolução
+app.get('/api/ml/return-costs-debug/:orderId', auth, async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { rows } = await db.query(
+      `SELECT access_token, platform_shop_id FROM marketplace_accounts
+       WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true LIMIT 1`,
+      [req.user.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'ML não conectado' });
+    const token = rows[0].access_token;
+    const h = { Authorization: `Bearer ${token}` };
+    const results = {};
+
+    // 1. Order completo
+    try { const { data } = await axios.get(`https://api.mercadolibre.com/orders/${orderId}`, { headers: h }); results.order_shipping_id = data?.shipping?.id; results.order_payments = data?.payments?.map(p=>({status:p.status,status_detail:p.status_detail,transaction_amount:p.transaction_amount,total_paid_amount:p.total_paid_amount,transaction_amount_refunded:p.transaction_amount_refunded,shipping_cost:p.shipping_cost})); } catch(e) { results.order_error = e.response?.data || e.message; }
+
+    // 2. Collections (dados financeiros)
+    try { const { data } = await axios.get(`https://api.mercadolibre.com/collections/orders/${orderId}`, { headers: h }); results.collections = data; } catch(e) { results.collections_error = e.response?.data || e.message; }
+
+    // 3. Shipment completo
+    const shipId = results.order_shipping_id || req.query.ship_id;
+    if (shipId) {
+      try { const { data } = await axios.get(`https://api.mercadolibre.com/shipments/${shipId}`, { headers: h }); results.shipment = { base_cost: data.base_cost, cost: data.cost, charges: data.charges, shipping_items: data.shipping_items, mode: data.mode, sender_cost: data.sender?.cost, receiver_cost: data.receiver?.cost }; } catch(e) { results.shipment_error = e.response?.data || e.message; }
+      // 4. Shipment costs
+      try { const { data } = await axios.get(`https://api.mercadolibre.com/shipments/${shipId}/costs`, { headers: h }); results.shipment_costs = data; } catch(e) { results.shipment_costs_error = e.response?.data || e.message; }
+    }
+
+    // 5. Account movements (movimentações financeiras do vendedor)
+    try { const { data } = await axios.get(`https://api.mercadolibre.com/users/${rows[0].platform_shop_id}/mercadopago/account/movements?limit=5`, { headers: h }); results.movements_sample = data; } catch(e) { results.movements_error = e.response?.data || e.message; }
+
+    res.json(results);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // GET /orders/{id}/billing_info — só disponível com token do vendedor
 app.get('/api/ml/billing/:orderId', auth, async (req, res) => {
   try {
