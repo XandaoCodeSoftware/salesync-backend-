@@ -2663,6 +2663,7 @@ async function ssFetchMLReturns(acc, days = 365) {
               try {
                 const { data: shipData } = await axios.get(`${claimsDomain}/orders/${orderId}/shipments`, { headers });
                 data._return_shipping_charge = Number(shipData?.shipping_option?.list_cost || 0);
+                data._shipment_history = shipData?.status_history || {};
                 console.log(`[ML returns] claim ${c.id} order ${orderId} list_cost=${data._return_shipping_charge}`);
               } catch(se) {
                 console.warn(`[ML returns] shipments ${orderId} failed: ${se.response?.status} ${se.message}`);
@@ -2778,6 +2779,7 @@ async function ssFetchMLReturns(acc, days = 365) {
                 `https://api.mercadolibre.com/orders/${o.id}/shipments`, { headers }
               );
               returnShippingCost = Number(shipData?.shipping_option?.list_cost || 0);
+              o._shipment_history = shipData?.status_history || {};
               console.log(`[ML returns] order ${o.id} list_cost: R$${returnShippingCost}`);
             } catch(_) {}
           } else {
