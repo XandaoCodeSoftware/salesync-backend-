@@ -3900,6 +3900,12 @@ app.get('/api/ml/return-costs-debug/:orderId', auth, async (req, res) => {
       try { const { data } = await axios.get(`https://api.mercadolibre.com/claims/${mediationId}`, { headers: h }); results.claim = data; } catch(e) { results.claim_error = e.response?.data || e.message; }
       // Resolver (custos de resolução)
       try { const { data } = await axios.get(`https://api.mercadolibre.com/post-purchase/v1/claims/${mediationId}/resolutions`, { headers: h }); results.claim_resolutions = data; } catch(e) { results.claim_resolutions_error = e.response?.data || e.message; }
+      // Return vinculado ao claim
+      try { const { data } = await axios.get(`https://api.mercadolibre.com/post-purchase/v1/claims/${mediationId}/return`, { headers: h }); results.claim_return = data; } catch(e) { results.claim_return_error = e.response?.data || e.message; }
+      // Returns por claim_id
+      try { const { data } = await axios.get(`https://api.mercadolibre.com/post-purchase/v1/returns?claim_id=${mediationId}`, { headers: h }); results.returns_by_claim = data; } catch(e) { results.returns_by_claim_error = e.response?.data || e.message; }
+      // Returns por order_id
+      try { const { data } = await axios.get(`https://api.mercadolibre.com/post-purchase/v1/returns?order_id=${orderId}`, { headers: h }); results.returns_by_order = data; } catch(e) { results.returns_by_order_error = e.response?.data || e.message; }
     }
 
     res.json(results);
