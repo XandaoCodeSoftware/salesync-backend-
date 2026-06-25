@@ -2534,9 +2534,9 @@ async function ssBackfillReturns(userId) {
         item_title   = COALESCE(item_title, $2),
         order_date   = COALESCE(order_date, $3::timestamptz),
         total_amount = CASE WHEN total_amount=0 AND $4>0 THEN $4 ELSE total_amount END,
-        return_shipping_cost = CASE WHEN $5 IS NOT NULL AND return_total_cost <= 0 THEN $5 ELSE return_shipping_cost END,
-        return_fee           = CASE WHEN $6 IS NOT NULL AND return_total_cost <= 0 THEN $6 ELSE return_fee END,
-        return_total_cost    = CASE WHEN $7 IS NOT NULL AND return_total_cost <= 0 THEN $7 ELSE return_total_cost END,
+        return_shipping_cost = CASE WHEN $5::numeric IS NOT NULL AND return_total_cost <= 0 THEN $5::numeric ELSE return_shipping_cost END,
+        return_fee           = CASE WHEN $6::numeric IS NOT NULL AND return_total_cost <= 0 THEN $6::numeric ELSE return_fee END,
+        return_total_cost    = CASE WHEN $7::numeric IS NOT NULL AND return_total_cost <= 0 THEN $7::numeric ELSE return_total_cost END,
         updated_at = NOW()
        WHERE id=$8`,
       [itemSku, itemTitle, orderDate, totalAmt, newShipping, newFee, newTotal, row.id]
@@ -2755,44 +2755,40 @@ async function ssFetchMLReturns(acc, days = 365) {
         let returnShippingCost = 0;
         let returnFee = saleCommission; // ML devolve a comissão mas cobra tarifa de envio de volta
 
+        // dados do produto/pedido do orders/search
+        const itemTitle = firstItem?.item?.title || null;
+        const itemSku   = firstItem?.item?.seller_sku || null;
+
         if (!bppCovered) {
-          // Tenta buscar custo real via mediações do pedido → /charges/return-cost
           const mediations = Array.isArray(o.mediations) ? o.mediations : [];
-          if (mediations.length > 0) {
+          const claimId = mediations[0]?.id;
+          if (claimId) {
+            // 1. tarifa de devolução
             try {
-              const claimId = mediations[0].id;
               const { data: rc } = await axios.get(
                 `https://api.mercadolibre.com/post-purchase/v1/claims/${claimId}/charges/return-cost`,
                 { headers }
               );
-              returnShippingCost = Number(rc?.amount || 0);
-              returnFee = 0; // já está embutido no return_cost_charge
-              console.log(`[ML returns] order ${o.id} claim ${claimId} return-cost: R$${returnShippingCost}`);
-            } catch(_) {
-              // fallback por shipment/costs
-              const shipId = o.shipping?.id;
-              if (shipId) {
-                try {
-                  const { data: sc } = await axios.get(`https://api.mercadolibre.com/shipments/${shipId}/costs`, { headers });
-                  const sellerEntry = Array.isArray(sc?.senders) ? sc.senders.find(s => s.user_id == acc.platform_shop_id) : null;
-                  returnShippingCost = Number(sellerEntry?.cost || 0);
-                } catch(_2) {
-                  const refunded = payments.reduce((s,p) => s + Number(p.transaction_amount_refunded||0), 0);
-                  returnShippingCost = Math.max(0, refunded - Number(o.total_amount || 0));
-                }
-              }
-            }
+              returnFee = Number(rc?.amount || 0);
+              console.log(`[ML returns] order ${o.id} claim ${claimId} return-cost: R$${returnFee}`);
+            } catch(_) {}
+            // 2. tarifa por envios = list_cost do shipment original
+            try {
+              const { data: shipData } = await axios.get(
+                `https://api.mercadolibre.com/orders/${o.id}/shipments`, { headers }
+              );
+              returnShippingCost = Number(shipData?.shipping_option?.list_cost || 0);
+              console.log(`[ML returns] order ${o.id} list_cost: R$${returnShippingCost}`);
+            } catch(_) {}
           } else {
+            // sem claim: tenta /shipments/{id}/costs
             const shipId = o.shipping?.id;
             if (shipId) {
               try {
                 const { data: sc } = await axios.get(`https://api.mercadolibre.com/shipments/${shipId}/costs`, { headers });
                 const sellerEntry = Array.isArray(sc?.senders) ? sc.senders.find(s => s.user_id == acc.platform_shop_id) : null;
                 returnShippingCost = Number(sellerEntry?.cost || 0);
-              } catch(_) {
-                const refunded = payments.reduce((s,p) => s + Number(p.transaction_amount_refunded||0), 0);
-                returnShippingCost = Math.max(0, refunded - Number(o.total_amount || 0));
-              }
+              } catch(_) {}
             }
           }
         }
@@ -2811,6 +2807,10 @@ async function ssFetchMLReturns(acc, days = 365) {
           return_fee: bppCovered ? 0 : returnFee,
           refund_adjustment: 0,
           lost_product_cost: 0,
+          item_title: itemTitle,
+          item_sku: itemSku,
+          order_date: o.date_created || null,
+          total_amount: Number(o.total_amount || 0) || null,
           raw_json: o
         };
       });
