@@ -4,7 +4,7 @@ const express = require('express');
 const { Pool } = require('pg');
 const axios   = require('axios');
 const crypto  = require('crypto');
-const cors    = require('cors');
+const acors    = require('cors');
 const jwt     = require('jsonwebtoken');
 let PDFDocument = null;
 let bwipjs = null;
@@ -2314,6 +2314,11 @@ async function ensureOrdersReturnsSchema() {
     await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS return_total_cost NUMERIC(14,2) NOT NULL DEFAULT 0`);
     await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS resolution_type TEXT`);
     await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS ml_protected BOOLEAN NOT NULL DEFAULT FALSE`);
+    await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS item_sku TEXT`);
+    await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS item_title TEXT`);
+    await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS order_date TIMESTAMPTZ`);
+    await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS total_amount NUMERIC(14,2) NOT NULL DEFAULT 0`);
+    await db.query(`ALTER TABLE marketplace_returns ADD COLUMN IF NOT EXISTS return_category TEXT`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_returns_user_status ON marketplace_returns(user_id, status)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_returns_order ON marketplace_returns(user_id, platform, platform_order_id)`);
     console.log('✅ Orders/Returns schema OK: vendas em SQL + custos de devolução');
@@ -2453,13 +2458,22 @@ async function ssUpsertReturn(userId, acc, r) {
   const externalId = String(r.external_return_id || r.id || r.claim_id || r.ticket_return_id || '').trim();
   if (!externalId) return;
   const mlProtected = r.ml_protected === true;
-  // Se ML absorveu o custo (seller protection), não soma como prejuízo do vendedor
+
+  // Extrai dados do produto/pedido do raw_json (ML retorna dentro de order_items)
+  const raw = r.raw_json || r;
+  const firstItem = Array.isArray(raw.order_items) ? raw.order_items[0] : null;
+  const itemSku   = r.item_sku   || firstItem?.item?.seller_sku || null;
+  const itemTitle = r.item_title || firstItem?.item?.title      || null;
+  const orderDate = r.order_date || raw.date_created            || null;
+  const totalAmt  = ssNum2(r.total_amount || raw.total_amount   || firstItem?.unit_price || 0);
+
   const total = mlProtected ? 0 : ssNum2(r.return_shipping_cost)+ssNum2(r.return_fee)+ssNum2(r.refund_adjustment)+ssNum2(r.lost_product_cost);
+
   await db.query(`INSERT INTO marketplace_returns
     (user_id, platform, account_id, platform_order_id, external_return_id, external_ticket_id, status, reason, type,
      buyer_message, return_tracking_code, return_shipping_cost, return_fee, refund_adjustment, lost_product_cost, return_total_cost,
-     resolution_type, ml_protected, raw_json, updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,NOW())
+     resolution_type, ml_protected, item_sku, item_title, order_date, total_amount, raw_json, updated_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,NOW())
     ON CONFLICT (user_id, platform, external_return_id) DO UPDATE SET
       account_id=EXCLUDED.account_id, platform_order_id=COALESCE(EXCLUDED.platform_order_id, marketplace_returns.platform_order_id),
       external_ticket_id=EXCLUDED.external_ticket_id, status=EXCLUDED.status, reason=EXCLUDED.reason, type=EXCLUDED.type,
@@ -2470,10 +2484,45 @@ async function ssUpsertReturn(userId, acc, r) {
       lost_product_cost=CASE WHEN EXCLUDED.ml_protected THEN 0 ELSE GREATEST(marketplace_returns.lost_product_cost, EXCLUDED.lost_product_cost) END,
       return_total_cost=CASE WHEN EXCLUDED.ml_protected THEN 0 ELSE GREATEST(marketplace_returns.return_total_cost, EXCLUDED.return_total_cost) END,
       resolution_type=EXCLUDED.resolution_type, ml_protected=EXCLUDED.ml_protected,
+      item_sku=COALESCE(EXCLUDED.item_sku, marketplace_returns.item_sku),
+      item_title=COALESCE(EXCLUDED.item_title, marketplace_returns.item_title),
+      order_date=COALESCE(EXCLUDED.order_date, marketplace_returns.order_date),
+      total_amount=CASE WHEN EXCLUDED.total_amount > 0 THEN EXCLUDED.total_amount ELSE marketplace_returns.total_amount END,
       raw_json=EXCLUDED.raw_json, updated_at=NOW()`,
-    [userId, platform, acc.id || null, r.platform_order_id || null, externalId, r.external_ticket_id || null, r.status || null, r.reason || null, r.type || 'return',
-     r.buyer_message || null, r.return_tracking_code || null, ssNum2(r.return_shipping_cost), ssNum2(r.return_fee), ssNum2(r.refund_adjustment), ssNum2(r.lost_product_cost), total,
-     r.resolution_type || null, mlProtected, JSON.stringify(r.raw_json || r)]);
+    [userId, platform, acc.id || null, r.platform_order_id || null, externalId, r.external_ticket_id || null,
+     r.status || null, r.reason || null, r.type || 'return',
+     r.buyer_message || null, r.return_tracking_code || null,
+     ssNum2(r.return_shipping_cost), ssNum2(r.return_fee), ssNum2(r.refund_adjustment), ssNum2(r.lost_product_cost), total,
+     r.resolution_type || null, mlProtected,
+     itemSku, itemTitle, orderDate || null, totalAmt,
+     JSON.stringify(raw)]);
+}
+
+// Retroativo: preenche item_sku/title/order_date/total_amount de devoluções já no banco a partir do raw_json
+async function ssBackfillReturns(userId) {
+  const { rows } = await db.query(
+    `SELECT id, raw_json FROM marketplace_returns WHERE user_id=$1 AND (item_sku IS NULL OR item_title IS NULL OR order_date IS NULL OR total_amount=0)`,
+    [userId]
+  );
+  for (const row of rows) {
+    const raw = row.raw_json || {};
+    const firstItem = Array.isArray(raw.order_items) ? raw.order_items[0] : null;
+    const itemSku   = firstItem?.item?.seller_sku || null;
+    const itemTitle = firstItem?.item?.title      || null;
+    const orderDate = raw.date_created            || null;
+    const totalAmt  = ssNum2(raw.total_amount || firstItem?.unit_price || 0);
+    await db.query(
+      `UPDATE marketplace_returns SET
+        item_sku   = COALESCE(item_sku, $1),
+        item_title = COALESCE(item_title, $2),
+        order_date = COALESCE(order_date, $3::timestamptz),
+        total_amount = CASE WHEN total_amount=0 AND $4>0 THEN $4 ELSE total_amount END,
+        updated_at = NOW()
+       WHERE id=$5`,
+      [itemSku, itemTitle, orderDate, totalAmt, row.id]
+    );
+  }
+  return rows.length;
 }
 
 function ssMLIsRealReturnFromOrder(o) {
@@ -2741,11 +2790,6 @@ app.put('/api/returns/:id', auth, async (req, res) => {
   try {
     const id = Number(req.params.id);
     const b = req.body;
-    const shipping = b.return_shipping_cost != null ? ssNum2(b.return_shipping_cost) : null;
-    const fee      = b.return_fee         != null ? ssNum2(b.return_fee)         : null;
-    const refund   = b.refund_adjustment  != null ? ssNum2(b.refund_adjustment)  : null;
-    const lost     = b.lost_product_cost  != null ? ssNum2(b.lost_product_cost)  : null;
-    const total    = b.return_total_cost  != null ? ssNum2(b.return_total_cost)  : null;
     const { rows } = await db.query(
       `UPDATE marketplace_returns SET
         item_sku             = COALESCE($1, item_sku),
@@ -2759,8 +2803,16 @@ app.put('/api/returns/:id', auth, async (req, res) => {
         return_total_cost    = COALESCE($9, return_total_cost),
         updated_at           = NOW()
        WHERE id=$10 AND user_id=$11 RETURNING *`,
-      [b.item_sku||null, b.item_title||null, b.order_date||null, b.total_amount!=null?ssNum2(b.total_amount):null,
-       shipping, fee, refund, lost, total, id, req.user.id]
+      [
+        b.item_sku||null, b.item_title||null, b.order_date||null,
+        b.total_amount!=null ? ssNum2(b.total_amount) : null,
+        b.return_shipping_cost!=null ? ssNum2(b.return_shipping_cost) : null,
+        b.return_fee!=null ? ssNum2(b.return_fee) : null,
+        b.refund_adjustment!=null ? ssNum2(b.refund_adjustment) : null,
+        b.lost_product_cost!=null ? ssNum2(b.lost_product_cost) : null,
+        b.return_total_cost!=null ? ssNum2(b.return_total_cost) : null,
+        id, req.user.id
+      ]
     );
     if(!rows.length) return res.status(404).json({ error:'Devolução não encontrada' });
     res.json({ success:true, data:rows[0] });
@@ -2776,6 +2828,7 @@ app.post('/api/returns/sync/:platform', auth, async (req, res) => {
       const list = platform === 'mercadolivre' ? await ssFetchMLReturns(acc) : platform === 'magalu' ? await ssFetchMagaluReturns(acc) : [];
       for (const r of list) { await ssUpsertReturn(req.user.id, acc, r); count++; }
     }
+    await ssBackfillReturns(req.user.id);
     res.json({ success:true, synced:count, data: await ssLoadReturns(req.user.id, platform) });
   } catch(e){ res.status(500).json({ error:e.message }); }
 });
@@ -2798,6 +2851,7 @@ app.post('/api/returns/reset/:platform', auth, async (req, res) => {
       const list = platform === 'mercadolivre' ? await ssFetchMLReturns(acc) : platform === 'magalu' ? await ssFetchMagaluReturns(acc) : [];
       for (const r of list) { await ssUpsertReturn(uid, acc, r); count++; }
     }
+    await ssBackfillReturns(uid);
     res.json({ success:true, deleted: rowCount, synced: count, data: await ssLoadReturns(uid, platform) });
   } catch(e){ res.status(500).json({ error:e.message }); }
 });
