@@ -2533,7 +2533,7 @@ async function ssBackfillReturns(userId) {
         item_sku     = COALESCE(item_sku, $1),
         item_title   = COALESCE(item_title, $2),
         order_date   = COALESCE(order_date, $3::timestamptz),
-        total_amount = CASE WHEN total_amount=0 AND $4>0 THEN $4 ELSE total_amount END,
+        total_amount = CASE WHEN total_amount=0 AND $4::numeric>0 THEN $4::numeric ELSE total_amount END,
         return_shipping_cost = CASE WHEN $5::numeric IS NOT NULL AND return_total_cost <= 0 THEN $5::numeric ELSE return_shipping_cost END,
         return_fee           = CASE WHEN $6::numeric IS NOT NULL AND return_total_cost <= 0 THEN $6::numeric ELSE return_fee END,
         return_total_cost    = CASE WHEN $7::numeric IS NOT NULL AND return_total_cost <= 0 THEN $7::numeric ELSE return_total_cost END,
