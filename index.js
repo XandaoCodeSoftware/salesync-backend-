@@ -3888,8 +3888,19 @@ app.get('/api/ml/return-costs-debug/:orderId', auth, async (req, res) => {
       results.movements_june_count = all.length;
     } catch(e) { results.movements_june_error = e.response?.data || e.message; }
 
-    // 10. Collections direto (sem wrapper)
-    try { const { data } = await axios.get(`https://api.mercadolibre.com/collections/${orderId}`, { headers: h }); results.collections_direct = data; } catch(e) { results.collections_direct_error = e.response?.data || e.message; }
+    // 10. Mediation/Claim — busca detalhes da devolução via mediations array
+    const mediationId = Array.isArray(results.order_return_details) && results.order_return_details[0]?.id;
+    if (mediationId) {
+      results.mediation_id = mediationId;
+      // Tenta claim via post-purchase API
+      try { const { data } = await axios.get(`https://api.mercadolibre.com/post-purchase/v1/claims/${mediationId}`, { headers: h }); results.claim_v1 = data; } catch(e) { results.claim_v1_error = e.response?.data || e.message; }
+      // Tenta mediations direto
+      try { const { data } = await axios.get(`https://api.mercadolibre.com/mediations/${mediationId}`, { headers: h }); results.mediation = data; } catch(e) { results.mediation_error = e.response?.data || e.message; }
+      // Tenta claims
+      try { const { data } = await axios.get(`https://api.mercadolibre.com/claims/${mediationId}`, { headers: h }); results.claim = data; } catch(e) { results.claim_error = e.response?.data || e.message; }
+      // Resolver (custos de resolução)
+      try { const { data } = await axios.get(`https://api.mercadolibre.com/post-purchase/v1/claims/${mediationId}/resolutions`, { headers: h }); results.claim_resolutions = data; } catch(e) { results.claim_resolutions_error = e.response?.data || e.message; }
+    }
 
     res.json(results);
   } catch(e) { res.status(500).json({ error: e.message }); }
