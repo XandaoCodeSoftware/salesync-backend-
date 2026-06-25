@@ -2501,7 +2501,7 @@ async function ssUpsertReturn(userId, acc, r) {
 // Retroativo: preenche item_sku/title/order_date/total_amount de devoluções já no banco a partir do raw_json
 async function ssBackfillReturns(userId) {
   const { rows } = await db.query(
-    `SELECT id, raw_json FROM marketplace_returns WHERE user_id=$1 AND (item_sku IS NULL OR item_title IS NULL OR order_date IS NULL OR total_amount=0)`,
+    `SELECT id, raw_json, return_total_cost FROM marketplace_returns WHERE user_id=$1`,
     [userId]
   );
   for (const row of rows) {
@@ -2511,15 +2511,35 @@ async function ssBackfillReturns(userId) {
     const itemTitle = firstItem?.item?.title      || null;
     const orderDate = raw.date_created            || null;
     const totalAmt  = ssNum2(raw.total_amount || firstItem?.unit_price || 0);
+    const saleCommission = ssNum2(firstItem?.sale_fee || 0);
+    const payments  = Array.isArray(raw.payments) ? raw.payments : [];
+
+    // Recalcula custo real a partir do raw_json se return_total_cost está zerado ou só tem frete do comprador
+    let newShipping = null, newFee = null, newTotal = null;
+    if (ssNum2(row.return_total_cost) === 0 || ssNum2(row.return_total_cost) === payments.reduce((s,p)=>s+Number(p.shipping_cost||0),0)) {
+      const refunded = payments.reduce((s,p) => s + ssNum2(p.transaction_amount_refunded), 0);
+      if (refunded > 0 && totalAmt > 0) {
+        // custo estimado = refundado ao comprador - comissão devolvida
+        const estimatedLoss = refunded - saleCommission;
+        const productNet    = totalAmt - saleCommission;
+        newShipping = Math.max(0, estimatedLoss - productNet);
+        newFee      = saleCommission;
+        newTotal    = newShipping + newFee;
+      }
+    }
+
     await db.query(
       `UPDATE marketplace_returns SET
-        item_sku   = COALESCE(item_sku, $1),
-        item_title = COALESCE(item_title, $2),
-        order_date = COALESCE(order_date, $3::timestamptz),
+        item_sku     = COALESCE(item_sku, $1),
+        item_title   = COALESCE(item_title, $2),
+        order_date   = COALESCE(order_date, $3::timestamptz),
         total_amount = CASE WHEN total_amount=0 AND $4>0 THEN $4 ELSE total_amount END,
+        return_shipping_cost = CASE WHEN $5 IS NOT NULL AND return_total_cost <= 0 THEN $5 ELSE return_shipping_cost END,
+        return_fee           = CASE WHEN $6 IS NOT NULL AND return_total_cost <= 0 THEN $6 ELSE return_fee END,
+        return_total_cost    = CASE WHEN $7 IS NOT NULL AND return_total_cost <= 0 THEN $7 ELSE return_total_cost END,
         updated_at = NOW()
-       WHERE id=$5`,
-      [itemSku, itemTitle, orderDate, totalAmt, row.id]
+       WHERE id=$8`,
+      [itemSku, itemTitle, orderDate, totalAmt, newShipping, newFee, newTotal, row.id]
     );
   }
   return rows.length;
@@ -2677,31 +2697,71 @@ async function ssFetchMLReturns(acc, days = 365) {
         params: { seller: acc.platform_shop_id, sort: 'date_desc', 'order.date_created.from': since, limit, offset }
       });
       const arr = Array.isArray(data.results) ? data.results : [];
-      for (const o of arr) {
-        if (!ssMLIsRealReturnFromOrder(o)) continue;
+      const toProcess = arr.filter(o => ssMLIsRealReturnFromOrder(o));
+      // Busca custos reais de envio para cada devolução em paralelo (max 5 simultâneos)
+      const processed = await ssMapLimit(toProcess, 5, async (o) => {
         const payments = Array.isArray(o.payments) ? o.payments : [];
         const reason = payments.map(p => p.status_detail || p.status).filter(Boolean).join(', ');
-        // bpp_covered = ML absorveu, vendedor não perde. bpp_refunded = ML reembolsou comprador, vendedor pode perder.
         const bppCovered = payments.some(p => /bpp_covered/i.test(`${p.status||''} ${p.status_detail||''}`));
         const tags = Array.isArray(o.tags) ? o.tags.map(String) : [];
         const category = tags.includes('not_delivered') ? 'nao_entregue' : 'arrependimento';
-        out.push({
+        const firstItem = Array.isArray(o.order_items) ? o.order_items[0] : null;
+        const saleCommission = Number(firstItem?.sale_fee || 0);
+
+        let returnShippingCost = 0;
+        let returnFee = saleCommission; // ML devolve a comissão mas cobra tarifa de envio de volta
+
+        if (!bppCovered) {
+          // Busca custos reais do envio via API do ML
+          const shipId = o.shipping?.id;
+          if (shipId) {
+            try {
+              const { data: sc } = await axios.get(
+                `https://api.mercadolibre.com/shipments/${shipId}/costs`,
+                { headers }
+              );
+              // seller_cost = o que foi cobrado do vendedor pelo frete de devolução
+              const sellerCost = Number(sc?.seller_cost || sc?.cost?.seller || 0);
+              // buyer_cost = frete pago pelo comprador (não é custo do vendedor)
+              const buyCost = Number(sc?.buyer_cost || sc?.cost?.buyer || 0);
+              // net_cost = custo líquido para o vendedor
+              returnShippingCost = sellerCost > 0 ? sellerCost : Math.max(0, sellerCost - buyCost);
+              console.log(`[ML returns] shipment ${shipId} costs: seller=${sellerCost} buyer=${buyCost}`);
+            } catch(e) {
+              // fallback: usa transaction_amount_refunded − total_amount − commission
+              const refunded = payments.reduce((s,p) => s + Number(p.transaction_amount_refunded||0), 0);
+              const totalAmt = Number(o.total_amount || 0);
+              // net_loss = refunded - commission_returned
+              // return_shipping = net_loss − product_net
+              const productNet = totalAmt - saleCommission;
+              returnShippingCost = Math.max(0, refunded - saleCommission - productNet);
+            }
+          } else {
+            // Sem shipment_id: estima por transaction_amount_refunded
+            const refunded = payments.reduce((s,p) => s + Number(p.transaction_amount_refunded||0), 0);
+            const totalAmt = Number(o.total_amount || 0);
+            returnShippingCost = Math.max(0, refunded - totalAmt);
+          }
+        }
+
+        return {
           platform: 'mercadolivre',
           external_return_id: `ml-order-${o.id}`,
           platform_order_id: String(o.id || ''),
           status: o.status || 'returned',
           reason: reason || 'Pedido entregue com reembolso',
           type: 'return',
-          return_category: category,          // v5.14
+          return_category: category,
           resolution_type: bppCovered ? 'seller_protection' : 'refund',
           ml_protected: bppCovered,
-          return_shipping_cost: bppCovered ? 0 : payments.reduce((s, p) => s + Number(p.shipping_cost || 0), 0),
-          return_fee: 0,
+          return_shipping_cost: bppCovered ? 0 : returnShippingCost,
+          return_fee: bppCovered ? 0 : returnFee,
           refund_adjustment: 0,
           lost_product_cost: 0,
           raw_json: o
-        });
-      }
+        };
+      });
+      out.push(...processed);
       if (!arr.length || arr.length < limit) break;
       if (data.paging?.total && offset + limit >= Number(data.paging.total)) break;
     }
