@@ -2653,21 +2653,19 @@ async function ssFetchMLReturns(acc, days = 365) {
       const detailed = await ssMapLimit(allClaims, 5, async (c) => {
         try {
           const { data } = await axios.get(`${claimsDomain}/post-purchase/v1/claims/${c.id}`, { headers });
-          // Custo da tarifa de devolução cobrada ao vendedor
+          // Tarifa de devolução cobrada ao vendedor
           try {
             const { data: rc } = await axios.get(`${claimsDomain}/post-purchase/v1/claims/${c.id}/charges/return-cost`, { headers });
             data._return_fee_charge = Number(rc?.amount || 0);
           } catch(_) { data._return_fee_charge = null; }
-          // Busca shipment de devolução para obter o custo do frete de retorno
+          // Tarifa por envios = list_cost do shipment ORIGINAL (ML cobra de volta ao vendedor)
           try {
-            const { data: rv } = await axios.get(`${claimsDomain}/post-purchase/v2/claims/${c.id}/returns`, { headers });
-            const retShipId = Array.isArray(rv?.shipments) ? rv.shipments.find(s => s.type === 'return')?.shipment_id : null;
-            if (retShipId) {
-              const { data: sc } = await axios.get(`${claimsDomain}/shipments/${retShipId}/costs`, { headers });
-              const sellerEntry = Array.isArray(sc?.senders) ? sc.senders[0] : null;
-              data._return_shipping_charge = Number(sellerEntry?.cost ?? sc?.gross_amount ?? 0);
+            const orderId = data.resource_id || data.order_id;
+            if (orderId) {
+              const { data: shipData } = await axios.get(`${claimsDomain}/orders/${orderId}/shipments`, { headers });
+              data._return_shipping_charge = Number(shipData?.shipping_option?.list_cost || 0);
             }
-          } catch(_) { /* não afeta */ }
+          } catch(_) { data._return_shipping_charge = null; }
           return data;
         } catch(e) {
           return c; // fallback: usa dados básicos da lista
@@ -3955,10 +3953,10 @@ app.get('/api/ml/return-costs-debug/:orderId', auth, async (req, res) => {
         }
       } catch(e) { results.return_v2_error = e.response?.data || e.message; }
     }
-    // RESUMO: total cobrado do vendedor
+    // RESUMO: tarifa devolução + list_cost do shipment original = total real cobrado ao vendedor
     const tarifa_dev = results.return_cost_charge?.amount || 0;
-    const tarifa_envios = Array.isArray(results.return_shipment_costs?.senders) ? (results.return_shipment_costs.senders[0]?.cost || 0) : 0;
-    results.RESUMO_CUSTO_REAL = { tarifa_devolucao: tarifa_dev, tarifa_envios_retorno: tarifa_envios, TOTAL: tarifa_dev + tarifa_envios };
+    const tarifa_envios = results.order_shipments?.shipping_option?.list_cost || 0;
+    results.RESUMO_CUSTO_REAL = { tarifa_devolucao: tarifa_dev, tarifa_envios_original_list_cost: tarifa_envios, TOTAL: tarifa_dev + tarifa_envios };
     // Todos shipments associados ao pedido (inclui shipment de devolução)
     try { const { data } = await axios.get(`https://api.mercadolibre.com/shipments/search?order_id=${orderId}&seller_id=${rows[0].platform_shop_id}`, { headers: h }); results.all_shipments = data; } catch(e) { results.all_shipments_error = e.response?.data || e.message; }
     // Shipments via orders (endpoint alternativo)
