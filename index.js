@@ -2653,19 +2653,34 @@ async function ssFetchMLReturns(acc, days = 365) {
       const detailed = await ssMapLimit(allClaims, 5, async (c) => {
         try {
           const { data } = await axios.get(`${claimsDomain}/post-purchase/v1/claims/${c.id}`, { headers });
+          const orderId = data.resource_id || data.order_id;
+          // Busca pedido completo: título, SKU, valor, data, e list_cost do frete
+          if (orderId) {
+            try {
+              const { data: orderData } = await axios.get(`${claimsDomain}/orders/${orderId}`, { headers });
+              data._order = orderData;
+              // list_cost via /orders/{id}/shipments
+              try {
+                const { data: shipData } = await axios.get(`${claimsDomain}/orders/${orderId}/shipments`, { headers });
+                data._return_shipping_charge = Number(shipData?.shipping_option?.list_cost || 0);
+                console.log(`[ML returns] claim ${c.id} order ${orderId} list_cost=${data._return_shipping_charge}`);
+              } catch(se) {
+                console.warn(`[ML returns] shipments ${orderId} failed: ${se.response?.status} ${se.message}`);
+                data._return_shipping_charge = 0;
+              }
+            } catch(oe) {
+              console.warn(`[ML returns] order ${orderId} failed: ${oe.response?.status} ${oe.message}`);
+            }
+          }
           // Tarifa de devolução cobrada ao vendedor
           try {
             const { data: rc } = await axios.get(`${claimsDomain}/post-purchase/v1/claims/${c.id}/charges/return-cost`, { headers });
             data._return_fee_charge = Number(rc?.amount || 0);
-          } catch(_) { data._return_fee_charge = null; }
-          // Tarifa por envios = list_cost do shipment ORIGINAL (ML cobra de volta ao vendedor)
-          try {
-            const orderId = data.resource_id || data.order_id;
-            if (orderId) {
-              const { data: shipData } = await axios.get(`${claimsDomain}/orders/${orderId}/shipments`, { headers });
-              data._return_shipping_charge = Number(shipData?.shipping_option?.list_cost || 0);
-            }
-          } catch(_) { data._return_shipping_charge = null; }
+            console.log(`[ML returns] claim ${c.id} return-cost=${data._return_fee_charge}`);
+          } catch(re) {
+            console.warn(`[ML returns] return-cost claim ${c.id} failed: ${re.response?.status} ${re.message}`);
+            data._return_fee_charge = 0;
+          }
           return data;
         } catch(e) {
           return c; // fallback: usa dados básicos da lista
@@ -2702,6 +2717,11 @@ async function ssFetchMLReturns(acc, days = 365) {
           return_fee: costs.return_fee,
           refund_adjustment: costs.refund_adjustment,
           lost_product_cost: 0,
+          // dados do pedido original
+          item_title: c._order?.order_items?.[0]?.item?.title || null,
+          item_sku:   c._order?.order_items?.[0]?.item?.seller_sku || null,
+          order_date: c._order?.date_created || null,
+          total_amount: Number(c._order?.total_amount || 0) || null,
           raw_json: c
         };
       });
