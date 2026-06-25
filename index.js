@@ -3953,14 +3953,14 @@ app.get('/api/ml/return-costs-debug/:orderId', auth, async (req, res) => {
         }
       } catch(e) { results.return_v2_error = e.response?.data || e.message; }
     }
-    // RESUMO: tarifa devolução + list_cost do shipment original = total real cobrado ao vendedor
-    const tarifa_dev = results.return_cost_charge?.amount || 0;
-    const tarifa_envios = results.order_shipments?.shipping_option?.list_cost || 0;
-    results.RESUMO_CUSTO_REAL = { tarifa_devolucao: tarifa_dev, tarifa_envios_original_list_cost: tarifa_envios, TOTAL: tarifa_dev + tarifa_envios };
     // Todos shipments associados ao pedido (inclui shipment de devolução)
     try { const { data } = await axios.get(`https://api.mercadolibre.com/shipments/search?order_id=${orderId}&seller_id=${rows[0].platform_shop_id}`, { headers: h }); results.all_shipments = data; } catch(e) { results.all_shipments_error = e.response?.data || e.message; }
     // Shipments via orders (endpoint alternativo)
     try { const { data } = await axios.get(`https://api.mercadolibre.com/orders/${orderId}/shipments`, { headers: h }); results.order_shipments = data; } catch(e) { results.order_shipments_error = e.response?.data || e.message; }
+    // RESUMO: deve ficar DEPOIS de order_shipments ser buscado
+    const tarifa_dev = results.return_cost_charge?.amount || 0;
+    const tarifa_envios = results.order_shipments?.shipping_option?.list_cost || 0;
+    results.RESUMO_CUSTO_REAL = { tarifa_devolucao: tarifa_dev, tarifa_envios_original_list_cost: tarifa_envios, TOTAL: tarifa_dev + tarifa_envios };
 
     res.json(results);
   } catch(e) { res.status(500).json({ error: e.message }); }
