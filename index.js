@@ -3863,6 +3863,21 @@ app.get('/api/ml/return-costs-debug/:orderId', auth, async (req, res) => {
     // 5. Account movements (movimentações financeiras do vendedor)
     try { const { data } = await axios.get(`https://api.mercadolibre.com/users/${rows[0].platform_shop_id}/mercadopago/account/movements?limit=5`, { headers: h }); results.movements_sample = data; } catch(e) { results.movements_error = e.response?.data || e.message; }
 
+    // 6. Order returns — pode ter shipment_id do envio de devolução
+    try { const { data } = await axios.get(`https://api.mercadolibre.com/orders/${orderId}/returns`, { headers: h }); results.order_returns = data; } catch(e) { results.order_returns_error = e.response?.data || e.message; }
+
+    // 7. Billing group by order — contém tarifas detalhadas de devolução
+    try { const { data } = await axios.get(`https://api.mercadolibre.com/billing/group/by_order/${orderId}`, { headers: h }); results.billing_group = data; } catch(e) { results.billing_group_error = e.response?.data || e.message; }
+
+    // 8. Se retornou shipment de devolução, busca custos desse shipment
+    const returnShipId = results.order_returns?.return_shipment_id || (Array.isArray(results.order_returns) && results.order_returns[0]?.shipping_id);
+    if (returnShipId && returnShipId !== results.order_shipping_id) {
+      try { const { data } = await axios.get(`https://api.mercadolibre.com/shipments/${returnShipId}/costs`, { headers: h }); results.return_shipment_costs = data; } catch(e) { results.return_shipment_costs_error = e.response?.data || e.message; }
+    }
+
+    // 9. Movimentações filtradas por referência do pedido
+    try { const { data } = await axios.get(`https://api.mercadolibre.com/users/${rows[0].platform_shop_id}/mercadopago/account/movements?external_reference=${orderId}&limit=10`, { headers: h }); results.movements_by_order = data; } catch(e) { results.movements_by_order_error = e.response?.data || e.message; }
+
     res.json(results);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
