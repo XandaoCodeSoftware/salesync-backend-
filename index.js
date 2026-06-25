@@ -3906,7 +3906,15 @@ app.get('/api/ml/return-costs-debug/:orderId', auth, async (req, res) => {
       try { const { data } = await axios.get(`https://api.mercadolibre.com/post-purchase/v1/returns?claim_id=${mediationId}`, { headers: h }); results.returns_by_claim = data; } catch(e) { results.returns_by_claim_error = e.response?.data || e.message; }
       // Returns por order_id
       try { const { data } = await axios.get(`https://api.mercadolibre.com/post-purchase/v1/returns?order_id=${orderId}`, { headers: h }); results.returns_by_order = data; } catch(e) { results.returns_by_order_error = e.response?.data || e.message; }
+      // Return com ID do claim diretamente
+      try { const { data } = await axios.get(`https://api.mercadolibre.com/post-purchase/v1/returns/${mediationId}`, { headers: h }); results.return_direct = data; } catch(e) { results.return_direct_error = e.response?.data || e.message; }
+      // Claim com todos atributos
+      try { const { data } = await axios.get(`https://api.mercadolibre.com/post-purchase/v1/claims/${mediationId}?attributes=ALL`, { headers: h }); results.claim_full = data; } catch(e) { results.claim_full_error = e.response?.data || e.message; }
     }
+    // Todos shipments associados ao pedido (inclui shipment de devolução)
+    try { const { data } = await axios.get(`https://api.mercadolibre.com/shipments/search?order_id=${orderId}&seller_id=${rows[0].platform_shop_id}`, { headers: h }); results.all_shipments = data; } catch(e) { results.all_shipments_error = e.response?.data || e.message; }
+    // Shipments via orders (endpoint alternativo)
+    try { const { data } = await axios.get(`https://api.mercadolibre.com/orders/${orderId}/shipments`, { headers: h }); results.order_shipments = data; } catch(e) { results.order_shipments_error = e.response?.data || e.message; }
 
     res.json(results);
   } catch(e) { res.status(500).json({ error: e.message }); }
