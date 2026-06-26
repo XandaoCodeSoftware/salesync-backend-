@@ -16,6 +16,11 @@ require('dotenv').config();
 
 const app = express();
 app.use(cors());
+
+// Cache em memória para raw_json de devoluções — evita bater no Supabase em cada abertura de modal
+// Chave: "userId:returnId" → raw_json + timestamp
+const ssReturnRawCache = new Map();
+const SS_RAW_CACHE_TTL = 30 * 60 * 1000; // 30 min
 app.use(express.json());
 
 const db = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
@@ -272,6 +277,54 @@ app.get('/api/accounts', auth, async (req, res) => {
       [req.user.id]
     );
     res.json({ success: true, data: rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── RATINGS de reputação das lojas ──
+const _ratingCache = new Map(); // key: "uid:accId" → {rating, ts}
+const RATING_TTL = 60 * 60 * 1000; // 1h
+
+app.get('/api/accounts/ratings', auth, async (req, res) => {
+  try {
+    const uid = req.user.id;
+    const { rows } = await db.query(
+      `SELECT id, platform, shop_name, access_token FROM marketplace_accounts
+       WHERE user_id=$1 AND is_active=true AND access_token IS NOT NULL AND platform IN ('mercadolivre','magalu')`,
+      [uid]
+    );
+    const results = await Promise.all(rows.map(async acc => {
+      const cKey = `${uid}:${acc.id}`;
+      const cached = _ratingCache.get(cKey);
+      if (cached && Date.now() - cached.ts < RATING_TTL) {
+        return { id: acc.id, platform: acc.platform, shop_name: acc.shop_name, rating: cached.rating };
+      }
+      let rating = null;
+      try {
+        if (acc.platform === 'mercadolivre') {
+          const r = await axios.get('https://api.mercadolibre.com/users/me', {
+            headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 6000
+          });
+          const rep = r.data?.seller_reputation;
+          rating = rep?.metrics?.sales?.rating?.average ?? rep?.level_id ?? null;
+          // level_id: "5_green","4_light_green","3_yellow","2_orange","1_red" → converter
+          if (typeof rating === 'string' && rating.includes('_')) {
+            const lvl = parseInt(rating);
+            rating = lvl ? parseFloat((lvl * 1.0).toFixed(1)) : null;
+          } else if (typeof rating === 'number') {
+            rating = parseFloat(rating.toFixed(1));
+          }
+        } else if (acc.platform === 'magalu') {
+          const r = await axios.get('https://api.magalu.com/seller/v1/accounts/me', {
+            headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 6000
+          });
+          rating = r.data?.reputation?.score ?? r.data?.score ?? null;
+          if (typeof rating === 'number') rating = parseFloat(rating.toFixed(1));
+        }
+      } catch (_) {}
+      _ratingCache.set(cKey, { rating, ts: Date.now() });
+      return { id: acc.id, platform: acc.platform, shop_name: acc.shop_name, rating };
+    }));
+    res.json({ success: true, data: results });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -2862,7 +2915,17 @@ function ssDeriveCategoryFromStored(r) {
 
 async function ssLoadReturns(userId, platform=null) {
   const params=[userId];
-  let sql=`SELECT r.*, o.item_title, o.item_sku, o.total_amount, o.order_date
+  // raw_json excluído da lista — buscado sob demanda em /api/returns/:id para reduzir egress
+  let sql=`SELECT r.id, r.platform, r.account_id, r.external_return_id, r.platform_order_id,
+           r.status, r.reason, r.type, r.return_category, r.buyer_message, r.return_tracking_code,
+           r.resolution_type, r.ml_protected,
+           r.return_shipping_cost, r.return_fee, r.refund_adjustment, r.lost_product_cost, r.return_total_cost,
+           r.item_title, r.item_sku, r.order_date, r.total_amount,
+           r.created_at, r.updated_at,
+           COALESCE(o.item_title, r.item_title) AS item_title_merged,
+           COALESCE(o.item_sku, r.item_sku) AS item_sku_merged,
+           COALESCE(o.total_amount, r.total_amount) AS total_amount_merged,
+           COALESCE(o.order_date, r.order_date) AS order_date_merged
            FROM marketplace_returns r
            LEFT JOIN marketplace_orders o ON o.user_id=r.user_id AND o.platform=r.platform AND o.platform_order_id=r.platform_order_id
            WHERE r.user_id=$1`;
@@ -2870,21 +2933,51 @@ async function ssLoadReturns(userId, platform=null) {
   sql += ` ORDER BY r.updated_at DESC LIMIT 500`;
   const { rows } = await db.query(sql, params);
   return rows.map(x=>({
-    ...x,
+    id: x.id, platform: x.platform, account_id: x.account_id,
+    external_return_id: x.external_return_id, platform_order_id: x.platform_order_id,
+    status: x.status, reason: x.reason, type: x.type,
+    buyer_message: x.buyer_message, return_tracking_code: x.return_tracking_code,
+    resolution_type: x.resolution_type, ml_protected: x.ml_protected,
     return_shipping_cost: Number(x.return_shipping_cost||0),
     return_fee:           Number(x.return_fee||0),
     refund_adjustment:    Number(x.refund_adjustment||0),
     lost_product_cost:    Number(x.lost_product_cost||0),
     return_total_cost:    Number(x.return_total_cost||0),
-    total_amount:         Number(x.total_amount||0),
-    // v5.14 — categoria derivada em tempo real dos dados armazenados
-    return_category:      ssDeriveCategoryFromStored(x),
+    item_title:   x.item_title_merged || x.item_title || null,
+    item_sku:     x.item_sku_merged   || x.item_sku   || null,
+    total_amount: Number(x.total_amount_merged||x.total_amount||0),
+    order_date:   x.order_date_merged || x.order_date || null,
+    created_at: x.created_at, updated_at: x.updated_at,
+    return_category: ssDeriveCategoryFromStored(x),
   }));
 }
 
 app.get('/api/returns', auth, async (req, res) => {
   try { res.json({ success:true, data: await ssLoadReturns(req.user.id, req.query.platform || null) }); }
   catch(e){ res.status(500).json({ error:e.message }); }
+});
+
+// Busca 1 devolução com raw_json (chamado sob demanda ao abrir o modal de detalhe)
+app.get('/api/returns/:id', auth, async (req, res) => {
+  try {
+    const uid = req.user.id;
+    const rid = Number(req.params.id);
+    const cacheKey = `${uid}:${rid}`;
+    const cached = ssReturnRawCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < SS_RAW_CACHE_TTL) {
+      return res.json({ success: true, data: cached.data, _cache: true });
+    }
+    const { rows } = await db.query(
+      `SELECT r.*, COALESCE(o.item_title, r.item_title) AS item_title, COALESCE(o.order_date, r.order_date) AS order_date
+       FROM marketplace_returns r
+       LEFT JOIN marketplace_orders o ON o.user_id=r.user_id AND o.platform=r.platform AND o.platform_order_id=r.platform_order_id
+       WHERE r.id=$1 AND r.user_id=$2`,
+      [rid, uid]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Não encontrado' });
+    ssReturnRawCache.set(cacheKey, { data: rows[0], ts: Date.now() });
+    res.json({ success: true, data: rows[0] });
+  } catch(e){ res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/returns/:id/cost', auth, async (req, res) => {
@@ -7190,6 +7283,128 @@ app.post('/api/codesoftware/sync', auth, async (req, res) => {
     console.error('[CodeSoftware sync]', e.response?.data || e.message);
     res.status(500).json({ ok: false, error: e.message });
   }
+});
+
+// ══════════════════════════════════════════════════════════════
+// FULL ENVIOS — ML Fulfillment stock + operations
+// ══════════════════════════════════════════════════════════════
+const _fullCache = new Map(); // key: uid → {data, ts}
+const FULL_TTL = 10 * 60 * 1000; // 10 min
+
+app.get('/api/fulfillment/stock', auth, async (req, res) => {
+  try {
+    const uid = req.user.id;
+    const cached = _fullCache.get(uid);
+    if (cached && Date.now() - cached.ts < FULL_TTL) {
+      return res.json({ success: true, data: cached.data, _cache: true });
+    }
+
+    // Busca contas ML conectadas
+    const { rows: accs } = await db.query(
+      `SELECT id, shop_name, access_token FROM marketplace_accounts
+       WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND access_token IS NOT NULL`,
+      [uid]
+    );
+    if (!accs.length) return res.json({ success: true, data: { accounts: [] } });
+
+    const allAccData = await Promise.all(accs.map(async acc => {
+      try {
+        // 1. Pega seller_id
+        const meRes = await axios.get('https://api.mercadolibre.com/users/me', {
+          headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 8000
+        });
+        const sellerId = meRes.data.id;
+
+        // 2. Busca itens com fulfillment
+        let itemIds = [];
+        try {
+          const srchRes = await axios.get(
+            `https://api.mercadolibre.com/users/${sellerId}/items/search?status=active&limit=50`,
+            { headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 8000 }
+          );
+          itemIds = (srchRes.data?.results || []).slice(0, 50);
+        } catch (_) {}
+
+        // 3. Busca detalhes em batch (até 20 por vez)
+        let items = [];
+        for (let i = 0; i < itemIds.length; i += 20) {
+          const chunk = itemIds.slice(i, i + 20);
+          try {
+            const bRes = await axios.get(
+              `https://api.mercadolibre.com/items?ids=${chunk.join(',')}&attributes=id,title,price,available_quantity,shipping,inventory_id,thumbnail`,
+              { headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 10000 }
+            );
+            const batch = (bRes.data || []).map(x => x.body || x).filter(x => x?.id);
+            items = items.concat(batch);
+          } catch (_) {}
+        }
+
+        // 4. Filtra itens com fulfillment e busca estoque
+        const fullItems = items.filter(it =>
+          it.shipping?.logistic_type === 'fulfillment' || it.inventory_id
+        );
+
+        const stockData = await Promise.all(fullItems.map(async it => {
+          let stock = null;
+          const invId = it.inventory_id;
+          if (invId) {
+            try {
+              const sRes = await axios.get(
+                `https://api.mercadolibre.com/inventories/${invId}/stock/fulfillment`,
+                { headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 6000 }
+              );
+              stock = sRes.data;
+            } catch (_) {}
+          }
+          return {
+            id: it.id,
+            title: it.title,
+            price: it.price,
+            thumbnail: it.thumbnail,
+            inventory_id: invId,
+            available_quantity: it.available_quantity,
+            stock: stock ? {
+              available: stock.available_quantity ?? 0,
+              not_available: stock.not_available_quantity ?? 0,
+              damaged: stock.damaged_quantity ?? 0,
+              lost: stock.lost_quantity ?? 0,
+              total: (stock.available_quantity ?? 0) + (stock.not_available_quantity ?? 0)
+            } : null
+          };
+        }));
+
+        // 5. Busca operações recentes (últimas entradas/saídas)
+        let operations = [];
+        try {
+          const opRes = await axios.post(
+            'https://api.mercadolibre.com/stock/fulfillment/operations/search',
+            {
+              seller_id: sellerId,
+              date_from: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+              date_to: new Date().toISOString(),
+              limit: 50
+            },
+            { headers: { Authorization: `Bearer ${acc.access_token}`, 'Content-Type': 'application/json' }, timeout: 10000 }
+          );
+          operations = opRes.data?.results || opRes.data?.operations || [];
+        } catch (_) {}
+
+        return {
+          account_id: acc.id,
+          shop_name: acc.shop_name,
+          seller_id: sellerId,
+          items: stockData,
+          operations: operations.slice(0, 100)
+        };
+      } catch (e) {
+        return { account_id: acc.id, shop_name: acc.shop_name, error: e.message, items: [], operations: [] };
+      }
+    }));
+
+    const result = { accounts: allAccData };
+    _fullCache.set(uid, { data: result, ts: Date.now() });
+    res.json({ success: true, data: result });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 const PORT = process.env.PORT || 3000;
