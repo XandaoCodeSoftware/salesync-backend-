@@ -296,58 +296,68 @@ app.get('/api/accounts/ratings', auth, async (req, res) => {
       const cKey = `${uid}:${acc.id}`;
       const cached = _ratingCache.get(cKey);
       if (cached && Date.now() - cached.ts < RATING_TTL) {
-        return { id: acc.id, platform: acc.platform, shop_name: acc.shop_name, rating: cached.rating, level: cached.level ?? null };
+        return { id: acc.id, platform: acc.platform, shop_name: acc.shop_name, rating: cached.rating, level: cached.level ?? null, extra: cached.extra ?? {} };
       }
-      let rating = null, level = null;
+      let rating = null, level = null, extra = {};
       try {
         if (acc.platform === 'mercadolivre') {
           const r = await axios.get('https://api.mercadolibre.com/users/me', {
             headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 6000
           });
           const rep = r.data?.seller_reputation;
-          rating = rep?.metrics?.sales?.rating?.average ?? null;
-          if (typeof rating === 'number') rating = parseFloat(rating.toFixed(1));
-          // level_id: "5_green","4_light_green","3_yellow","2_orange","1_red"
+          // ML não expõe nota de 0-5; usa level_id (1-5) como score e % positivo como detalhe
           const levelId = rep?.level_id ?? null;
           level = levelId ? parseInt(levelId) : null;
+          // rating = level convertido para escala 5.0
+          if (level) rating = parseFloat(level.toFixed(1));
+          const pos = rep?.transactions?.ratings?.positive;
+          if (typeof pos === 'number') extra.positive_pct = Math.round(pos * 100);
+          extra.power_seller = rep?.power_seller_status ?? null;
         } else if (acc.platform === 'shopee') {
-          // Shopee: GET /api/v2/shop/get_shop_performance → overall_performance.ratings_average_score
           const pid = SHOPEE_PID(), key = SHOPEE_KEY();
           const shopId = String(acc.platform_shop_id || '');
           const token = acc.access_token;
           if (pid && key && shopId && token) {
-            const ts = Math.floor(Date.now() / 1000);
-            const path = '/api/v2/shop/get_shop_performance';
-            const sign = shopeeSign(pid, path, ts, key, token, shopId);
-            const r = await axios.get(`${SHOPEE_BASE}${path}`, {
-              params: { partner_id: pid, shop_id: shopId, access_token: token, timestamp: ts, sign },
-              timeout: 6000
-            });
-            const perf = r.data?.response?.overall_performance;
-            const raw = perf?.ratings_average_score ?? perf?.average_rating ?? r.data?.response?.ratings_average_score;
-            if (typeof raw === 'number') rating = parseFloat(raw.toFixed(1));
+            // Tenta get_shop_info (mais estável que performance)
+            for (const path of ['/api/v2/shop/get_shop_info', '/api/v2/shop/get_shop_profile']) {
+              try {
+                const ts = Math.floor(Date.now() / 1000);
+                const sign = shopeeSign(pid, path, ts, key, token, shopId);
+                const r = await axios.get(`${SHOPEE_BASE}${path}`, {
+                  params: { partner_id: pid, shop_id: shopId, access_token: token, timestamp: ts, sign },
+                  timeout: 6000
+                });
+                const resp = r.data?.response || r.data;
+                // Shopee retorna rating_star (1-5) ou ratings_average_score
+                const raw = resp?.rating_star ?? resp?.ratings_average_score
+                  ?? resp?.overall_performance?.ratings_average_score ?? null;
+                if (typeof raw === 'number') { rating = parseFloat(raw.toFixed(1)); break; }
+              } catch(_) {}
+            }
           }
         } else if (acc.platform === 'magalu') {
-          // Magalu: tenta /seller/v1/accounts/me e /seller/v1/reputation
-          try {
-            const r = await axios.get('https://api.magalu.com/seller/v1/accounts/me', {
-              headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 6000
-            });
-            const raw = r.data?.reputation?.score ?? r.data?.score ?? r.data?.rating ?? null;
-            if (typeof raw === 'number') rating = parseFloat(raw.toFixed(1));
-          } catch(_) {
+          // Tenta vários endpoints do Magalu até achar a reputação
+          const endpoints = [
+            'https://api.magalu.com/seller/v1/performance',
+            'https://api.magalu.com/seller/v1/shop/performance',
+            'https://api.magalu.com/seller/v1/profile',
+            'https://api.magalu.com/seller/v1/me',
+          ];
+          for (const url of endpoints) {
             try {
-              const r2 = await axios.get('https://api.magalu.com/seller/v1/reputation', {
-                headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 6000
+              const r = await axios.get(url, {
+                headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 5000
               });
-              const raw = r2.data?.score ?? r2.data?.rating ?? null;
-              if (typeof raw === 'number') rating = parseFloat(raw.toFixed(1));
+              const d = r.data;
+              const raw = d?.score ?? d?.rating ?? d?.reputation?.score
+                ?? d?.performance?.score ?? d?.overall_score ?? null;
+              if (typeof raw === 'number') { rating = parseFloat(raw.toFixed(1)); break; }
             } catch(_) {}
           }
         }
       } catch (_) {}
-      _ratingCache.set(cKey, { rating, level, ts: Date.now() });
-      return { id: acc.id, platform: acc.platform, shop_name: acc.shop_name, rating, level };
+      _ratingCache.set(cKey, { rating, level, extra, ts: Date.now() });
+      return { id: acc.id, platform: acc.platform, shop_name: acc.shop_name, rating, level, extra };
     }));
     res.json({ success: true, data: results });
   } catch(e) { res.status(500).json({ error: e.message }); }
