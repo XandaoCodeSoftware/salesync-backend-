@@ -296,22 +296,20 @@ app.get('/api/accounts/ratings', auth, async (req, res) => {
       const cKey = `${uid}:${acc.id}`;
       const cached = _ratingCache.get(cKey);
       if (cached && Date.now() - cached.ts < RATING_TTL) {
-        return { id: acc.id, platform: acc.platform, shop_name: acc.shop_name, rating: cached.rating };
+        return { id: acc.id, platform: acc.platform, shop_name: acc.shop_name, rating: cached.rating, level: cached.level ?? null };
       }
-      let rating = null;
+      let rating = null, level = null;
       try {
         if (acc.platform === 'mercadolivre') {
           const r = await axios.get('https://api.mercadolibre.com/users/me', {
             headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 6000
           });
           const rep = r.data?.seller_reputation;
-          rating = rep?.metrics?.sales?.rating?.average ?? rep?.level_id ?? null;
-          if (typeof rating === 'string' && rating.includes('_')) {
-            const lvl = parseInt(rating);
-            rating = lvl ? parseFloat((lvl * 1.0).toFixed(1)) : null;
-          } else if (typeof rating === 'number') {
-            rating = parseFloat(rating.toFixed(1));
-          }
+          rating = rep?.metrics?.sales?.rating?.average ?? null;
+          if (typeof rating === 'number') rating = parseFloat(rating.toFixed(1));
+          // level_id: "5_green","4_light_green","3_yellow","2_orange","1_red"
+          const levelId = rep?.level_id ?? null;
+          level = levelId ? parseInt(levelId) : null;
         } else if (acc.platform === 'shopee') {
           // Shopee: GET /api/v2/shop/get_shop_performance → overall_performance.ratings_average_score
           const pid = SHOPEE_PID(), key = SHOPEE_KEY();
@@ -348,8 +346,8 @@ app.get('/api/accounts/ratings', auth, async (req, res) => {
           }
         }
       } catch (_) {}
-      _ratingCache.set(cKey, { rating, ts: Date.now() });
-      return { id: acc.id, platform: acc.platform, shop_name: acc.shop_name, rating };
+      _ratingCache.set(cKey, { rating, level, ts: Date.now() });
+      return { id: acc.id, platform: acc.platform, shop_name: acc.shop_name, rating, level };
     }));
     res.json({ success: true, data: results });
   } catch(e) { res.status(500).json({ error: e.message }); }
