@@ -7319,39 +7319,57 @@ const FULL_TTL = 10 * 60 * 1000; // 10 min
 app.get('/api/fulfillment/stock', auth, async (req, res) => {
   try {
     const uid = req.user.id;
+    const force = req.query.force === '1';
     const cached = _fullCache.get(uid);
-    if (cached && Date.now() - cached.ts < FULL_TTL) {
+    if (!force && cached && Date.now() - cached.ts < FULL_TTL) {
       return res.json({ success: true, data: cached.data, _cache: true });
     }
 
-    // Busca contas ML conectadas
+    // ── Custo do mês atual via DB (pedidos Full já sincronizados) ──
+    const now = new Date();
+    const mesIni = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-01`;
+    const { rows: costRows } = await db.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE status != 'cancelled')   AS qty,
+         COALESCE(SUM(total_amount) FILTER (WHERE status != 'cancelled'), 0) AS revenue,
+         COALESCE(SUM(platform_fee) FILTER (WHERE status != 'cancelled'), 0) AS fees,
+         COALESCE(SUM(total_cost)   FILTER (WHERE status != 'cancelled'), 0) AS prod_cost
+       FROM marketplace_orders
+       WHERE user_id=$1 AND platform='mercadolivre' AND fulfillment_type='full'
+         AND order_date >= $2`,
+      [uid, mesIni]
+    );
+    const monthCost = costRows[0] || {};
+
+    // ── Contas ML conectadas ──
     const { rows: accs } = await db.query(
       `SELECT id, shop_name, access_token FROM marketplace_accounts
        WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND access_token IS NOT NULL`,
       [uid]
     );
-    if (!accs.length) return res.json({ success: true, data: { accounts: [] } });
+    if (!accs.length) return res.json({ success: true, data: { accounts: [], month: monthCost } });
 
     const allAccData = await Promise.all(accs.map(async acc => {
       try {
-        // 1. Pega seller_id
+        // 1. seller_id
         const meRes = await axios.get('https://api.mercadolibre.com/users/me', {
           headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 8000
         });
         const sellerId = meRes.data.id;
 
-        // 2. Busca itens com fulfillment
+        // 2. Busca apenas itens Full (logistic_type=fulfillment) com paginação
         let itemIds = [];
         try {
+          // Tenta filtrar direto por fulfillment type para reduzir chamadas
           const srchRes = await axios.get(
-            `https://api.mercadolibre.com/users/${sellerId}/items/search?status=active&limit=50`,
-            { headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 8000 }
+            `https://api.mercadolibre.com/users/${sellerId}/items/search?status=active&limit=100`,
+            { headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 10000 }
           );
-          itemIds = (srchRes.data?.results || []).slice(0, 50);
+          itemIds = (srchRes.data?.results || []).slice(0, 100);
         } catch (_) {}
 
-        // 3. Busca detalhes em batch (até 20 por vez)
-        let items = [];
+        // 3. Busca detalhes em batch de 20
+        let allItemDetails = [];
         for (let i = 0; i < itemIds.length; i += 20) {
           const chunk = itemIds.slice(i, i + 20);
           try {
@@ -7359,66 +7377,78 @@ app.get('/api/fulfillment/stock', auth, async (req, res) => {
               `https://api.mercadolibre.com/items?ids=${chunk.join(',')}&attributes=id,title,price,available_quantity,shipping,inventory_id,thumbnail`,
               { headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 10000 }
             );
-            const batch = (bRes.data || []).map(x => x.body || x).filter(x => x?.id);
-            items = items.concat(batch);
+            // Batch retorna [{code:200, body:{...}}, ...]
+            const batch = (bRes.data || [])
+              .map(x => x.body || x)
+              .filter(x => x?.id && x?.shipping?.logistic_type === 'fulfillment');
+            allItemDetails = allItemDetails.concat(batch);
           } catch (_) {}
         }
 
-        // 4. Filtra itens com fulfillment e busca estoque
-        const fullItems = items.filter(it =>
-          it.shipping?.logistic_type === 'fulfillment' || it.inventory_id
-        );
+        // 4. Para itens Full sem inventory_id no batch, busca individualmente
+        const needIndividual = allItemDetails.filter(it => !it.inventory_id).slice(0, 20);
+        await Promise.all(needIndividual.map(async it => {
+          try {
+            const r = await axios.get(
+              `https://api.mercadolibre.com/items/${it.id}?attributes=id,inventory_id,shipping`,
+              { headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 6000 }
+            );
+            if (r.data?.inventory_id) it.inventory_id = r.data.inventory_id;
+          } catch (_) {}
+        }));
 
-        const stockData = await Promise.all(fullItems.map(async it => {
+        // 5. Busca estoque por inventory_id
+        const stockData = await Promise.all(allItemDetails.map(async it => {
           let stock = null;
-          const invId = it.inventory_id;
-          if (invId) {
+          if (it.inventory_id) {
             try {
               const sRes = await axios.get(
-                `https://api.mercadolibre.com/inventories/${invId}/stock/fulfillment`,
+                `https://api.mercadolibre.com/inventories/${it.inventory_id}/stock/fulfillment`,
                 { headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 6000 }
               );
-              stock = sRes.data;
+              const s = sRes.data;
+              stock = {
+                available:    s.available_quantity    ?? 0,
+                processing:   s.not_available_quantity ?? 0, // reservado/em processo
+                damaged:      s.damaged_quantity       ?? 0,
+                lost:         s.lost_quantity          ?? 0,
+                total:        (s.available_quantity ?? 0)
+                            + (s.not_available_quantity ?? 0)
+                            + (s.damaged_quantity ?? 0)
+                            + (s.lost_quantity ?? 0)
+              };
             } catch (_) {}
           }
+          // fallback: available_quantity do item quando não há inventory_id
+          if (!stock && it.available_quantity != null) {
+            stock = { available: it.available_quantity, processing: 0, damaged: 0, lost: 0, total: it.available_quantity };
+          }
           return {
-            id: it.id,
-            title: it.title,
-            price: it.price,
-            thumbnail: it.thumbnail,
-            inventory_id: invId,
-            available_quantity: it.available_quantity,
-            stock: stock ? {
-              available: stock.available_quantity ?? 0,
-              not_available: stock.not_available_quantity ?? 0,
-              damaged: stock.damaged_quantity ?? 0,
-              lost: stock.lost_quantity ?? 0,
-              total: (stock.available_quantity ?? 0) + (stock.not_available_quantity ?? 0)
-            } : null
+            id: it.id, title: it.title, price: it.price,
+            thumbnail: it.thumbnail, inventory_id: it.inventory_id,
+            stock
           };
         }));
 
-        // 5. Busca operações recentes (últimas entradas/saídas)
+        // 6. Operações recentes (inbound/outbound) — últimos 30 dias
         let operations = [];
         try {
           const opRes = await axios.post(
             'https://api.mercadolibre.com/stock/fulfillment/operations/search',
             {
               seller_id: sellerId,
-              date_from: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+              date_from: new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString(),
               date_to: new Date().toISOString(),
-              limit: 50
+              limit: 100
             },
-            { headers: { Authorization: `Bearer ${acc.access_token}`, 'Content-Type': 'application/json' }, timeout: 10000 }
+            { headers: { Authorization: `Bearer ${acc.access_token}`, 'Content-Type': 'application/json' }, timeout: 12000 }
           );
           operations = opRes.data?.results || opRes.data?.operations || [];
         } catch (_) {}
 
         return {
-          account_id: acc.id,
-          shop_name: acc.shop_name,
-          seller_id: sellerId,
-          items: stockData,
+          account_id: acc.id, shop_name: acc.shop_name, seller_id: sellerId,
+          items: stockData.filter(it => it.stock),
           operations: operations.slice(0, 100)
         };
       } catch (e) {
@@ -7426,7 +7456,7 @@ app.get('/api/fulfillment/stock', auth, async (req, res) => {
       }
     }));
 
-    const result = { accounts: allAccData };
+    const result = { accounts: allAccData, month: monthCost };
     _fullCache.set(uid, { data: result, ts: Date.now() });
     res.json({ success: true, data: result });
   } catch(e) { res.status(500).json({ error: e.message }); }
