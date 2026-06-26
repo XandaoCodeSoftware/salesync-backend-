@@ -353,6 +353,48 @@ app.get('/api/accounts/ratings', auth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Debug: mostra resposta bruta das APIs de rating para diagnosticar
+app.get('/api/debug/ratings', auth, async (req, res) => {
+  const uid = req.user.id;
+  const { rows } = await db.query(
+    `SELECT id, platform, shop_name, access_token, platform_shop_id FROM marketplace_accounts
+     WHERE user_id=$1 AND is_active=true AND access_token IS NOT NULL`,
+    [uid]
+  );
+  const results = await Promise.all(rows.map(async acc => {
+    let raw = null, err = null;
+    try {
+      if (acc.platform === 'shopee') {
+        const pid = SHOPEE_PID(), key = SHOPEE_KEY();
+        const shopId = String(acc.platform_shop_id || '');
+        const token = acc.access_token;
+        const ts = Math.floor(Date.now() / 1000);
+        const path = '/api/v2/shop/get_shop_performance';
+        const sign = shopeeSign(pid, path, ts, key, token, shopId);
+        const r = await axios.get(`${SHOPEE_BASE}${path}`, {
+          params: { partner_id: pid, shop_id: shopId, access_token: token, timestamp: ts, sign },
+          timeout: 8000
+        });
+        raw = r.data;
+      } else if (acc.platform === 'magalu') {
+        const r = await axios.get('https://api.magalu.com/seller/v1/accounts/me', {
+          headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 8000
+        });
+        raw = r.data;
+      } else if (acc.platform === 'mercadolivre') {
+        const r = await axios.get('https://api.mercadolibre.com/users/me', {
+          headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 8000
+        });
+        raw = { seller_reputation: r.data?.seller_reputation };
+      }
+    } catch(e) {
+      err = e.response?.data || e.message;
+    }
+    return { id: acc.id, platform: acc.platform, shop_name: acc.shop_name, raw, err };
+  }));
+  res.json({ results });
+});
+
 // Desconecta conta específica por ID (evita deslogar todas as contas da plataforma)
 app.post('/api/accounts/by-id/:id/disconnect', auth, async (req, res) => {
   try {
@@ -7330,10 +7372,11 @@ app.get('/api/fulfillment/stock', auth, async (req, res) => {
     const mesIni = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-01`;
     const { rows: costRows } = await db.query(
       `SELECT
-         COUNT(*) FILTER (WHERE status != 'cancelled')   AS qty,
-         COALESCE(SUM(total_amount) FILTER (WHERE status != 'cancelled'), 0) AS revenue,
-         COALESCE(SUM(platform_fee) FILTER (WHERE status != 'cancelled'), 0) AS fees,
-         COALESCE(SUM(total_cost)   FILTER (WHERE status != 'cancelled'), 0) AS prod_cost
+         COUNT(*) FILTER (WHERE status != 'cancelled')         AS qty,
+         COALESCE(SUM(total_amount)  FILTER (WHERE status != 'cancelled'), 0) AS revenue,
+         COALESCE(SUM(platform_fee)  FILTER (WHERE status != 'cancelled'), 0) AS fees,
+         COALESCE(SUM(shipping_fee)  FILTER (WHERE status != 'cancelled'), 0) AS shipping,
+         COALESCE(SUM(tax_amount)    FILTER (WHERE status != 'cancelled'), 0) AS taxes
        FROM marketplace_orders
        WHERE user_id=$1 AND platform='mercadolivre' AND fulfillment_type='full'
          AND order_date >= $2`,
