@@ -372,35 +372,53 @@ app.get('/api/debug/ratings', auth, async (req, res) => {
     [uid]
   );
   const results = await Promise.all(rows.map(async acc => {
-    let raw = null, err = null;
-    try {
-      if (acc.platform === 'shopee') {
-        const pid = SHOPEE_PID(), key = SHOPEE_KEY();
-        const shopId = String(acc.platform_shop_id || '');
-        const token = acc.access_token;
-        const ts = Math.floor(Date.now() / 1000);
-        const path = '/api/v2/shop/get_shop_performance';
-        const sign = shopeeSign(pid, path, ts, key, token, shopId);
-        const r = await axios.get(`${SHOPEE_BASE}${path}`, {
-          params: { partner_id: pid, shop_id: shopId, access_token: token, timestamp: ts, sign },
-          timeout: 8000
-        });
-        raw = r.data;
-      } else if (acc.platform === 'magalu') {
-        const r = await axios.get('https://api.magalu.com/seller/v1/accounts/me', {
-          headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 8000
-        });
-        raw = r.data;
-      } else if (acc.platform === 'mercadolivre') {
+    const tests = [];
+    if (acc.platform === 'shopee') {
+      const pid = SHOPEE_PID(), key = SHOPEE_KEY();
+      const shopId = String(acc.platform_shop_id || '');
+      const token = acc.access_token;
+      for (const path of ['/api/v2/shop/get_shop_info', '/api/v2/shop/get_shop_profile', '/api/v2/shop/get_shop_performance']) {
+        let raw = null, err = null;
+        try {
+          const ts = Math.floor(Date.now() / 1000);
+          const sign = shopeeSign(pid, path, ts, key, token, shopId);
+          const r = await axios.get(`${SHOPEE_BASE}${path}`, {
+            params: { partner_id: pid, shop_id: shopId, access_token: token, timestamp: ts, sign },
+            timeout: 8000
+          });
+          raw = r.data;
+        } catch(e) { err = e.response?.data || e.message; }
+        tests.push({ path, raw, err });
+      }
+    } else if (acc.platform === 'magalu') {
+      for (const url of [
+        'https://api.magalu.com/seller/v1/performance',
+        'https://api.magalu.com/seller/v1/shop/performance',
+        'https://api.magalu.com/seller/v1/profile',
+        'https://api.magalu.com/seller/v1/me',
+        'https://api.magalu.com/seller/v1/accounts/me',
+        'https://api.magalu.com/v1/seller',
+      ]) {
+        let raw = null, err = null;
+        try {
+          const r = await axios.get(url, {
+            headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 5000
+          });
+          raw = r.data;
+        } catch(e) { err = e.response?.data || e.message; }
+        tests.push({ url, raw, err });
+      }
+    } else if (acc.platform === 'mercadolivre') {
+      let raw = null, err = null;
+      try {
         const r = await axios.get('https://api.mercadolibre.com/users/me', {
           headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 8000
         });
         raw = { seller_reputation: r.data?.seller_reputation };
-      }
-    } catch(e) {
-      err = e.response?.data || e.message;
+      } catch(e) { err = e.response?.data || e.message; }
+      tests.push({ url: '/users/me', raw, err });
     }
-    return { id: acc.id, platform: acc.platform, shop_name: acc.shop_name, raw, err };
+    return { id: acc.id, platform: acc.platform, shop_name: acc.shop_name, platform_shop_id: acc.platform_shop_id, tests };
   }));
   res.json({ results });
 });
@@ -7483,14 +7501,16 @@ app.get('/api/fulfillment/stock', auth, async (req, res) => {
           };
         }));
 
-        // 6. Operações recentes (inbound/outbound) — últimos 30 dias
+        // 6. Operações do mês atual (inbound/outbound)
+        const _opNow = new Date();
+        const _opMesIni = new Date(_opNow.getFullYear(), _opNow.getMonth(), 1).toISOString();
         let operations = [];
         try {
           const opRes = await axios.post(
             'https://api.mercadolibre.com/stock/fulfillment/operations/search',
             {
               seller_id: sellerId,
-              date_from: new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString(),
+              date_from: _opMesIni,
               date_to: new Date().toISOString(),
               limit: 100
             },
