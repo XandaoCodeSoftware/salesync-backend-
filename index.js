@@ -7630,6 +7630,9 @@ app.get('/api/questions', auth, async (req, res) => {
     // Ordena mais recentes primeiro
     allQuestions.sort((a,b) => new Date(b.date_created) - new Date(a.date_created));
 
+    // Já fez o poll real agora — limpa o aviso "fresh" do webhook pra essas contas
+    accounts.forEach(acc => { if (acc.seller_id) _mlFreshQuestions.delete(String(acc.seller_id)); });
+
     // Remove token do retorno (segurança)
     const safe = allQuestions.map(({ token: _t, ...q }) => q);
     res.json({ ok: true, questions: safe, total: safe.length });
@@ -7674,6 +7677,141 @@ app.post('/api/questions/:questionId/answer', auth, async (req, res) => {
     console.error('[Questions] Erro ao responder', e.response?.status, mlErr || e.message);
     res.status(e.response?.status || 500).json({ ok: false, error: mlErr?.message || e.message });
   }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// v5.18 — DEBUG de perguntas: mostra exatamente o que cada conta ML retorna,
+// incluindo erros de token/refresh que antes eram só logados e silenciosamente puladas
+// ═══════════════════════════════════════════════════════════════
+app.get('/api/debug/questions', auth, async (req, res) => {
+  try {
+    const uid = req.user.id;
+    const { rows: accounts } = await db.query(
+      `SELECT id, shop_name, seller_id, access_token, token_expires_at FROM marketplace_accounts
+       WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND access_token IS NOT NULL`,
+      [uid]
+    );
+    const results = [];
+    for (const acc of accounts) {
+      const entry = { account_id: acc.id, shop_name: acc.shop_name, seller_id_cached: acc.seller_id, token_expires_at: acc.token_expires_at };
+      let token = acc.access_token;
+      const expSoon = acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 5 * 60 * 1000);
+      entry.token_expiring_soon = !!expSoon;
+      if (expSoon) {
+        try {
+          const newToken = await refreshMLToken(acc);
+          entry.refresh_result = newToken ? 'ok' : 'falhou (retornou null)';
+          if (newToken) token = newToken;
+        } catch (e) { entry.refresh_result = 'erro: ' + e.message; }
+      }
+      let sellerId = acc.seller_id;
+      try {
+        const { data: me } = await axios.get('https://api.mercadolibre.com/users/me', { headers: { Authorization: `Bearer ${token}` }, timeout: 8000 });
+        sellerId = me.id;
+        entry.seller_id_live = sellerId;
+        entry.users_me_status = 'ok';
+      } catch (e) {
+        entry.users_me_status = 'erro: ' + (e.response?.status) + ' ' + JSON.stringify(e.response?.data || e.message);
+      }
+      try {
+        const { data } = await axios.get('https://api.mercadolibre.com/my/received_questions/search', {
+          headers: { Authorization: `Bearer ${token}` },
+          params: { seller_id: sellerId, status: 'UNANSWERED', limit: 50 },
+          timeout: 10000
+        });
+        entry.questions_unanswered_count = data.questions?.length ?? 0;
+        entry.questions_total_from_api = data.total ?? null;
+        entry.questions_raw_sample = (data.questions || []).slice(0, 3);
+      } catch (e) {
+        entry.questions_search_error = (e.response?.status) + ' ' + JSON.stringify(e.response?.data || e.message);
+      }
+      // Também busca SEM filtro de status, pra ver se a pergunta existe só não está marcada UNANSWERED
+      try {
+        const { data } = await axios.get('https://api.mercadolibre.com/my/received_questions/search', {
+          headers: { Authorization: `Bearer ${token}` },
+          params: { seller_id: sellerId, limit: 50 },
+          timeout: 10000
+        });
+        entry.questions_all_statuses_count = data.questions?.length ?? 0;
+        entry.questions_all_statuses_sample = (data.questions || []).slice(0, 5).map(q => ({ id: q.id, status: q.status, text: q.text, date_created: q.date_created }));
+      } catch (e) {
+        entry.questions_all_error = (e.response?.status) + ' ' + JSON.stringify(e.response?.data || e.message);
+      }
+      results.push(entry);
+    }
+    res.json({ ok: true, accounts: results });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// v5.18 — WEBHOOK Mercado Livre: recebe notificações em tempo real (topic=questions)
+// IMPORTANTE: precisa cadastrar esta URL em developers.mercadolibre.com.br
+// → Sua aplicação → Notificações → "URL de callback":
+//   https://api2.salesync.shop/webhooks/mercadolivre
+// Sem esse cadastro manual no painel da ML, nenhum webhook chega — só código não basta.
+// ═══════════════════════════════════════════════════════════════
+async function ensureMlWebhookLogTable() {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS ml_webhook_log (
+      id BIGSERIAL PRIMARY KEY,
+      topic TEXT,
+      resource TEXT,
+      ml_user_id TEXT,
+      application_id TEXT,
+      sent TIMESTAMP,
+      received_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      raw_json JSONB,
+      processed BOOLEAN NOT NULL DEFAULT false,
+      error TEXT
+    )`);
+  await db.query(`CREATE INDEX IF NOT EXISTS idx_ml_webhook_log_topic ON ml_webhook_log(topic, received_at DESC)`);
+}
+ensureMlWebhookLogTable().catch(e => console.error('[ml_webhook_log]', e.message));
+
+// Cache em memória de perguntas "recém-chegadas" via webhook — o frontend pode
+// consultar isso pra saber que tem pergunta nova sem esperar o próximo poll de 3min
+const _mlFreshQuestions = new Map(); // sellerId(string) → [{id, resource, receivedAt}]
+
+app.post('/webhooks/mercadolivre', async (req, res) => {
+  // ML exige resposta 200 rápida (ou desativa o webhook depois de falhas repetidas) —
+  // responde IMEDIATO e processa depois, sem bloquear.
+  res.status(200).send('OK');
+  try {
+    const { topic, resource, user_id, application_id, sent, attempts } = req.body || {};
+    console.log(`[ML Webhook] topic=${topic} resource=${resource} user_id=${user_id} attempts=${attempts}`);
+    await db.query(
+      `INSERT INTO ml_webhook_log (topic, resource, ml_user_id, application_id, sent, raw_json)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [topic || null, resource || null, user_id ? String(user_id) : null, application_id ? String(application_id) : null, sent ? new Date(sent) : null, JSON.stringify(req.body || {})]
+    );
+
+    if (topic === 'questions' && resource && user_id) {
+      const sellerKey = String(user_id);
+      const arr = _mlFreshQuestions.get(sellerKey) || [];
+      arr.push({ resource, receivedAt: Date.now() });
+      // mantém só os últimos 50 minutos de avisos
+      _mlFreshQuestions.set(sellerKey, arr.filter(x => Date.now() - x.receivedAt < 50 * 60 * 1000));
+    }
+  } catch (e) {
+    console.error('[ML Webhook] erro ao processar:', e.message);
+  }
+});
+
+// Frontend usa isso pra saber, sem esperar o poll de 3min, se chegou pergunta nova via webhook
+app.get('/api/questions/fresh-check', auth, async (req, res) => {
+  try {
+    const uid = req.user.id;
+    const { rows: accounts } = await db.query(
+      `SELECT seller_id FROM marketplace_accounts WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND seller_id IS NOT NULL`,
+      [uid]
+    );
+    let hasFresh = false;
+    for (const acc of accounts) {
+      const arr = _mlFreshQuestions.get(String(acc.seller_id)) || [];
+      if (arr.length) { hasFresh = true; break; }
+    }
+    res.json({ ok: true, fresh: hasFresh });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -7980,22 +8118,39 @@ app.get('/api/fulfillment/stock', auth, async (req, res) => {
       return res.json({ success: true, data: cached.data, _cache: true });
     }
 
-    // ── Custo do mês atual via DB (pedidos Full já sincronizados) ──
+    // ── Custo do mês atual via DB (pedidos Full já sincronizados), incluindo custo de produto e devoluções ──
     const now = new Date();
     const mesIni = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-01`;
-    const { rows: costRows } = await db.query(
+    const fullOrdersRaw = await ssLoadOrdersFromSql(uid, { platform: 'mercadolivre', date_from: mesIni, date_to: now.toISOString().slice(0,10), limit: 20000 });
+    const fullOrdersEnriched = (await enrichWithCosts(fullOrdersRaw, uid)).filter(o => o.fulfillment_type === 'full');
+    const fullPaid = fullOrdersEnriched.filter(o => o.status !== 'cancelled');
+    const monthCost = {
+      qty: fullPaid.length,
+      revenue: fullPaid.reduce((s, o) => s + parseFloat(o.total_amount || 0), 0),
+      fees: fullPaid.reduce((s, o) => s + parseFloat(o.platform_fee || 0), 0),
+      shipping: fullPaid.reduce((s, o) => s + parseFloat(o.shipping_fee || 0), 0),
+      taxes: fullPaid.reduce((s, o) => s + parseFloat(o.tax_amount || 0), 0),
+      product_cost: fullPaid.reduce((s, o) => s + parseFloat(o.total_cost || 0), 0),
+    };
+
+    // Devoluções de pedidos Full no mês (frete reverso, taxa de devolução, custo de produto perdido)
+    const { rows: returnRows } = await db.query(
       `SELECT
-         COUNT(*) FILTER (WHERE status != 'cancelled')         AS qty,
-         COALESCE(SUM(total_amount)  FILTER (WHERE status != 'cancelled'), 0) AS revenue,
-         COALESCE(SUM(platform_fee)  FILTER (WHERE status != 'cancelled'), 0) AS fees,
-         COALESCE(SUM(shipping_fee)  FILTER (WHERE status != 'cancelled'), 0) AS shipping,
-         COALESCE(SUM(tax_amount)    FILTER (WHERE status != 'cancelled'), 0) AS taxes
-       FROM marketplace_orders
-       WHERE user_id=$1 AND platform='mercadolivre' AND fulfillment_type='full'
-         AND order_date >= $2`,
+         COUNT(*) AS qty,
+         COALESCE(SUM(r.return_shipping_cost), 0) AS shipping_cost,
+         COALESCE(SUM(r.return_fee), 0)           AS fee_cost,
+         COALESCE(SUM(r.lost_product_cost), 0)    AS lost_product_cost,
+         COALESCE(SUM(r.refund_adjustment), 0)    AS refund_adjustment,
+         COALESCE(SUM(r.return_total_cost), 0)    AS total_cost
+       FROM marketplace_returns r
+       JOIN marketplace_orders o
+         ON o.user_id = r.user_id AND o.platform = r.platform AND o.platform_order_id = r.platform_order_id
+       WHERE r.user_id=$1 AND r.platform='mercadolivre' AND o.fulfillment_type='full'
+         AND r.order_date >= $2`,
       [uid, mesIni]
     );
-    const monthCost = costRows[0] || {};
+    monthCost.returns = returnRows[0] || { qty: 0, shipping_cost: 0, fee_cost: 0, lost_product_cost: 0, refund_adjustment: 0, total_cost: 0 };
+    monthCost.net_profit = monthCost.revenue - monthCost.fees - monthCost.shipping - monthCost.taxes - monthCost.product_cost - parseFloat(monthCost.returns.total_cost || 0);
 
     // ── Contas ML conectadas ──
     const { rows: accs } = await db.query(
@@ -8013,30 +8168,37 @@ app.get('/api/fulfillment/stock', auth, async (req, res) => {
         });
         const sellerId = meRes.data.id;
 
-        // 2. Busca apenas itens Full (logistic_type=fulfillment) com paginação
+        // 2. Busca TODOS os itens ATIVOS (paginado, sem limite de 100 — antes só pegava a 1ª página)
         let itemIds = [];
         try {
-          // Tenta filtrar direto por fulfillment type para reduzir chamadas
-          const srchRes = await axios.get(
-            `https://api.mercadolibre.com/users/${sellerId}/items/search?status=active&limit=100`,
-            { headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 10000 }
-          );
-          itemIds = (srchRes.data?.results || []).slice(0, 100);
+          let offset = 0;
+          const pageSize = 100;
+          for (let page = 0; page < 10; page++) { // até 1000 itens, suficiente pra qualquer catálogo Full
+            const srchRes = await axios.get(
+              `https://api.mercadolibre.com/users/${sellerId}/items/search?status=active&limit=${pageSize}&offset=${offset}`,
+              { headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 10000 }
+            );
+            const results = srchRes.data?.results || [];
+            itemIds = itemIds.concat(results);
+            const total = srchRes.data?.paging?.total || 0;
+            offset += pageSize;
+            if (results.length < pageSize || offset >= total) break;
+          }
         } catch (_) {}
 
-        // 3. Busca detalhes em batch de 20
+        // 3. Busca detalhes em batch de 20 — reforça status=active e logistic_type=fulfillment
         let allItemDetails = [];
         for (let i = 0; i < itemIds.length; i += 20) {
           const chunk = itemIds.slice(i, i + 20);
           try {
             const bRes = await axios.get(
-              `https://api.mercadolibre.com/items?ids=${chunk.join(',')}&attributes=id,title,price,available_quantity,shipping,inventory_id,thumbnail`,
+              `https://api.mercadolibre.com/items?ids=${chunk.join(',')}&attributes=id,title,price,available_quantity,shipping,inventory_id,thumbnail,status`,
               { headers: { Authorization: `Bearer ${acc.access_token}` }, timeout: 10000 }
             );
             // Batch retorna [{code:200, body:{...}}, ...]
             const batch = (bRes.data || [])
               .map(x => x.body || x)
-              .filter(x => x?.id && x?.shipping?.logistic_type === 'fulfillment');
+              .filter(x => x?.id && x?.status === 'active' && x?.shipping?.logistic_type === 'fulfillment');
             allItemDetails = allItemDetails.concat(batch);
           } catch (_) {}
         }
