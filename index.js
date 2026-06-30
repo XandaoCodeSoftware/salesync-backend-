@@ -8182,32 +8182,39 @@ app.get('/api/debug/ml-storage-cost', auth, async (req, res) => {
         entry.seller_id = sellerId;
       } catch (e) { entry.users_me_error = e.response?.data || e.message; }
 
-      // 2. Lista períodos de cobrança disponíveis (grupo ML = tarifas do marketplace, onde entra armazenamento)
+      // 2. Descobre os grupos de cobrança disponíveis pra essa conta (o group_id não é fixo "ML",
+      // precisa ser descoberto primeiro — por isso o erro "Missing required parameter <group>")
+      let groupId = null;
       try {
-        const { data } = await axios.get('https://api.mercadolibre.com/billing/integration/periods', {
-          headers: h, params: { group_id: 'ML', document_type: 'BILL', limit: 5 }, timeout: 10000
+        const { data } = await axios.get('https://api.mercadolibre.com/billing/integration/group', {
+          headers: h, params: { seller_id: sellerId, site_id: 'MLB' }, timeout: 10000
         });
-        entry.periods = data;
-      } catch (e) { entry.periods_error = e.response?.status + ' ' + JSON.stringify(e.response?.data || e.message); }
+        entry.groups = data;
+        groupId = data?.[0]?.group_id || data?.results?.[0]?.group_id || data?.group_id || null;
+      } catch (e) { entry.groups_error = e.response?.status + ' ' + JSON.stringify(e.response?.data || e.message); }
 
-      // 3. Se achou período, busca detalhe do documento mais recente (onde ficam as linhas de tarifa, incl. armazenagem)
-      const periodKey = entry.periods?.results?.[0]?.key || entry.periods?.[0]?.key;
-      if (periodKey) {
+      // 3. Lista períodos de cobrança do grupo encontrado
+      if (groupId) {
         try {
-          const { data } = await axios.get(`https://api.mercadolibre.com/billing/integration/periods/key/${periodKey}/group/ML`, {
-            headers: h, timeout: 10000
+          const { data } = await axios.get('https://api.mercadolibre.com/billing/integration/periods', {
+            headers: h, params: { group_id: groupId, document_type: 'BILL', limit: 5 }, timeout: 10000
           });
-          entry.period_detail = data;
-        } catch (e) { entry.period_detail_error = e.response?.status + ' ' + JSON.stringify(e.response?.data || e.message); }
-      }
+          entry.periods = data;
+        } catch (e) { entry.periods_error = e.response?.status + ' ' + JSON.stringify(e.response?.data || e.message); }
 
-      // 4. Tenta endpoint alternativo de charges/detalhe de fulfillment (caso exista pra essa conta)
-      try {
-        const { data } = await axios.get('https://api.mercadolibre.com/stock/fulfillment/billing', {
-          headers: h, params: { seller_id: sellerId }, timeout: 10000
-        });
-        entry.fulfillment_billing = data;
-      } catch (e) { entry.fulfillment_billing_error = e.response?.status + ' ' + JSON.stringify(e.response?.data || e.message); }
+        // 4. Detalhe do período mais recente (onde ficariam as linhas de tarifa, incl. armazenagem)
+        const periodKey = entry.periods?.results?.[0]?.key || entry.periods?.[0]?.key;
+        if (periodKey) {
+          try {
+            const { data } = await axios.get(`https://api.mercadolibre.com/billing/integration/periods/key/${periodKey}/group/${groupId}`, {
+              headers: h, timeout: 10000
+            });
+            entry.period_detail = data;
+          } catch (e) { entry.period_detail_error = e.response?.status + ' ' + JSON.stringify(e.response?.data || e.message); }
+        }
+      } else {
+        entry.note = 'Nenhum group_id encontrado — sem isso não dá pra consultar períodos de cobrança';
+      }
 
       results.push(entry);
     }
