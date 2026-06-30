@@ -2441,6 +2441,21 @@ async function ensureOrdersReturnsSchema() {
     )`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_ss_generated_reports_user ON ss_generated_reports(user_id, created_at DESC)`);
 
+    // v5.18 — Tarefas/Lembretes (Notion-like), exclusivo conta interna, compartilhado entre quem usa a mesma conta
+    await db.query(`CREATE TABLE IF NOT EXISTS ss_tasks (
+      id BIGSERIAL PRIMARY KEY,
+      user_id UUID NOT NULL,
+      title TEXT NOT NULL,
+      notes TEXT,
+      task_date DATE NOT NULL,
+      done BOOLEAN NOT NULL DEFAULT false,
+      priority TEXT NOT NULL DEFAULT 'normal',
+      created_by TEXT,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+    )`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_ss_tasks_user_date ON ss_tasks(user_id, task_date)`);
+
     // v5.17 — Custo manual por item de venda, exclusivo Code Software (sobrescreve o custo daquela venda específica, não mexe no cadastro)
     await db.query(`CREATE TABLE IF NOT EXISTS codesoftware_item_cost_overrides (
       id BIGSERIAL PRIMARY KEY,
@@ -7091,7 +7106,10 @@ app.get('/api/shopee/key-status', auth, (req, res) => {
 // ── TIKTOK SHOP INTEGRATION ─────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════
 
-const TIKTOK_BASE    = 'https://open-api.tiktokglobalshop.com';
+const TIKTOK_BASE      = 'https://open-api.tiktokglobalshop.com';
+// v5.18 — Troca/renovação de token usa domínio separado (auth.tiktok-shops.com), não o open-api.
+// Bater em open-api com /api/v2/token/get dava "Invalid path" porque esse endpoint não existe lá.
+const TIKTOK_AUTH_BASE = 'https://auth.tiktok-shops.com';
 const TIKTOK_APP_KEY = () => process.env.TIKTOK_APP_KEY || '';
 const TIKTOK_SECRET  = () => process.env.TIKTOK_APP_SECRET || '';
 
@@ -7195,7 +7213,7 @@ app.get('/callback/tiktok', async (req, res) => {
 
     console.log('[TikTok] Trocando code por token...');
     const tkRes = await axios.post(
-      `${TIKTOK_BASE}/api/v2/token/get`,
+      `${TIKTOK_AUTH_BASE}/api/v2/token/get`,
       tokenBody,
       { params: tokenParams, headers: { 'Content-Type': 'application/json' } }
     );
@@ -7250,7 +7268,7 @@ async function refreshTiktokToken(acc) {
     const ts     = Math.floor(Date.now() / 1000);
     const body   = { app_key: appKey, app_secret: secret, refresh_token: acc.refresh_token, grant_type: 'refresh_token' };
     const sign   = tiktokSign(secret, { app_key: appKey, timestamp: ts }, JSON.stringify(body));
-    const res    = await axios.post(`${TIKTOK_BASE}/api/v2/token/refresh`, body, { params: { app_key: appKey, timestamp: ts, sign } });
+    const res    = await axios.post(`${TIKTOK_AUTH_BASE}/api/v2/token/refresh`, body, { params: { app_key: appKey, timestamp: ts, sign } });
     const tk     = res.data?.data;
     if (!tk?.access_token) return null;
     const expiresAt = new Date(Date.now() + (tk.access_token_expire_in || 3600) * 1000);
@@ -7792,6 +7810,78 @@ app.get('/api/codesoftware/raw', auth, async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// v5.18 — TAREFAS / LEMBRETES (estilo Notion), exclusivo conta interna
+// Várias pessoas logadas na mesma conta veem/editam a mesma lista — "tempo real"
+// via polling do frontend (sem dependência de WebSocket, mais robusto no Render free tier)
+// ═══════════════════════════════════════════════════════════════
+function ssTasksGuard(req, res) {
+  if (req.user.email !== KARAKA_INTERNAL_EMAIL) {
+    res.status(403).json({ error: 'Acesso restrito' });
+    return false;
+  }
+  return true;
+}
+
+app.get('/api/tasks', auth, async (req, res) => {
+  if (!ssTasksGuard(req, res)) return;
+  try {
+    const { from, to } = req.query;
+    const params = [req.user.id];
+    let sql = `SELECT id, title, notes, task_date, done, priority, created_by, created_at, updated_at FROM ss_tasks WHERE user_id=$1`;
+    if (from) { params.push(from); sql += ` AND task_date >= $${params.length}`; }
+    if (to) { params.push(to); sql += ` AND task_date <= $${params.length}`; }
+    sql += ` ORDER BY task_date ASC, created_at ASC`;
+    const { rows } = await db.query(sql, params);
+    res.json({ success: true, data: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/tasks', auth, async (req, res) => {
+  if (!ssTasksGuard(req, res)) return;
+  try {
+    const { title, notes, task_date, priority } = req.body;
+    if (!title || !task_date) return res.status(400).json({ error: 'title e task_date são obrigatórios' });
+    const { rows } = await db.query(
+      `INSERT INTO ss_tasks (user_id, title, notes, task_date, priority, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [req.user.id, String(title).slice(0, 300), notes || null, task_date, priority || 'normal', req.user.email]
+    );
+    res.json({ success: true, data: rows[0] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/tasks/:id', auth, async (req, res) => {
+  if (!ssTasksGuard(req, res)) return;
+  try {
+    const { title, notes, task_date, priority, done } = req.body;
+    const fields = []; const params = [];
+    function setField(col, val) { params.push(val); fields.push(`${col}=$${params.length}`); }
+    if (title !== undefined) setField('title', String(title).slice(0, 300));
+    if (notes !== undefined) setField('notes', notes);
+    if (task_date !== undefined) setField('task_date', task_date);
+    if (priority !== undefined) setField('priority', priority);
+    if (done !== undefined) setField('done', !!done);
+    if (!fields.length) return res.status(400).json({ error: 'Nada para atualizar' });
+    setField('updated_at', new Date());
+    params.push(req.params.id, req.user.id);
+    const { rows } = await db.query(
+      `UPDATE ss_tasks SET ${fields.join(',')} WHERE id=$${params.length - 1} AND user_id=$${params.length} RETURNING *`,
+      params
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Tarefa não encontrada' });
+    res.json({ success: true, data: rows[0] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/tasks/:id', auth, async (req, res) => {
+  if (!ssTasksGuard(req, res)) return;
+  try {
+    await db.query(`DELETE FROM ss_tasks WHERE id=$1 AND user_id=$2`, [req.params.id, req.user.id]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Status da API Karaka
