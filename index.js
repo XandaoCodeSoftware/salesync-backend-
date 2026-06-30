@@ -8158,6 +8158,63 @@ app.delete('/api/full-envios/shipping-costs/:id', auth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// v5.18 — DEBUG: investiga se a API de Billing da ML expõe o custo de armazenamento Full
+// pra essa conta (tarifa diária por tamanho de unidade armazenada — não confunde com frete).
+// Antes de construir a feature "de verdade", testamos o que a API realmente devolve.
+app.get('/api/debug/ml-storage-cost', auth, async (req, res) => {
+  try {
+    const uid = req.user.id;
+    const { rows: accs } = await db.query(
+      `SELECT id, shop_name, platform_shop_id, access_token FROM marketplace_accounts
+       WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND access_token IS NOT NULL`,
+      [uid]
+    );
+    const results = [];
+    for (const acc of accs) {
+      const entry = { shop_name: acc.shop_name, account_id: acc.id };
+      const h = { Authorization: `Bearer ${acc.access_token}` };
+
+      // 1. seller_id atual
+      let sellerId = acc.platform_shop_id;
+      try {
+        const { data: me } = await axios.get('https://api.mercadolibre.com/users/me', { headers: h, timeout: 8000 });
+        sellerId = me.id;
+        entry.seller_id = sellerId;
+      } catch (e) { entry.users_me_error = e.response?.data || e.message; }
+
+      // 2. Lista períodos de cobrança disponíveis (grupo ML = tarifas do marketplace, onde entra armazenamento)
+      try {
+        const { data } = await axios.get('https://api.mercadolibre.com/billing/integration/periods', {
+          headers: h, params: { group_id: 'ML', document_type: 'BILL', limit: 5 }, timeout: 10000
+        });
+        entry.periods = data;
+      } catch (e) { entry.periods_error = e.response?.status + ' ' + JSON.stringify(e.response?.data || e.message); }
+
+      // 3. Se achou período, busca detalhe do documento mais recente (onde ficam as linhas de tarifa, incl. armazenagem)
+      const periodKey = entry.periods?.results?.[0]?.key || entry.periods?.[0]?.key;
+      if (periodKey) {
+        try {
+          const { data } = await axios.get(`https://api.mercadolibre.com/billing/integration/periods/key/${periodKey}/group/ML`, {
+            headers: h, timeout: 10000
+          });
+          entry.period_detail = data;
+        } catch (e) { entry.period_detail_error = e.response?.status + ' ' + JSON.stringify(e.response?.data || e.message); }
+      }
+
+      // 4. Tenta endpoint alternativo de charges/detalhe de fulfillment (caso exista pra essa conta)
+      try {
+        const { data } = await axios.get('https://api.mercadolibre.com/stock/fulfillment/billing', {
+          headers: h, params: { seller_id: sellerId }, timeout: 10000
+        });
+        entry.fulfillment_billing = data;
+      } catch (e) { entry.fulfillment_billing_error = e.response?.status + ' ' + JSON.stringify(e.response?.data || e.message); }
+
+      results.push(entry);
+    }
+    res.json({ ok: true, results });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
 app.get('/api/fulfillment/stock', auth, async (req, res) => {
   try {
     const uid = req.user.id;
