@@ -2428,6 +2428,19 @@ async function ensureOrdersReturnsSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_orders_user_date ON marketplace_orders(user_id, order_date DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_orders_platform ON marketplace_orders(user_id, platform)`);
 
+    // v5.17 — Histórico de relatórios XLSX gerados (pra baixar de novo sem regerar)
+    await db.query(`CREATE TABLE IF NOT EXISTS ss_generated_reports (
+      id BIGSERIAL PRIMARY KEY,
+      user_id UUID NOT NULL,
+      filename TEXT NOT NULL,
+      period_from DATE,
+      period_to DATE,
+      size_bytes INTEGER,
+      file_data BYTEA NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW()
+    )`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_ss_generated_reports_user ON ss_generated_reports(user_id, created_at DESC)`);
+
     // v5.17 — Custo manual por item de venda, exclusivo Code Software (sobrescreve o custo daquela venda específica, não mexe no cadastro)
     await db.query(`CREATE TABLE IF NOT EXISTS codesoftware_item_cost_overrides (
       id BIGSERIAL PRIMARY KEY,
@@ -3248,7 +3261,7 @@ const SS_REPORT_RULES = [
   { tipo: 'COMPUTADOR',     cat: 'ELETRONICOS', re: /\bcomputador(es)?\b|\bpc\b|\bcpu\b|desktop|\bgamer\b/i },
   { tipo: 'NOTEBOOK',       cat: 'ELETRONICOS', re: /notebook|laptop|ultrabook/i },
   { tipo: 'MONITOR',        cat: 'ELETRONICOS', re: /monitor/i },
-  { tipo: 'SMARTWATCH',     cat: 'ELETRONICOS', re: /smartwatch|rel[oó]gio/i },
+  { tipo: 'RELÓGIO',        cat: 'RELOGIOS',     re: /smartwatch|rel[oó]gio/i },
   { tipo: 'IMPRESSORA',     cat: 'ELETRONICOS', re: /impressora/i },
   { tipo: 'TERMINAL',       cat: 'ELETRONICOS', re: /terminal/i },
   { tipo: 'CABO/CONEXÃO',   cat: 'ELETRONICOS', re: /\bcabo\b|hdmi|usb|\bvga\b/i },
@@ -3287,10 +3300,10 @@ async function ssClassifyTitlesWithAI(titles) {
         model: 'gpt-4o-mini',
         response_format: { type: 'json_object' },
         messages: [
-          { role: 'system', content: `Você classifica produtos de e-commerce (eletrônicos, móveis, bobinas de impressão térmica, etc).
+          { role: 'system', content: `Você classifica produtos de e-commerce (eletrônicos, móveis, bobinas de impressão térmica, relógios/smartwatches etc).
 Para cada produto da lista, identifique:
-- "categoria": uma de ELETRONICOS, MOVELARIA, BOBINAS, OUTROS
-- "tipo": um rótulo curto normalizado em maiúsculas que agrupe produtos parecidos mesmo com nomes diferentes (ex: "Computador Dell i7", "PC Gamer", "CPU i3" devem virar tipo "COMPUTADOR"; "Mesa de Escritório", "Mesa Gamer" viram "MESA"; "Rack de TV" vira "RACK"; rolos/bobinas de impressão viram "BOBINA").
+- "categoria": uma de ELETRONICOS, MOVELARIA, BOBINAS, RELOGIOS, OUTROS
+- "tipo": um rótulo curto normalizado em maiúsculas que agrupe produtos parecidos mesmo com nomes diferentes (ex: "Computador Dell i7", "PC Gamer", "CPU i3" devem virar tipo "COMPUTADOR"; "Mesa de Escritório", "Mesa Gamer" viram "MESA"; "Rack de TV" vira "RACK"; rolos/bobinas de impressão viram "BOBINA"; qualquer relógio ou smartwatch vira categoria RELOGIOS com tipo "RELÓGIO").
 Responda APENAS um JSON no formato {"título exato do produto": {"tipo":"X","categoria":"Y"}, ...} para TODOS os produtos da lista, sem nenhum texto fora do JSON.` },
           { role: 'user', content: 'Classifique estes produtos:\n' + batch.map(t => `- ${t}`).join('\n') }
         ],
@@ -3314,20 +3327,21 @@ function ssFlattenOrderLines(orders) {
   const lines = [];
   for (const o of orders) {
     if (o.status === 'cancelled') continue;
+    const ftype = o.fulfillment_type === 'full' ? 'full' : 'normal';
     if (o.platform === 'codesoftware' && Array.isArray(o.itens) && o.itens.length) {
       for (const it of o.itens) {
         const title = it.produto?.nome_produto || o.item_title || 'Produto';
         const qty = parseFloat(it.quantidade || 1);
         const revenue = parseFloat(it.vr_total || 0);
         const cost = parseFloat(it.custo_total_venda || 0);
-        lines.push({ title, qty, revenue, cost, profit: revenue - cost, platform: o.platform, date: o.order_date, orderId: o.platform_order_id });
+        lines.push({ title, qty, revenue, cost, profit: revenue - cost, platform: o.platform, fulfillment: ftype, date: o.order_date, orderId: o.platform_order_id });
       }
     } else {
       const title = o.item_title || 'Produto';
       const qty = parseFloat(o.quantity || 1);
       const revenue = parseFloat(o.total_amount || 0);
       const cost = parseFloat(o.total_cost || 0);
-      lines.push({ title, qty, revenue, cost, profit: parseFloat(o.profit || 0), platform: o.platform, date: o.order_date, orderId: o.platform_order_id });
+      lines.push({ title, qty, revenue, cost, profit: parseFloat(o.profit || 0), platform: o.platform, fulfillment: ftype, date: o.order_date, orderId: o.platform_order_id });
     }
   }
   return lines;
@@ -3347,6 +3361,45 @@ function ssApplyClassification(lines, aiMap) {
   }
   return lines;
 }
+
+// v5.17 — Gera imagem de gráfico via QuickChart (sem dependências nativas, seguro pro deploy no Render)
+async function ssQuickChartImage(chartConfig, width = 480, height = 320) {
+  try {
+    const { data } = await axios.post('https://quickchart.io/chart', {
+      chart: chartConfig, width, height, backgroundColor: '#1a1a2e', format: 'png'
+    }, { responseType: 'arraybuffer', timeout: 15000 });
+    return Buffer.from(data);
+  } catch (e) {
+    console.error('[ssQuickChartImage]', e.message);
+    return null;
+  }
+}
+
+// v5.17 — Lista relatórios já gerados (sem o binário, só metadados) pra exibir no popup
+app.get('/api/reports/list', auth, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, filename, period_from, period_to, size_bytes, created_at
+       FROM ss_generated_reports WHERE user_id=$1 ORDER BY created_at DESC LIMIT 30`,
+      [req.user.id]
+    );
+    res.json({ success: true, data: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// v5.17 — Baixa um relatório já gerado, sem precisar rodar tudo de novo
+app.get('/api/reports/:id/download', auth, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT filename, file_data FROM ss_generated_reports WHERE id=$1 AND user_id=$2`,
+      [req.params.id, req.user.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Relatório não encontrado' });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${rows[0].filename}"`);
+    res.send(rows[0].file_data);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 app.get('/api/reports/detailed-xlsx', auth, async (req, res) => {
   if (!ExcelJS) return res.status(500).json({ error: 'Biblioteca de geração de Excel indisponível no servidor' });
@@ -3371,6 +3424,7 @@ app.get('/api/reports/detailed-xlsx', auth, async (req, res) => {
       ELETRONICOS: l => l.cat === 'ELETRONICOS',
       BOBINAS: l => l.cat === 'BOBINAS' && l.platform === 'codesoftware',
       MOVELARIA: l => l.cat === 'MOVELARIA',
+      RELOGIOS: l => l.cat === 'RELOGIOS',
     };
 
     const wb = new ExcelJS.Workbook();
@@ -3399,7 +3453,7 @@ app.get('/api/reports/detailed-xlsx', auth, async (req, res) => {
     styleHeader(resumoWs.getRow(1));
     resumoWs.addRow([]);
 
-    const catOrder = ['TUDO', 'ELETRONICOS', 'BOBINAS', 'MOVELARIA'];
+    const catOrder = ['TUDO', 'ELETRONICOS', 'BOBINAS', 'MOVELARIA', 'RELOGIOS'];
     const resumoStartRow = 2;
     catOrder.forEach((cat, i) => {
       const lines = allLines.filter(lineFilters[cat]);
@@ -3421,9 +3475,102 @@ app.get('/api/reports/detailed-xlsx', auth, async (req, res) => {
       ref: `C${resumoStartRow + 1}:C${resumoStartRow + catOrder.length}`,
       rules: [{ type: 'dataBar', cfvo: [{ type: 'min' }, { type: 'max' }], color: { argb: 'FF8B5CF6' } }]
     });
-    resumoWs.addRow([]);
-    resumoWs.addRow(['Período', `${dateFrom} até ${dateTo}`]);
-    resumoWs.addRow(['Gerado em', now.toLocaleString('pt-BR')]);
+
+    // ── ANÁLISE FULL x NORMAL ──
+    const fullLines = allLines.filter(l => l.fulfillment === 'full');
+    const normalLines = allLines.filter(l => l.fulfillment === 'normal');
+    const fullRev = fullLines.reduce((s, l) => s + l.revenue, 0);
+    const normalRev = normalLines.reduce((s, l) => s + l.revenue, 0);
+    const fullProfit = fullLines.reduce((s, l) => s + l.profit, 0);
+    const normalProfit = normalLines.reduce((s, l) => s + l.profit, 0);
+    const fullQty = fullLines.reduce((s, l) => s + l.qty, 0);
+    const normalQty = normalLines.reduce((s, l) => s + l.qty, 0);
+    const totalQtyFN = fullQty + normalQty || 1;
+
+    function topProductByProfit(lines) {
+      const byTitle = {};
+      for (const l of lines) {
+        if (!byTitle[l.title]) byTitle[l.title] = { title: l.title, profit: 0, revenue: 0 };
+        byTitle[l.title].profit += l.profit;
+        byTitle[l.title].revenue += l.revenue;
+      }
+      const arr = Object.values(byTitle).sort((a, b) => b.profit - a.profit);
+      return arr[0] || null;
+    }
+    const melhorFull = topProductByProfit(fullLines);
+    const melhorNormal = topProductByProfit(normalLines);
+    const faturamentoPorTitulo = allLines.reduce((m, l) => { (m[l.title] = m[l.title] || { title: l.title, revenue: 0 }).revenue += l.revenue; return m; }, {});
+    const melhorFaturamento = Object.values(faturamentoPorTitulo).sort((a, b) => b.revenue - a.revenue)[0] || null;
+
+    let r = resumoWs.lastRow.number + 2;
+    resumoWs.getCell(`A${r}`).value = '📦 ENVIO: FULL vs NORMAL';
+    resumoWs.getCell(`A${r}`).font = { bold: true, size: 13 };
+    r += 1;
+    const fnHeaderRow = resumoWs.getRow(r);
+    fnHeaderRow.values = ['Tipo de Envio', 'Qtd.', '% do total', 'Faturamento', 'Lucro', 'Margem'];
+    styleHeader(fnHeaderRow);
+    r += 1;
+    const fullRow = resumoWs.getRow(r);
+    fullRow.values = ['Full', fullQty, fullQty / totalQtyFN, fullRev, fullProfit, fullRev > 0 ? fullProfit / fullRev : 0];
+    fullRow.getCell(3).numFmt = '0.0%'; fullRow.getCell(4).numFmt = moneyFmt; fullRow.getCell(5).numFmt = moneyFmt; fullRow.getCell(6).numFmt = '0.0%';
+    fullRow.getCell(5).font = { color: { argb: fullProfit >= 0 ? 'FF10B981' : 'FFEF4444' } };
+    r += 1;
+    const normalRow = resumoWs.getRow(r);
+    normalRow.values = ['Normal', normalQty, normalQty / totalQtyFN, normalRev, normalProfit, normalRev > 0 ? normalProfit / normalRev : 0];
+    normalRow.getCell(3).numFmt = '0.0%'; normalRow.getCell(4).numFmt = moneyFmt; normalRow.getCell(5).numFmt = moneyFmt; normalRow.getCell(6).numFmt = '0.0%';
+    normalRow.getCell(5).font = { color: { argb: normalProfit >= 0 ? 'FF10B981' : 'FFEF4444' } };
+    r += 1;
+    resumoWs.addConditionalFormatting({ ref: `B${r - 2}:B${r - 1}`, rules: [{ type: 'dataBar', cfvo: [{ type: 'min' }, { type: 'max' }], color: { argb: 'FF38BDF8' } }] });
+
+    r += 1;
+    resumoWs.getCell(`A${r}`).value = '🏆 DESTAQUES DO PERÍODO';
+    resumoWs.getCell(`A${r}`).font = { bold: true, size: 13 };
+    r += 1;
+    resumoWs.getCell(`A${r}`).value = 'Produto que mais lucra no FULL:';
+    resumoWs.getCell(`B${r}`).value = melhorFull ? `${melhorFull.title} (lucro R$ ${melhorFull.profit.toFixed(2)})` : '—';
+    r += 1;
+    resumoWs.getCell(`A${r}`).value = 'Produto que mais lucra no NORMAL:';
+    resumoWs.getCell(`B${r}`).value = melhorNormal ? `${melhorNormal.title} (lucro ${melhorNormal.profit.toFixed(2)})` : '—';
+    r += 1;
+    resumoWs.getCell(`A${r}`).value = 'Produto que mais contribui pro faturamento:';
+    resumoWs.getCell(`B${r}`).value = melhorFaturamento ? `${melhorFaturamento.title} (faturou ${melhorFaturamento.revenue.toFixed(2)})` : '—';
+    resumoWs.getColumn('A').width = 34;
+    resumoWs.getColumn('B').width = 46;
+
+    r += 2;
+    resumoWs.getCell(`A${r}`).value = 'Período';
+    resumoWs.getCell(`B${r}`).value = `${dateFrom} até ${dateTo}`;
+    r += 1;
+    resumoWs.getCell(`A${r}`).value = 'Gerado em';
+    resumoWs.getCell(`B${r}`).value = now.toLocaleString('pt-BR');
+
+    // ── GRÁFICOS (imagem gerada via QuickChart, sem dependência nativa no servidor) ──
+    try {
+      const pieBuf = await ssQuickChartImage({
+        type: 'doughnut',
+        data: {
+          labels: ['Full', 'Normal'],
+          datasets: [{ data: [fullRev, normalRev], backgroundColor: ['#8b5cf6', '#38bdf8'] }]
+        },
+        options: { title: { display: true, text: '% Faturamento: Full x Normal', fontColor: '#fff' }, legend: { labels: { fontColor: '#fff' } } }
+      });
+      if (pieBuf) {
+        const imgId = wb.addImage({ buffer: pieBuf, extension: 'png' });
+        resumoWs.addImage(imgId, { tl: { col: 7, row: 1 }, ext: { width: 380, height: 260 } });
+      }
+      const barBuf = await ssQuickChartImage({
+        type: 'bar',
+        data: {
+          labels: catOrder.filter(c => c !== 'TUDO'),
+          datasets: [{ label: 'Faturamento (R$)', data: catOrder.filter(c => c !== 'TUDO').map(cat => allLines.filter(lineFilters[cat]).reduce((s, l) => s + l.revenue, 0)), backgroundColor: '#10b981' }]
+        },
+        options: { title: { display: true, text: 'Faturamento por Categoria', fontColor: '#fff' }, legend: { display: false }, scales: { yAxes: [{ ticks: { fontColor: '#fff' } }], xAxes: [{ ticks: { fontColor: '#fff' } }] } }
+      });
+      if (barBuf) {
+        const imgId2 = wb.addImage({ buffer: barBuf, extension: 'png' });
+        resumoWs.addImage(imgId2, { tl: { col: 7, row: 16 }, ext: { width: 380, height: 260 } });
+      }
+    } catch (e) { console.error('[reports charts]', e.message); }
 
     // ── ABAS POR CATEGORIA (agrupadas por tipo normalizado) ──
     for (const cat of catOrder) {
@@ -3497,10 +3644,21 @@ app.get('/api/reports/detailed-xlsx', auth, async (req, res) => {
       ws.getColumn(1).width = 38;
     }
 
+    const buffer = await wb.xlsx.writeBuffer();
+    const filename = `relatorio-detalhado-${dateTo}.xlsx`;
+
+    // v5.17 — Salva uma cópia no histórico pra não precisar gerar de novo depois
+    try {
+      await db.query(
+        `INSERT INTO ss_generated_reports (user_id, filename, period_from, period_to, size_bytes, file_data)
+         VALUES ($1,$2,$3,$4,$5,$6)`,
+        [uid, filename, dateFrom, dateTo, buffer.length, buffer]
+      );
+    } catch (e) { console.error('[reports history save]', e.message); }
+
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename="relatorio-detalhado-${dateTo}.xlsx"`);
-    await wb.xlsx.write(res);
-    res.end();
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(Buffer.from(buffer));
   } catch (e) {
     console.error('[reports/detailed-xlsx]', e.message);
     res.status(500).json({ error: e.message });
