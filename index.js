@@ -2468,6 +2468,21 @@ async function ensureOrdersReturnsSchema() {
       UNIQUE(user_id, platform_order_id, item_ref)
     )`);
 
+    // v5.18 — Custo operacional de envio pro armazém Full (não vem da API da ML — é o que o vendedor
+    // paga pra transportadora/logística levar o estoque até o armazém, lançado manualmente)
+    await db.query(`CREATE TABLE IF NOT EXISTS full_shipping_costs (
+      id BIGSERIAL PRIMARY KEY,
+      user_id UUID NOT NULL,
+      account_id UUID,
+      ship_date DATE NOT NULL,
+      qty_units INTEGER NOT NULL DEFAULT 0,
+      cost NUMERIC(14,2) NOT NULL DEFAULT 0,
+      notes TEXT,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+    )`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_full_shipping_costs_user_date ON full_shipping_costs(user_id, ship_date DESC)`);
+
     // Cache de imagens dos anúncios. Guarda a URL da imagem, não o arquivo binário.
     // Isso deixa a listagem rápida e evita chamar /items/{id} toda hora.
     await db.query(`CREATE TABLE IF NOT EXISTS marketplace_item_images (
@@ -7570,15 +7585,15 @@ app.get('/api/questions', auth, async (req, res) => {
         if (newToken) token = newToken;
       }
 
-      // Busca seller_id
-      let sellerId = acc.seller_id;
+      // Busca seller_id (coluna correta é platform_shop_id — "seller_id" não existe na tabela)
+      let sellerId = acc.platform_shop_id;
       if (!sellerId) {
         try {
           const { data: me } = await axios.get('https://api.mercadolibre.com/users/me', {
             headers: { Authorization: `Bearer ${token}` }
           });
           sellerId = me.id;
-          await db.query(`UPDATE marketplace_accounts SET seller_id=$1 WHERE id=$2`, [String(sellerId), acc.id]);
+          await db.query(`UPDATE marketplace_accounts SET platform_shop_id=$1 WHERE id=$2`, [String(sellerId), acc.id]);
         } catch(e) { continue; }
       }
 
@@ -7631,7 +7646,7 @@ app.get('/api/questions', auth, async (req, res) => {
     allQuestions.sort((a,b) => new Date(b.date_created) - new Date(a.date_created));
 
     // Já fez o poll real agora — limpa o aviso "fresh" do webhook pra essas contas
-    accounts.forEach(acc => { if (acc.seller_id) _mlFreshQuestions.delete(String(acc.seller_id)); });
+    accounts.forEach(acc => { if (acc.platform_shop_id) _mlFreshQuestions.delete(String(acc.platform_shop_id)); });
 
     // Remove token do retorno (segurança)
     const safe = allQuestions.map(({ token: _t, ...q }) => q);
@@ -7687,13 +7702,13 @@ app.get('/api/debug/questions', auth, async (req, res) => {
   try {
     const uid = req.user.id;
     const { rows: accounts } = await db.query(
-      `SELECT id, shop_name, seller_id, access_token, token_expires_at FROM marketplace_accounts
+      `SELECT id, shop_name, platform_shop_id, access_token, token_expires_at FROM marketplace_accounts
        WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND access_token IS NOT NULL`,
       [uid]
     );
     const results = [];
     for (const acc of accounts) {
-      const entry = { account_id: acc.id, shop_name: acc.shop_name, seller_id_cached: acc.seller_id, token_expires_at: acc.token_expires_at };
+      const entry = { account_id: acc.id, shop_name: acc.shop_name, seller_id_cached: acc.platform_shop_id, token_expires_at: acc.token_expires_at };
       let token = acc.access_token;
       const expSoon = acc.token_expires_at && new Date(acc.token_expires_at) <= new Date(Date.now() + 5 * 60 * 1000);
       entry.token_expiring_soon = !!expSoon;
@@ -7704,7 +7719,7 @@ app.get('/api/debug/questions', auth, async (req, res) => {
           if (newToken) token = newToken;
         } catch (e) { entry.refresh_result = 'erro: ' + e.message; }
       }
-      let sellerId = acc.seller_id;
+      let sellerId = acc.platform_shop_id;
       try {
         const { data: me } = await axios.get('https://api.mercadolibre.com/users/me', { headers: { Authorization: `Bearer ${token}` }, timeout: 8000 });
         sellerId = me.id;
@@ -7802,12 +7817,12 @@ app.get('/api/questions/fresh-check', auth, async (req, res) => {
   try {
     const uid = req.user.id;
     const { rows: accounts } = await db.query(
-      `SELECT seller_id FROM marketplace_accounts WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND seller_id IS NOT NULL`,
+      `SELECT platform_shop_id FROM marketplace_accounts WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true AND platform_shop_id IS NOT NULL`,
       [uid]
     );
     let hasFresh = false;
     for (const acc of accounts) {
-      const arr = _mlFreshQuestions.get(String(acc.seller_id)) || [];
+      const arr = _mlFreshQuestions.get(String(acc.platform_shop_id)) || [];
       if (arr.length) { hasFresh = true; break; }
     }
     res.json({ ok: true, fresh: hasFresh });
@@ -8109,6 +8124,40 @@ app.post('/api/codesoftware/sync', auth, async (req, res) => {
 const _fullCache = new Map(); // key: uid → {data, ts}
 const FULL_TTL = 10 * 60 * 1000; // 10 min
 
+// v5.18 — Custo operacional de envio pro armazém Full (lançamento manual)
+app.get('/api/full-envios/shipping-costs', auth, async (req, res) => {
+  try {
+    const { from, to } = req.query;
+    const params = [req.user.id];
+    let sql = `SELECT id, account_id, ship_date, qty_units, cost, notes FROM full_shipping_costs WHERE user_id=$1`;
+    if (from) { params.push(from); sql += ` AND ship_date >= $${params.length}`; }
+    if (to) { params.push(to); sql += ` AND ship_date <= $${params.length}`; }
+    sql += ` ORDER BY ship_date DESC, created_at DESC`;
+    const { rows } = await db.query(sql, params);
+    res.json({ success: true, data: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/full-envios/shipping-costs', auth, async (req, res) => {
+  try {
+    const { ship_date, qty_units, cost, notes, account_id } = req.body;
+    if (!ship_date || cost === undefined) return res.status(400).json({ error: 'ship_date e cost são obrigatórios' });
+    const { rows } = await db.query(
+      `INSERT INTO full_shipping_costs (user_id, account_id, ship_date, qty_units, cost, notes)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [req.user.id, account_id || null, ship_date, parseInt(qty_units || 0), parseFloat(cost), notes || null]
+    );
+    res.json({ success: true, data: rows[0] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/full-envios/shipping-costs/:id', auth, async (req, res) => {
+  try {
+    await db.query(`DELETE FROM full_shipping_costs WHERE id=$1 AND user_id=$2`, [req.params.id, req.user.id]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/fulfillment/stock', auth, async (req, res) => {
   try {
     const uid = req.user.id;
@@ -8173,6 +8222,20 @@ app.get('/api/fulfillment/stock', auth, async (req, res) => {
       [uid, mesIni]
     );
     monthCost.returns.detail = returnDetailRows;
+
+    // v5.18 — Custo operacional de envio pro armazém Full no mês (lançado manualmente)
+    const { rows: shippingCostRows } = await db.query(
+      `SELECT id, ship_date, qty_units, cost, notes FROM full_shipping_costs
+       WHERE user_id=$1 AND ship_date >= $2 ORDER BY ship_date DESC`,
+      [uid, mesIni]
+    );
+    monthCost.operational_shipping = {
+      qty: shippingCostRows.length,
+      total: shippingCostRows.reduce((s, r) => s + parseFloat(r.cost || 0), 0),
+      units: shippingCostRows.reduce((s, r) => s + parseInt(r.qty_units || 0), 0),
+      detail: shippingCostRows
+    };
+    monthCost.net_profit -= monthCost.operational_shipping.total;
 
     // ── Contas ML conectadas ──
     const { rows: accs } = await db.query(
