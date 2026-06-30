@@ -12,6 +12,8 @@ let PDFLib = null;
 try { PDFDocument = require('pdfkit'); } catch {}
 try { bwipjs = require('bwip-js'); } catch {}
 try { PDFLib = require('pdf-lib'); } catch {}
+let ExcelJS = null;
+try { ExcelJS = require('exceljs'); } catch {}
 require('dotenv').config();
 
 const app = express();
@@ -2545,7 +2547,7 @@ async function ssLoadOrdersFromSql(userId, opts={}) {
              total_amount, paid_amount, platform_fee, shipping_fee, manual_shipping_fee, shipping_fee_source, tax_amount, quantity, order_date, item_title, item_image, item_sku
              FROM marketplace_orders WHERE user_id=$1 AND order_date >= $2 AND order_date <= $3`;
   if (platform) { params.push(platform); sql += ` AND platform=$${params.length}`; }
-  sql += ` ORDER BY order_date DESC LIMIT 3000`;
+  sql += ` ORDER BY order_date DESC LIMIT ${parseInt(opts.limit) || 3000}`;
   const { rows } = await db.query(sql, params);
   return rows.map(r => ({
     ...(r.raw_json || {}),
@@ -3234,6 +3236,286 @@ app.get('/api/orders', auth, async (req, res) => {
     const enriched = await enrichWithCosts(orders, req.user.id);
     enriched.sort((a, b) => new Date(b.order_date) - new Date(a.order_date));
     res.json({ success: true, from_sql: true, data: enriched, total: enriched.length });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// v5.17 — RELATÓRIO DETALHADO XLSX
+// Classifica produtos por palavra-chave em categorias e tipos normalizados
+// (ex: "Computador Dell", "PC Gamer", "CPU i3" → todos viram tipo COMPUTADOR)
+// ═══════════════════════════════════════════════════════════════
+const SS_REPORT_RULES = [
+  { tipo: 'COMPUTADOR',     cat: 'ELETRONICOS', re: /\bcomputador(es)?\b|\bpc\b|\bcpu\b|desktop|\bgamer\b/i },
+  { tipo: 'NOTEBOOK',       cat: 'ELETRONICOS', re: /notebook|laptop|ultrabook/i },
+  { tipo: 'MONITOR',        cat: 'ELETRONICOS', re: /monitor/i },
+  { tipo: 'SMARTWATCH',     cat: 'ELETRONICOS', re: /smartwatch|rel[oó]gio/i },
+  { tipo: 'IMPRESSORA',     cat: 'ELETRONICOS', re: /impressora/i },
+  { tipo: 'TERMINAL',       cat: 'ELETRONICOS', re: /terminal/i },
+  { tipo: 'CABO/CONEXÃO',   cat: 'ELETRONICOS', re: /\bcabo\b|hdmi|usb|\bvga\b/i },
+  { tipo: 'MEMÓRIA/ARMAZ.', cat: 'ELETRONICOS', re: /mem[oó]ria|\bssd\b|\bhd\b|ddr\d|pendrive|cart[aã]o de mem/i },
+  { tipo: 'REDE',           cat: 'ELETRONICOS', re: /roteador|modem|\bswitch\b|access point|repetidor/i },
+  { tipo: 'ÁUDIO',          cat: 'ELETRONICOS', re: /fone de ouvido|caixa de som|speaker|soundbar/i },
+  { tipo: 'PERIFÉRICO',     cat: 'ELETRONICOS', re: /teclado|\bmouse\b|webcam|headset/i },
+  { tipo: 'CELULAR/TABLET', cat: 'ELETRONICOS', re: /celular|smartphone|\btablet\b/i },
+  { tipo: 'RACK',           cat: 'MOVELARIA',   re: /\brack\b/i },
+  { tipo: 'PAINEL',         cat: 'MOVELARIA',   re: /painel/i },
+  { tipo: 'MESA',           cat: 'MOVELARIA',   re: /\bmesa\b/i },
+  { tipo: 'CADEIRA',        cat: 'MOVELARIA',   re: /cadeira|poltrona/i },
+  { tipo: 'ESTANTE',        cat: 'MOVELARIA',   re: /estante|prateleira/i },
+  { tipo: 'ARMÁRIO',        cat: 'MOVELARIA',   re: /arm[aá]rio|guarda.?roupa|c[oô]moda/i },
+  { tipo: 'SOFÁ',           cat: 'MOVELARIA',   re: /sof[aá]|namoradeira/i },
+  { tipo: 'BOBINA',         cat: 'BOBINAS',     re: /bobina/i },
+];
+function ssClassifyProduct(title) {
+  const t = String(title || '');
+  for (const r of SS_REPORT_RULES) if (r.re.test(t)) return { tipo: r.tipo, cat: r.cat };
+  return { tipo: 'OUTROS', cat: 'OUTROS' };
+}
+
+// v5.17 — Classifica produtos usando a mesma IA do chatbot (gpt-4o-mini), com fallback nas regras de palavra-chave
+async function ssClassifyTitlesWithAI(titles) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  const map = {};
+  if (!apiKey || !titles.length) return map;
+  // Batches de até 150 títulos por chamada pra não estourar o contexto
+  const batches = [];
+  for (let i = 0; i < titles.length; i += 150) batches.push(titles.slice(i, i + 150));
+
+  for (const batch of batches) {
+    try {
+      const { data } = await axios.post('https://api.openai.com/v1/chat/completions', {
+        model: 'gpt-4o-mini',
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: `Você classifica produtos de e-commerce (eletrônicos, móveis, bobinas de impressão térmica, etc).
+Para cada produto da lista, identifique:
+- "categoria": uma de ELETRONICOS, MOVELARIA, BOBINAS, OUTROS
+- "tipo": um rótulo curto normalizado em maiúsculas que agrupe produtos parecidos mesmo com nomes diferentes (ex: "Computador Dell i7", "PC Gamer", "CPU i3" devem virar tipo "COMPUTADOR"; "Mesa de Escritório", "Mesa Gamer" viram "MESA"; "Rack de TV" vira "RACK"; rolos/bobinas de impressão viram "BOBINA").
+Responda APENAS um JSON no formato {"título exato do produto": {"tipo":"X","categoria":"Y"}, ...} para TODOS os produtos da lista, sem nenhum texto fora do JSON.` },
+          { role: 'user', content: 'Classifique estes produtos:\n' + batch.map(t => `- ${t}`).join('\n') }
+        ],
+        max_tokens: 4000,
+        temperature: 0
+      }, { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 30000 });
+
+      const content = data.choices?.[0]?.message?.content || '{}';
+      const parsed = JSON.parse(content);
+      Object.assign(map, parsed);
+    } catch (e) {
+      console.error('[ssClassifyTitlesWithAI]', e.response?.data?.error?.message || e.message);
+      // Segue sem essa parte — fallback por palavra-chave cobre o restante
+    }
+  }
+  return map;
+}
+
+// Achata pedidos em linhas de produto (Code Software tem múltiplos itens por venda) — sem classificar ainda
+function ssFlattenOrderLines(orders) {
+  const lines = [];
+  for (const o of orders) {
+    if (o.status === 'cancelled') continue;
+    if (o.platform === 'codesoftware' && Array.isArray(o.itens) && o.itens.length) {
+      for (const it of o.itens) {
+        const title = it.produto?.nome_produto || o.item_title || 'Produto';
+        const qty = parseFloat(it.quantidade || 1);
+        const revenue = parseFloat(it.vr_total || 0);
+        const cost = parseFloat(it.custo_total_venda || 0);
+        lines.push({ title, qty, revenue, cost, profit: revenue - cost, platform: o.platform, date: o.order_date, orderId: o.platform_order_id });
+      }
+    } else {
+      const title = o.item_title || 'Produto';
+      const qty = parseFloat(o.quantity || 1);
+      const revenue = parseFloat(o.total_amount || 0);
+      const cost = parseFloat(o.total_cost || 0);
+      lines.push({ title, qty, revenue, cost, profit: parseFloat(o.profit || 0), platform: o.platform, date: o.order_date, orderId: o.platform_order_id });
+    }
+  }
+  return lines;
+}
+
+// Aplica a classificação (IA primeiro, regra de palavra-chave como fallback) em cada linha
+function ssApplyClassification(lines, aiMap) {
+  for (const l of lines) {
+    const ai = aiMap[l.title];
+    if (ai && ai.tipo && ai.categoria) {
+      l.tipo = String(ai.tipo).toUpperCase();
+      l.cat = String(ai.categoria).toUpperCase();
+    } else {
+      const { tipo, cat } = ssClassifyProduct(l.title);
+      l.tipo = tipo; l.cat = cat;
+    }
+  }
+  return lines;
+}
+
+app.get('/api/reports/detailed-xlsx', auth, async (req, res) => {
+  if (!ExcelJS) return res.status(500).json({ error: 'Biblioteca de geração de Excel indisponível no servidor' });
+  try {
+    const uid = req.user.id;
+    const now = new Date();
+    const dateFrom = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+    const dateTo = now.toISOString().slice(0, 10);
+
+    const orders = await ssLoadOrdersFromSql(uid, { date_from: dateFrom, date_to: dateTo, limit: 50000 });
+    const enriched = await enrichWithCosts(orders, uid);
+    const allLines = ssFlattenOrderLines(enriched);
+
+    // Classifica usando a IA (mesma do chatbot) com fallback de palavra-chave
+    const uniqueTitles = [...new Set(allLines.map(l => l.title))];
+    const aiMap = await ssClassifyTitlesWithAI(uniqueTitles);
+    ssApplyClassification(allLines, aiMap);
+
+    // BOBINAS só vale para vendas Code Software, mesmo que outra plataforma também tivesse algo classificado como bobina
+    const lineFilters = {
+      TUDO: () => true,
+      ELETRONICOS: l => l.cat === 'ELETRONICOS',
+      BOBINAS: l => l.cat === 'BOBINAS' && l.platform === 'codesoftware',
+      MOVELARIA: l => l.cat === 'MOVELARIA',
+    };
+
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'SalesSync';
+    wb.created = now;
+
+    const moneyFmt = '"R$" #,##0.00';
+    const headerFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF6D28D9' } };
+    const headerFont = { color: { argb: 'FFFFFFFF' }, bold: true, size: 11 };
+
+    function styleHeader(row) {
+      row.eachCell(c => { c.fill = headerFill; c.font = headerFont; c.alignment = { vertical: 'middle', horizontal: 'center' }; });
+      row.height = 22;
+    }
+
+    // ── ABA RESUMO ──
+    const resumoWs = wb.addWorksheet('Resumo');
+    resumoWs.columns = [
+      { header: 'Categoria', key: 'cat', width: 22 },
+      { header: 'Qtd. Vendida', key: 'qty', width: 14 },
+      { header: 'Faturamento', key: 'rev', width: 16 },
+      { header: 'Custo', key: 'cost', width: 16 },
+      { header: 'Lucro', key: 'profit', width: 16 },
+      { header: 'Margem', key: 'marg', width: 12 },
+    ];
+    styleHeader(resumoWs.getRow(1));
+    resumoWs.addRow([]);
+
+    const catOrder = ['TUDO', 'ELETRONICOS', 'BOBINAS', 'MOVELARIA'];
+    const resumoStartRow = 2;
+    catOrder.forEach((cat, i) => {
+      const lines = allLines.filter(lineFilters[cat]);
+      const qty = lines.reduce((s, l) => s + l.qty, 0);
+      const rev = lines.reduce((s, l) => s + l.revenue, 0);
+      const cost = lines.reduce((s, l) => s + l.cost, 0);
+      const profit = rev - cost;
+      const marg = rev > 0 ? (profit / rev) : 0;
+      const row = resumoWs.addRow({ cat, qty, rev, cost, profit, marg });
+      row.getCell('rev').numFmt = moneyFmt;
+      row.getCell('cost').numFmt = moneyFmt;
+      row.getCell('profit').numFmt = moneyFmt;
+      row.getCell('marg').numFmt = '0.0%';
+      row.getCell('profit').font = { bold: true, color: { argb: profit >= 0 ? 'FF10B981' : 'FFEF4444' } };
+      if (cat === 'TUDO') row.eachCell(c => { c.font = { ...(c.font || {}), bold: true }; });
+    });
+    // Data bar visual no faturamento (efeito "gráfico" nativo do Excel)
+    resumoWs.addConditionalFormatting({
+      ref: `C${resumoStartRow + 1}:C${resumoStartRow + catOrder.length}`,
+      rules: [{ type: 'dataBar', cfvo: [{ type: 'min' }, { type: 'max' }], color: { argb: 'FF8B5CF6' } }]
+    });
+    resumoWs.addRow([]);
+    resumoWs.addRow(['Período', `${dateFrom} até ${dateTo}`]);
+    resumoWs.addRow(['Gerado em', now.toLocaleString('pt-BR')]);
+
+    // ── ABAS POR CATEGORIA (agrupadas por tipo normalizado) ──
+    for (const cat of catOrder) {
+      const lines = allLines.filter(lineFilters[cat]);
+      const ws = wb.addWorksheet(cat);
+      ws.columns = [
+        { header: 'Tipo', key: 'tipo', width: 20 },
+        { header: 'Qtd. Vendida', key: 'qty', width: 14 },
+        { header: 'Faturamento', key: 'rev', width: 16 },
+        { header: 'Custo', key: 'cost', width: 16 },
+        { header: 'Lucro', key: 'profit', width: 16 },
+        { header: 'Margem', key: 'marg', width: 12 },
+      ];
+      styleHeader(ws.getRow(1));
+
+      // Agrupa por tipo normalizado (COMPUTADOR, MOVEIS etc.)
+      const byTipo = {};
+      for (const l of lines) {
+        if (!byTipo[l.tipo]) byTipo[l.tipo] = { tipo: l.tipo, qty: 0, rev: 0, cost: 0 };
+        byTipo[l.tipo].qty += l.qty;
+        byTipo[l.tipo].rev += l.revenue;
+        byTipo[l.tipo].cost += l.cost;
+      }
+      const tiposArr = Object.values(byTipo).sort((a, b) => b.rev - a.rev);
+      const firstDataRow = ws.lastRow.number + 1;
+      tiposArr.forEach(t => {
+        const profit = t.rev - t.cost;
+        const marg = t.rev > 0 ? (profit / t.rev) : 0;
+        const row = ws.addRow({ tipo: t.tipo, qty: t.qty, rev: t.rev, cost: t.cost, profit, marg });
+        row.getCell('rev').numFmt = moneyFmt;
+        row.getCell('cost').numFmt = moneyFmt;
+        row.getCell('profit').numFmt = moneyFmt;
+        row.getCell('marg').numFmt = '0.0%';
+        row.getCell('profit').font = { color: { argb: profit >= 0 ? 'FF10B981' : 'FFEF4444' } };
+      });
+      const lastDataRow = ws.lastRow.number;
+      if (tiposArr.length) {
+        ws.addConditionalFormatting({
+          ref: `C${firstDataRow}:C${lastDataRow}`,
+          rules: [{ type: 'dataBar', cfvo: [{ type: 'min' }, { type: 'max' }], color: { argb: 'FF38BDF8' } }]
+        });
+      }
+      // Total
+      ws.addRow([]);
+      const totRow = ws.addRow({
+        tipo: 'TOTAL',
+        qty: lines.reduce((s, l) => s + l.qty, 0),
+        rev: lines.reduce((s, l) => s + l.revenue, 0),
+        cost: lines.reduce((s, l) => s + l.cost, 0),
+        profit: lines.reduce((s, l) => s + l.profit, 0),
+        marg: null,
+      });
+      totRow.eachCell(c => { c.font = { bold: true }; });
+      totRow.getCell('rev').numFmt = moneyFmt;
+      totRow.getCell('cost').numFmt = moneyFmt;
+      totRow.getCell('profit').numFmt = moneyFmt;
+
+      // Detalhe linha a linha (produto individual) abaixo do resumo por tipo
+      ws.addRow([]);
+      const detHeaderRow = ws.addRow(['Detalhe por produto']);
+      detHeaderRow.font = { bold: true, size: 12 };
+      const detCols = ws.addRow(['Produto', 'Tipo', 'Qtd', 'Faturamento', 'Custo', 'Lucro', 'Plataforma', 'Data']);
+      styleHeader(detCols);
+      lines.sort((a, b) => new Date(b.date) - new Date(a.date)).forEach(l => {
+        const row = ws.addRow([l.title, l.tipo, l.qty, l.revenue, l.cost, l.profit, l.platform, l.date ? new Date(l.date).toLocaleDateString('pt-BR') : '—']);
+        row.getCell(4).numFmt = moneyFmt;
+        row.getCell(5).numFmt = moneyFmt;
+        row.getCell(6).numFmt = moneyFmt;
+        row.getCell(6).font = { color: { argb: l.profit >= 0 ? 'FF10B981' : 'FFEF4444' } };
+      });
+      ws.getColumn(1).width = 38;
+    }
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="relatorio-detalhado-${dateTo}.xlsx"`);
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (e) {
+    console.error('[reports/detailed-xlsx]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// v5.17 — Lucro negativo: varre TODO o histórico de vendas do banco (não só o período carregado na tela)
+app.get('/api/orders/negative-profit', auth, async (req, res) => {
+  try {
+    const orders = await ssLoadOrdersFromSql(req.user.id, { date_from: '2015-01-01', date_to: new Date().toISOString().slice(0,10), limit: 50000 });
+    const enriched = await enrichWithCosts(orders, req.user.id);
+    const negativos = enriched
+      .filter(o => o.status !== 'cancelled' && parseFloat(o.profit || 0) < 0)
+      .sort((a, b) => parseFloat(a.profit || 0) - parseFloat(b.profit || 0));
+    res.json({ success: true, data: negativos, total: negativos.length });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
