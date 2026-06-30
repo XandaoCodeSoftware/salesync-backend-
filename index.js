@@ -4579,6 +4579,116 @@ app.get('/api/magalu/delivery/:id/debug', auth, async (req, res) => {
   }
 });
 
+// v5.18 — Debug: testa as fontes de custo Full sugeridas (shipment/costs, shipping_options/free,
+// account/movements filtrando FULL/CFF/STORAGE) pra um pedido Full real específico
+app.get('/api/debug/full-financial-cost/:orderId', auth, async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { rows } = await db.query(
+      `SELECT access_token, platform_shop_id FROM marketplace_accounts
+       WHERE user_id=$1 AND platform='mercadolivre' AND is_active=true LIMIT 1`,
+      [req.user.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'ML não conectado' });
+    const token = rows[0].access_token;
+    const sellerId = rows[0].platform_shop_id;
+    const h = { Authorization: `Bearer ${token}` };
+    const results = {};
+
+    // 1. Order completo — pega shipping_id, item, data, valor
+    let order = null;
+    try {
+      const { data } = await axios.get(`https://api.mercadolibre.com/orders/${orderId}`, { headers: h });
+      order = data;
+      results.order_summary = {
+        date_created: data.date_created,
+        shipping_id: data?.shipping?.id,
+        item_id: data?.order_items?.[0]?.item?.id,
+        item_price: data?.order_items?.[0]?.unit_price,
+        logistic_type_from_order: data?.shipping?.logistic_type
+      };
+    } catch (e) { results.order_error = e.response?.status + ' ' + JSON.stringify(e.response?.data || e.message); }
+
+    const shipId = order?.shipping?.id;
+    const itemId = order?.order_items?.[0]?.item?.id;
+
+    // 2. Item — confirma logistic_type=fulfillment e inventory_id, pega dimensões se existirem
+    if (itemId) {
+      try {
+        const { data } = await axios.get(`https://api.mercadolibre.com/items/${itemId}`, { headers: h });
+        results.item_logistics = {
+          logistic_type: data?.shipping?.logistic_type,
+          inventory_id: data?.inventory_id,
+          dimensions: data?.shipping?.dimensions || null,
+          attributes_dimensoes: (data?.attributes || []).filter(a => /PACKAGE|WEIGHT|LENGTH|WIDTH|HEIGHT/i.test(a.id || '')).map(a => ({ id: a.id, value: a.value_name }))
+        };
+      } catch (e) { results.item_error = e.response?.status + ' ' + JSON.stringify(e.response?.data || e.message); }
+    }
+
+    // 3. Shipment costs — o mais provável de ter o custo real do envio Full
+    if (shipId) {
+      try {
+        const { data } = await axios.get(`https://api.mercadolibre.com/shipments/${shipId}/costs`, { headers: h });
+        results.shipment_costs = data;
+      } catch (e) { results.shipment_costs_error = e.response?.status + ' ' + JSON.stringify(e.response?.data || e.message); }
+
+      try {
+        const { data } = await axios.get(`https://api.mercadolibre.com/shipments/${shipId}`, { headers: h });
+        results.shipment_full = { base_cost: data.base_cost, cost: data.cost, charges: data.charges, logistic_type: data.logistic_type, status: data.status };
+      } catch (e) { results.shipment_full_error = e.response?.status + ' ' + JSON.stringify(e.response?.data || e.message); }
+    }
+
+    // 4. Simulação de frete (shipping_options/free) — útil pra orçar Full ANTES da venda
+    if (itemId && order) {
+      try {
+        const { data } = await axios.get(`https://api.mercadolibre.com/users/${sellerId}/shipping_options/free`, {
+          headers: h,
+          params: {
+            item_price: order?.order_items?.[0]?.unit_price || 100,
+            listing_type_id: 'gold_pro',
+            mode: 'me2',
+            logistic_type: 'fulfillment',
+            free_shipping: true
+          }
+        });
+        results.shipping_options_simulation = data;
+      } catch (e) { results.shipping_options_error = e.response?.status + ' ' + JSON.stringify(e.response?.data || e.message); }
+    }
+
+    // 5. Movimentações financeiras — procura lançamentos tipo FULL/CFF/STORAGE/ARMAZENAGEM
+    // num range de +/- 5 dias ao redor da data do pedido
+    if (order?.date_created) {
+      const orderDate = new Date(order.date_created);
+      const beginDate = new Date(orderDate); beginDate.setDate(beginDate.getDate() - 5);
+      const endDate = new Date(orderDate); endDate.setDate(endDate.getDate() + 5);
+      try {
+        const { data } = await axios.get(`https://api.mercadolibre.com/users/${sellerId}/mercadopago/account/movements`, {
+          headers: h,
+          params: { search_type: 'collection', begin_date: beginDate.toISOString(), end_date: endDate.toISOString(), limit: 100 }
+        });
+        const all = data?.results || data?.movements || (Array.isArray(data) ? data : []);
+        results.movements_total_count = all.length;
+        // Filtra qualquer coisa relacionada a Full/armazenagem/cargo fulfillment
+        results.movements_full_related = all.filter(m => /full|cff|storage|armaz|fulfillment|cargo/i.test(JSON.stringify(m)));
+        // Filtra movimentos que citam esse pedido especificamente
+        results.movements_this_order = all.filter(m => JSON.stringify(m).includes(String(orderId)));
+        // Amostra geral pra ver os tipos que existem (sem filtro), só os primeiros 5
+        results.movements_sample_all_types = all.slice(0, 5);
+      } catch (e) { results.movements_error = e.response?.status + ' ' + JSON.stringify(e.response?.data || e.message); }
+    }
+
+    // 6. Endpoint alternativo de extrato financeiro (best-effort, pode não existir pra essa conta)
+    try {
+      const { data } = await axios.get(`https://api.mercadolibre.com/financial-statements`, {
+        headers: h, params: { seller_id: sellerId }
+      });
+      results.financial_statements = data;
+    } catch (e) { results.financial_statements_error = e.response?.status + ' ' + JSON.stringify(e.response?.data || e.message); }
+
+    res.json({ ok: true, results });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
 // ── Busca dados fiscais do comprador no ML (CPF/CNPJ para emissão de NF) ──
 // Debug: testa vários endpoints ML para achar custos de devolução
 app.get('/api/ml/return-costs-debug/:orderId', auth, async (req, res) => {
