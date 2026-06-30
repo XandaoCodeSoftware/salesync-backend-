@@ -2063,16 +2063,39 @@ async function enrichWithCosts(orders, userId) {
   const returnMap = {};
   for (const r of returnRows.rows) returnMap[`${normPlatform(r.platform)}:${String(r.platform_order_id||'')}`] = parseFloat(r.return_total_cost || 0);
 
+  // v5.17 — overrides de custo por item de venda (Code Software)
+  const { rows: csOverrideRows } = await db.query(
+    `SELECT platform_order_id, item_ref, custo FROM codesoftware_item_cost_overrides WHERE user_id=$1`,
+    [userId]
+  );
+  const csOverrideMap = {};
+  for (const r of csOverrideRows) csOverrideMap[`${r.platform_order_id}:${r.item_ref}`] = parseFloat(r.custo || 0);
+
   return orders.map(o => {
     // v5.15 — Code Software: custo vem direto dos campos Karaka (espalhados via raw_json spread)
     if (o.platform === 'codesoftware') {
       const total_amount = parseFloat(o.total_amount || 0);
-      const total_cost   = parseFloat(o.custo_total_venda || 0);
+      let total_cost = parseFloat(o.custo_total_venda || 0);
+      let itens = Array.isArray(o.itens) ? o.itens : null;
+      // Aplica overrides manuais por item e recalcula o custo total da venda
+      if (itens && itens.length) {
+        let hasOverride = false;
+        itens = itens.map(it => {
+          const ref = String(it.produto?.codigo_ref ?? '');
+          const key = `${o.platform_order_id}:${ref}`;
+          if (ref && csOverrideMap[key] !== undefined) {
+            hasOverride = true;
+            return { ...it, custo_total_venda: csOverrideMap[key], custo_overridden: true };
+          }
+          return it;
+        });
+        if (hasOverride) total_cost = itens.reduce((s, it) => s + parseFloat(it.custo_total_venda || 0), 0);
+      }
       const platform_fee = parseFloat(o.vr_desconto || 0);
       const shipping_fee = parseFloat(o.vr_frete || 0);
       const profit       = o.status === 'cancelled' ? 0 : total_amount - total_cost - platform_fee - shipping_fee;
       const margin       = total_amount > 0 ? (profit / total_amount * 100) : 0;
-      return { ...o, unit_cost: total_cost, total_cost, platform_fee, shipping_fee, tax_amount: 0, profit, margin, tax_pct: 0, fee_pct: null };
+      return { ...o, itens: itens || o.itens, unit_cost: total_cost, total_cost, platform_fee, shipping_fee, tax_amount: 0, profit, margin, tax_pct: 0, fee_pct: null };
     }
 
     const sku = normSku(o.item_sku);
@@ -2402,6 +2425,18 @@ async function ensureOrdersReturnsSchema() {
     await db.query(`ALTER TABLE marketplace_orders ADD COLUMN IF NOT EXISTS shipping_fee_source TEXT`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_orders_user_date ON marketplace_orders(user_id, order_date DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_orders_platform ON marketplace_orders(user_id, platform)`);
+
+    // v5.17 — Custo manual por item de venda, exclusivo Code Software (sobrescreve o custo daquela venda específica, não mexe no cadastro)
+    await db.query(`CREATE TABLE IF NOT EXISTS codesoftware_item_cost_overrides (
+      id BIGSERIAL PRIMARY KEY,
+      user_id UUID NOT NULL,
+      platform_order_id TEXT NOT NULL,
+      item_ref TEXT NOT NULL,
+      custo NUMERIC(14,2) NOT NULL DEFAULT 0,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      UNIQUE(user_id, platform_order_id, item_ref)
+    )`);
 
     // Cache de imagens dos anúncios. Guarda a URL da imagem, não o arquivo binário.
     // Isso deixa a listagem rápida e evita chamar /items/{id} toda hora.
@@ -7329,6 +7364,26 @@ app.get('/api/codesoftware/status', auth, async (req, res) => {
   } catch (e) {
     res.json({ ok: false, online: false, error: e.message });
   }
+});
+
+// v5.17 — Define custo manual de um item específico de uma venda Code Software
+// (não mexe no cadastro de produto nem em outras vendas, só nesse pedido)
+app.post('/api/codesoftware/item-cost', auth, async (req, res) => {
+  if (req.user.email !== KARAKA_INTERNAL_EMAIL)
+    return res.status(403).json({ error: 'Acesso restrito' });
+  try {
+    const { platform_order_id, item_ref, custo } = req.body;
+    if (!platform_order_id || !item_ref) return res.status(400).json({ error: 'platform_order_id e item_ref são obrigatórios' });
+    const valor = parseFloat(custo);
+    if (isNaN(valor) || valor < 0) return res.status(400).json({ error: 'Custo inválido' });
+    await db.query(
+      `INSERT INTO codesoftware_item_cost_overrides (user_id, platform_order_id, item_ref, custo, updated_at)
+       VALUES ($1,$2,$3,$4,NOW())
+       ON CONFLICT (user_id, platform_order_id, item_ref) DO UPDATE SET custo=EXCLUDED.custo, updated_at=NOW()`,
+      [req.user.id, String(platform_order_id), String(item_ref), valor]
+    );
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Sync de vendas Code Software
