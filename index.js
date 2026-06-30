@@ -8152,6 +8152,28 @@ app.get('/api/fulfillment/stock', auth, async (req, res) => {
     monthCost.returns = returnRows[0] || { qty: 0, shipping_cost: 0, fee_cost: 0, lost_product_cost: 0, refund_adjustment: 0, total_cost: 0 };
     monthCost.net_profit = monthCost.revenue - monthCost.fees - monthCost.shipping - monthCost.taxes - monthCost.product_cost - parseFloat(monthCost.returns.total_cost || 0);
 
+    // v5.18 — Detalhe pedido a pedido pra cada linha de custo poder expandir e mostrar tudo
+    monthCost.orders = fullPaid.map(o => ({
+      id: o.platform_order_id, title: o.item_title, sku: o.item_sku, shop_name: o.shop_name,
+      qty: o.quantity, revenue: parseFloat(o.total_amount || 0), fee: parseFloat(o.platform_fee || 0),
+      shipping: parseFloat(o.shipping_fee || 0), tax: parseFloat(o.tax_amount || 0),
+      cost: parseFloat(o.total_cost || 0), profit: parseFloat(o.profit || 0), date: o.order_date
+    })).sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    // Lista individual de devoluções Full do mês
+    const { rows: returnDetailRows } = await db.query(
+      `SELECT r.platform_order_id, r.item_title, r.item_sku, r.status, r.reason,
+              r.return_shipping_cost, r.return_fee, r.lost_product_cost, r.refund_adjustment, r.return_total_cost, r.order_date
+       FROM marketplace_returns r
+       JOIN marketplace_orders o
+         ON o.user_id = r.user_id AND o.platform = r.platform AND o.platform_order_id = r.platform_order_id
+       WHERE r.user_id=$1 AND r.platform='mercadolivre' AND o.fulfillment_type='full'
+         AND r.order_date >= $2
+       ORDER BY r.order_date DESC`,
+      [uid, mesIni]
+    );
+    monthCost.returns.detail = returnDetailRows;
+
     // ── Contas ML conectadas ──
     const { rows: accs } = await db.query(
       `SELECT id, shop_name, access_token FROM marketplace_accounts
@@ -8248,6 +8270,17 @@ app.get('/api/fulfillment/stock', auth, async (req, res) => {
           };
         }));
 
+        // v5.18 — Dedup por inventory_id: vários anúncios (variações/catálogo) podem
+        // compartilhar o MESMO lote físico no Full. Sem isso, o mesmo estoque era somado
+        // uma vez por anúncio, inflando o total exibido (ex: 690 quando o real era bem menor).
+        const seenInventory = new Set();
+        const dedupedStockData = stockData.filter(it => {
+          if (!it.inventory_id) return true; // sem inventory_id não dá pra saber se é duplicado, mantém
+          if (seenInventory.has(it.inventory_id)) return false;
+          seenInventory.add(it.inventory_id);
+          return true;
+        });
+
         // 6. Operações do mês atual (inbound/outbound)
         const _opNow = new Date();
         const _opMesIni = new Date(_opNow.getFullYear(), _opNow.getMonth(), 1).toISOString();
@@ -8268,7 +8301,7 @@ app.get('/api/fulfillment/stock', auth, async (req, res) => {
 
         return {
           account_id: acc.id, shop_name: acc.shop_name, seller_id: sellerId,
-          items: stockData.filter(it => it.stock),
+          items: dedupedStockData.filter(it => it.stock),
           operations: operations.slice(0, 100)
         };
       } catch (e) {
