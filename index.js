@@ -3369,7 +3369,8 @@ function ssFlattenOrderLines(orders) {
     } else {
       const title = o.item_title || 'Produto';
       const qty = parseFloat(o.quantity || 1);
-      const revenue = parseFloat(o.total_amount || 0);
+      // paid_amount = valor real pago pelo cliente (após descontos); total_amount = preço catálogo (fallback)
+      const revenue = parseFloat(o.paid_amount || o.total_amount || 0);
       const cost = parseFloat(o.total_cost || 0);
       lines.push({ title, qty, revenue, cost, profit: parseFloat(o.profit || 0), platform: o.platform, fulfillment: ftype, date: o.order_date, orderId: o.platform_order_id });
     }
