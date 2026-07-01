@@ -3436,12 +3436,38 @@ app.get('/api/reports/detailed-xlsx', auth, async (req, res) => {
   try {
     const uid = req.user.id;
     const now = new Date();
-    const dateFrom = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
-    const dateTo = now.toISOString().slice(0, 10);
+    const dateFrom = req.query.date_from || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+    const dateTo = req.query.date_to || now.toISOString().slice(0, 10);
+
+    // Sincroniza todas as plataformas antes de gerar para garantir dados atualizados
+    try { await ssSyncOrdersForUser(uid, null, 90); } catch(e) { console.warn('[xlsx sync]', e.message); }
 
     const orders = await ssLoadOrdersFromSql(uid, { date_from: dateFrom, date_to: dateTo, limit: 50000 });
     const enriched = await enrichWithCosts(orders, uid);
     const allLines = ssFlattenOrderLines(enriched);
+
+    // Coleta rendimentos extras de todos os meses no intervalo
+    let totalExtraIncome = 0;
+    const extraIncomeDetail = [];
+    {
+      let cur = new Date(dateFrom + 'T12:00:00');
+      const endMonth = new Date(dateTo + 'T12:00:00');
+      const seenMonths = new Set();
+      while (cur <= endMonth) {
+        const ym = `${cur.getFullYear()}-${String(cur.getMonth()+1).padStart(2,'0')}`;
+        if (!seenMonths.has(ym)) {
+          seenMonths.add(ym);
+          try {
+            const items = await ssGetAdditionalRevenues(uid, new Date(ym + '-01T12:00:00'));
+            for (const it of items) {
+              totalExtraIncome += it.amount;
+              extraIncomeDetail.push({ ...it, month: ym });
+            }
+          } catch(_) {}
+        }
+        cur = new Date(cur.getFullYear(), cur.getMonth() + 1, 1);
+      }
+    }
 
     // Classifica usando a IA (mesma do chatbot) com fallback de palavra-chave
     const uniqueTitles = [...new Set(allLines.map(l => l.title))];
@@ -3567,6 +3593,23 @@ app.get('/api/reports/detailed-xlsx', auth, async (req, res) => {
     resumoWs.getColumn('A').width = 34;
     resumoWs.getColumn('B').width = 46;
 
+    // Rendimentos extras no resumo
+    if (totalExtraIncome > 0) {
+      r += 1;
+      resumoWs.getCell(`A${r}`).value = '+ Rendimentos extras no período:';
+      resumoWs.getCell(`A${r}`).font = { bold: true };
+      resumoWs.getCell(`B${r}`).value = totalExtraIncome;
+      resumoWs.getCell(`B${r}`).numFmt = moneyFmt;
+      resumoWs.getCell(`B${r}`).font = { bold: true, color: { argb: 'FFFBBF24' } };
+      const allRevVendas = allLines.reduce((s, l) => s + l.revenue, 0);
+      r += 1;
+      resumoWs.getCell(`A${r}`).value = 'Faturamento total (vendas + extras):';
+      resumoWs.getCell(`A${r}`).font = { bold: true };
+      resumoWs.getCell(`B${r}`).value = allRevVendas + totalExtraIncome;
+      resumoWs.getCell(`B${r}`).numFmt = moneyFmt;
+      resumoWs.getCell(`B${r}`).font = { bold: true, color: { argb: 'FF10B981' } };
+    }
+
     r += 2;
     resumoWs.getCell(`A${r}`).value = 'Período';
     resumoWs.getCell(`B${r}`).value = `${dateFrom} até ${dateTo}`;
@@ -3674,8 +3717,85 @@ app.get('/api/reports/detailed-xlsx', auth, async (req, res) => {
       ws.getColumn(1).width = 38;
     }
 
+    // ── ABA POR PLATAFORMA ──
+    {
+      const platWs = wb.addWorksheet('Por Plataforma');
+      platWs.columns = [
+        { header: 'Plataforma', key: 'plat', width: 22 },
+        { header: 'Qtd. Vendida', key: 'qty', width: 14 },
+        { header: 'Faturamento Vendas', key: 'rev', width: 18 },
+        { header: 'Custo', key: 'cost', width: 16 },
+        { header: 'Lucro Vendas', key: 'profit', width: 16 },
+        { header: 'Margem', key: 'marg', width: 12 },
+      ];
+      styleHeader(platWs.getRow(1));
+
+      const byPlat = {};
+      for (const l of allLines) {
+        const p = l.platform || 'outros';
+        if (!byPlat[p]) byPlat[p] = { qty:0, rev:0, cost:0 };
+        byPlat[p].qty += l.qty; byPlat[p].rev += l.revenue; byPlat[p].cost += l.cost;
+      }
+      const platArr = Object.entries(byPlat).sort((a,b) => b[1].rev - a[1].rev);
+      let platTotRev = 0, platTotCost = 0, platTotQty = 0;
+      for (const [plat, d] of platArr) {
+        const profit = d.rev - d.cost;
+        const marg = d.rev > 0 ? profit/d.rev : 0;
+        const row = platWs.addRow({ plat, qty: d.qty, rev: d.rev, cost: d.cost, profit, marg });
+        row.getCell('rev').numFmt = moneyFmt; row.getCell('cost').numFmt = moneyFmt;
+        row.getCell('profit').numFmt = moneyFmt; row.getCell('marg').numFmt = '0.0%';
+        row.getCell('profit').font = { color: { argb: profit >= 0 ? 'FF10B981' : 'FFEF4444' } };
+        platTotRev += d.rev; platTotCost += d.cost; platTotQty += d.qty;
+      }
+      // linha de rendimentos extras
+      if (totalExtraIncome > 0) {
+        platWs.addRow([]);
+        const exRow = platWs.addRow({ plat: '+ Rendimentos Extras', qty: '', rev: totalExtraIncome, cost: 0, profit: totalExtraIncome, marg: '' });
+        exRow.getCell('rev').numFmt = moneyFmt; exRow.getCell('profit').numFmt = moneyFmt;
+        exRow.font = { italic: true, color: { argb: 'FFFBBF24' } };
+        platWs.addRow([]);
+      }
+      // total geral
+      const grandTot = platTotRev - platTotCost + totalExtraIncome;
+      platWs.addRow([]);
+      const totRow = platWs.addRow({ plat: 'TOTAL GERAL (vendas + extras)', qty: platTotQty, rev: platTotRev + totalExtraIncome, cost: platTotCost, profit: grandTot, marg: platTotRev+totalExtraIncome > 0 ? grandTot/(platTotRev+totalExtraIncome) : 0 });
+      totRow.eachCell(c => { c.font = { bold: true }; });
+      totRow.getCell('rev').numFmt = moneyFmt; totRow.getCell('cost').numFmt = moneyFmt;
+      totRow.getCell('profit').numFmt = moneyFmt; totRow.getCell('marg').numFmt = '0.0%';
+      totRow.getCell('profit').font = { bold: true, color: { argb: grandTot >= 0 ? 'FF10B981' : 'FFEF4444' } };
+
+      // Detalhe de rendimentos extras abaixo
+      if (extraIncomeDetail.length) {
+        platWs.addRow([]); platWs.addRow([]);
+        const exHdr = platWs.addRow(['RENDIMENTOS EXTRAS — detalhe']);
+        exHdr.font = { bold: true, size: 12 };
+        const exCols = platWs.addRow(['Nome', 'Mês', 'Valor', 'Recorrente']);
+        styleHeader(exCols);
+        for (const it of extraIncomeDetail) {
+          const row = platWs.addRow([it.name, it.month, it.amount, it.recurring ? 'Sim' : 'Não']);
+          row.getCell(3).numFmt = moneyFmt;
+        }
+      }
+
+      // Gráfico pizza por plataforma
+      try {
+        const platNames = platArr.map(([p]) => p);
+        const platRevs = platArr.map(([,d]) => d.rev);
+        const platColors = ['#8b5cf6','#10b981','#f59e0b','#ef4444','#38bdf8','#ec4899','#6366f1'];
+        const platPieBuf = await ssQuickChartImage({
+          type: 'doughnut',
+          data: { labels: platNames, datasets: [{ data: platRevs, backgroundColor: platColors.slice(0, platNames.length) }] },
+          options: { title: { display: true, text: 'Faturamento por Plataforma', fontColor: '#fff' }, legend: { labels: { fontColor: '#fff' } } }
+        });
+        if (platPieBuf) {
+          const imgId3 = wb.addImage({ buffer: platPieBuf, extension: 'png' });
+          platWs.addImage(imgId3, { tl: { col: 7, row: 1 }, ext: { width: 380, height: 260 } });
+        }
+      } catch(e) { console.error('[plat chart]', e.message); }
+    }
+
     const buffer = await wb.xlsx.writeBuffer();
-    const filename = `relatorio-detalhado-${dateTo}.xlsx`;
+    const filename = `relatorio-${dateFrom}-${dateTo}.xlsx`;
 
     // v5.17 — Salva uma cópia no histórico pra não precisar gerar de novo depois
     try {
